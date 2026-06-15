@@ -1,17 +1,52 @@
 use std::{
     collections::BTreeMap,
-    io::{BufRead, BufReader},
     net::IpAddr,
-    process::{Child, Command, Stdio},
-    sync::{Arc, Mutex, mpsc},
+    str::FromStr,
+    sync::mpsc,
     thread,
     time::Duration,
+};
+
+use tokio::runtime::Builder;
+use tokio_util::sync::CancellationToken;
+use zeroconf_tokio::prelude::*;
+use zeroconf_tokio::{
+    BrowserEvent, MdnsBrowser, MdnsBrowserAsync, ServiceDiscovery, ServiceRemoval, ServiceType,
 };
 
 use crate::{
     cli::Cli,
     service::{ServiceId, ServiceRecord},
 };
+
+/// DNS-SD service types browsed when the user does not pass `--service-type`.
+///
+/// `zeroconf` (and the underlying Avahi/Bonjour APIs it wraps) browses one
+/// concrete service type at a time; unlike `avahi-browse -a` there is no
+/// meta-query that enumerates every type on the link. We therefore sweep a
+/// curated set of the most common types in parallel.
+const DEFAULT_SERVICE_TYPES: &[&str] = &[
+    "_ssh._tcp",
+    "_sftp-ssh._tcp",
+    "_http._tcp",
+    "_https._tcp",
+    "_ipp._tcp",
+    "_ipps._tcp",
+    "_printer._tcp",
+    "_smb._tcp",
+    "_afpovertcp._tcp",
+    "_nfs._tcp",
+    "_webdav._tcp",
+    "_ftp._tcp",
+    "_workstation._tcp",
+    "_device-info._tcp",
+    "_rfb._tcp",
+    "_airplay._tcp",
+    "_raop._tcp",
+    "_googlecast._tcp",
+    "_homekit._tcp",
+    "_spotify-connect._tcp",
+];
 
 #[derive(Debug, Clone)]
 pub enum DiscoveryEvent {
@@ -22,7 +57,8 @@ pub enum DiscoveryEvent {
 
 pub struct DiscoveryHandle {
     receiver: Option<mpsc::Receiver<DiscoveryEvent>>,
-    child: Option<Arc<Mutex<Child>>>,
+    shutdown: CancellationToken,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl DiscoveryHandle {
@@ -35,116 +71,211 @@ impl DiscoveryHandle {
 
 impl Drop for DiscoveryHandle {
     fn drop(&mut self) {
-        if let Some(child) = &self.child
-            && let Ok(mut child) = child.lock()
-        {
-            let _ = child.kill();
+        self.shutdown.cancel();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
     }
 }
 
 pub fn start(cli: &Cli) -> DiscoveryHandle {
     let (tx, rx) = mpsc::channel();
+    let shutdown = CancellationToken::new();
 
     if cli.fake_discovery {
         spawn_fake(cli.domain.clone(), cli.service_type.clone(), tx);
         return DiscoveryHandle {
             receiver: Some(rx),
-            child: None,
+            shutdown,
+            worker: None,
         };
     }
 
-    match spawn_avahi(cli, tx.clone()) {
-        Ok(child) => DiscoveryHandle {
-            receiver: Some(rx),
-            child: Some(child),
-        },
-        Err(err) => {
-            let _ = tx.send(DiscoveryEvent::Status(format!(
-                "avahi-browse unavailable ({err}); using sample records"
-            )));
-            spawn_fake(cli.domain.clone(), cli.service_type.clone(), tx);
-            DiscoveryHandle {
-                receiver: Some(rx),
-                child: None,
-            }
-        }
+    let worker = spawn_zeroconf(cli, tx, shutdown.clone());
+    DiscoveryHandle {
+        receiver: Some(rx),
+        shutdown,
+        worker: Some(worker),
     }
 }
 
-fn spawn_avahi(cli: &Cli, tx: mpsc::Sender<DiscoveryEvent>) -> std::io::Result<Arc<Mutex<Child>>> {
-    let mut command = Command::new("avahi-browse");
-    command.arg("-p").arg("-r").arg("-d").arg(&cli.domain);
-    if let Some(service_type) = &cli.service_type {
-        command.arg(service_type);
-    } else {
-        command.arg("-a");
-    }
-    command.stdout(Stdio::piped()).stderr(Stdio::null());
-
-    let mut child = command.spawn()?;
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let child = Arc::new(Mutex::new(child));
+fn spawn_zeroconf(
+    cli: &Cli,
+    tx: mpsc::Sender<DiscoveryEvent>,
+    shutdown: CancellationToken,
+) -> thread::JoinHandle<()> {
+    let domain = cli.domain.clone();
+    let service_type_filter = cli.service_type.clone();
+    let service_types = resolve_service_types(service_type_filter.as_deref());
 
     thread::spawn(move || {
-        let _ = tx.send(DiscoveryEvent::Status(
-            "listening with avahi-browse".to_string(),
-        ));
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            if let Some(event) = parse_avahi_line(&line) {
-                let _ = tx.send(event);
+        let runtime = match Builder::new_multi_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let _ = tx.send(DiscoveryEvent::Status(format!(
+                    "failed to start mDNS runtime ({err}); using sample records"
+                )));
+                spawn_fake(domain, service_type_filter, tx);
+                return;
             }
-        }
-        let _ = tx.send(DiscoveryEvent::Status("avahi-browse stopped".to_string()));
-    });
+        };
 
-    Ok(child)
+        runtime.block_on(browse_loop(
+            service_types,
+            domain,
+            service_type_filter,
+            tx,
+            shutdown,
+        ));
+    })
 }
 
-fn parse_avahi_line(line: &str) -> Option<DiscoveryEvent> {
-    let parts = line.split(';').collect::<Vec<_>>();
-    match parts.first().copied() {
-        Some("=") if parts.len() >= 9 => {
-            let mut record = ServiceRecord::new(parts[3], parts[4], parts[5]);
-            record.hostname = non_empty(parts.get(6).copied());
-            record.address = parts.get(7).and_then(|value| value.parse::<IpAddr>().ok());
-            record.port = parts.get(8).and_then(|value| value.parse::<u16>().ok());
-            if let Some(txt) = parts.get(9) {
-                record.txt = parse_txt(txt);
+async fn browse_loop(
+    service_types: Vec<ServiceType>,
+    domain: String,
+    service_type_filter: Option<String>,
+    tx: mpsc::Sender<DiscoveryEvent>,
+    shutdown: CancellationToken,
+) {
+    let mut workers = Vec::new();
+    for service_type in service_types {
+        let label = format_service_type(&service_type);
+        match MdnsBrowserAsync::new(MdnsBrowser::new(service_type)) {
+            Ok(mut browser) => match browser.start().await {
+                Ok(()) => {
+                    let tx = tx.clone();
+                    let token = shutdown.clone();
+                    workers.push(tokio::spawn(browse_one(browser, tx, token)));
+                }
+                Err(err) => {
+                    let _ = tx.send(DiscoveryEvent::Status(format!(
+                        "could not browse {label} ({err})"
+                    )));
+                }
+            },
+            Err(err) => {
+                let _ = tx.send(DiscoveryEvent::Status(format!(
+                    "could not create browser for {label} ({err})"
+                )));
             }
-            Some(DiscoveryEvent::Upsert(record.with_instance_id()))
         }
-        Some("+") if parts.len() >= 6 => {
-            let record = ServiceRecord::new(parts[3], parts[4], parts[5]).with_instance_id();
-            Some(DiscoveryEvent::Upsert(record))
-        }
-        Some("-") if parts.len() >= 6 => {
-            let record = ServiceRecord::new(parts[3], parts[4], parts[5]).with_instance_id();
-            Some(DiscoveryEvent::Remove(record.id))
-        }
-        _ => None,
+    }
+
+    if workers.is_empty() {
+        let _ = tx.send(DiscoveryEvent::Status(
+            "mDNS discovery unavailable; using sample records".to_string(),
+        ));
+        spawn_fake(domain, service_type_filter, tx);
+        return;
+    }
+
+    let _ = tx.send(DiscoveryEvent::Status(format!(
+        "browsing {} service type(s) over mDNS",
+        workers.len()
+    )));
+
+    for worker in workers {
+        let _ = worker.await;
     }
 }
 
-fn non_empty(value: Option<&str>) -> Option<String> {
-    value
+async fn browse_one(
+    mut browser: MdnsBrowserAsync,
+    tx: mpsc::Sender<DiscoveryEvent>,
+    shutdown: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                let _ = browser.shutdown().await;
+                break;
+            }
+            event = browser.next() => {
+                match event {
+                    Some(Ok(event)) => {
+                        if tx.send(to_discovery_event(event)).is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(err)) => {
+                        let _ = tx.send(DiscoveryEvent::Status(format!("mDNS browse error: {err}")));
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+}
+
+fn to_discovery_event(event: BrowserEvent) -> DiscoveryEvent {
+    match event {
+        BrowserEvent::Add(discovery) => DiscoveryEvent::Upsert(record_from_discovery(&discovery)),
+        BrowserEvent::Remove(removal) => DiscoveryEvent::Remove(id_from_removal(&removal)),
+    }
+}
+
+fn record_from_discovery(discovery: &ServiceDiscovery) -> ServiceRecord {
+    let txt = discovery
+        .txt()
+        .as_ref()
+        .map(|txt| txt.iter().collect::<BTreeMap<String, String>>())
+        .unwrap_or_default();
+
+    upsert_record(
+        discovery.name(),
+        &format_service_type(discovery.service_type()),
+        discovery.domain(),
+        Some(discovery.host_name()),
+        Some(discovery.address()),
+        Some(*discovery.port()),
+        txt,
+    )
+}
+
+fn id_from_removal(removal: &ServiceRemoval) -> ServiceId {
+    ServiceRecord::new(removal.name(), removal.kind(), removal.domain())
+        .with_instance_id()
+        .id
+}
+
+/// Builds a resolved [`ServiceRecord`] from the individual fields reported by a
+/// browse event. Kept separate from the `zeroconf` types so it can be unit
+/// tested without standing up the mDNS stack.
+fn upsert_record(
+    name: &str,
+    service_type: &str,
+    domain: &str,
+    hostname: Option<&str>,
+    address: Option<&str>,
+    port: Option<u16>,
+    txt: BTreeMap<String, String>,
+) -> ServiceRecord {
+    let mut record = ServiceRecord::new(name, service_type, domain);
+    record.hostname = hostname
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
+        .map(ToString::to_string);
+    record.address = address.and_then(|value| value.parse::<IpAddr>().ok());
+    record.port = port.filter(|port| *port != 0);
+    record.txt = txt;
+    record.with_instance_id()
 }
 
-fn parse_txt(value: &str) -> BTreeMap<String, String> {
-    let mut txt = BTreeMap::new();
-    for item in value.split_whitespace() {
-        let item = item.trim_matches('"');
-        if let Some((key, value)) = item.split_once('=') {
-            txt.insert(key.to_string(), value.to_string());
-        } else if !item.is_empty() {
-            txt.insert(item.to_string(), String::new());
-        }
+fn format_service_type(service_type: &ServiceType) -> String {
+    format!("_{}._{}", service_type.name(), service_type.protocol())
+}
+
+fn resolve_service_types(filter: Option<&str>) -> Vec<ServiceType> {
+    if let Some(filter) = filter
+        && let Ok(service_type) = ServiceType::from_str(filter)
+    {
+        return vec![service_type];
     }
-    txt
+
+    DEFAULT_SERVICE_TYPES
+        .iter()
+        .filter_map(|kind| ServiceType::from_str(kind).ok())
+        .collect()
 }
 
 fn spawn_fake(
@@ -203,13 +334,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_resolved_avahi_line() {
-        let event = parse_avahi_line("=;eth0;IPv4;host;_ssh._tcp;local;host.local;192.168.1.2;22;")
-            .unwrap();
-        let DiscoveryEvent::Upsert(record) = event else {
-            panic!("expected upsert");
-        };
-        assert_eq!(record.name, "host");
-        assert_eq!(record.port, Some(22));
+    fn builds_resolved_record_from_browse_fields() {
+        let mut txt = BTreeMap::new();
+        txt.insert("path".to_string(), "/admin".to_string());
+
+        let record = upsert_record(
+            "nas",
+            "_http._tcp",
+            "local",
+            Some("nas.local"),
+            Some("192.168.1.30"),
+            Some(8080),
+            txt,
+        );
+
+        assert_eq!(record.name, "nas");
+        assert_eq!(record.hostname.as_deref(), Some("nas.local"));
+        assert_eq!(record.address, Some("192.168.1.30".parse().unwrap()));
+        assert_eq!(record.port, Some(8080));
+        assert_eq!(record.txt.get("path").map(String::as_str), Some("/admin"));
+        assert!(record.has_instance_data());
+    }
+
+    #[test]
+    fn blank_host_and_zero_port_become_unresolved() {
+        let record = upsert_record(
+            "pending",
+            "_ipp._tcp",
+            "local",
+            Some(""),
+            Some(""),
+            Some(0),
+            BTreeMap::new(),
+        );
+
+        assert_eq!(record.hostname, None);
+        assert_eq!(record.address, None);
+        assert_eq!(record.port, None);
+        assert!(!record.has_instance_data());
+    }
+
+    #[test]
+    fn explicit_filter_browses_single_type() {
+        let types = resolve_service_types(Some("_ssh._tcp"));
+        assert_eq!(types.len(), 1);
+        assert_eq!(format_service_type(&types[0]), "_ssh._tcp");
+    }
+
+    #[test]
+    fn missing_filter_falls_back_to_default_sweep() {
+        let types = resolve_service_types(None);
+        assert_eq!(types.len(), DEFAULT_SERVICE_TYPES.len());
     }
 }

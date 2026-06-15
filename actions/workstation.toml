@@ -1,0 +1,12 @@
+[metadata]
+name = "ssh-workstation"
+description = "SSH into a workstation"
+requirements = ["ssh"]
+
+[match.service_type]
+equals = "_workstation._tcp"
+
+[action]
+description = "SSH into the selected workstation"
+command = "ssh {hostname}"
+mode = "execute"

@@ -1,4 +1,16 @@
-Avahi-TUI: TUI browser for service discovery.
+
+# Avahi-TUI
+
+<div align="center">
+
+**TUI browser for service discovery and hackable fuzzy finder.**
+
+![GitHub Release](https://img.shields.io/github/v/release/abbyssoul/avahi-tui?display_name=tag&color=%23a6a)
+![docs.rs](https://img.shields.io/docsrs/avahi-tui)
+![GitHub branch check runs](https://img.shields.io/github/check-runs/abbyssoul/avahi-tui/main)
+![GitHub License](https://img.shields.io/github/license/abbyssoul/avahi-tui)
+
+</div>
 
 ## What's it for?
 
@@ -25,8 +37,11 @@ For development without a running Avahi setup:
 avahi-tui --fake-discovery
 ```
 
-The app uses `avahi-browse` when available. If `avahi-browse` is missing, it
-falls back to sample records so the UI remains usable.
+The app discovers services over mDNS/DNS-SD using the `zeroconf-tokio` crate
+(which talks to the system Avahi daemon on Linux), so no external CLI tools are
+required. When a `--service-type` is given, only that type is browsed; otherwise
+a curated set of common service types is swept in parallel. If mDNS discovery is
+unavailable, it falls back to sample records so the UI remains usable.
 
 ## UI
 

@@ -3,6 +3,13 @@ name = "avahi-tui"
 description = "Avahi TUI: lunch commands for discovered services"
 version = "0.1.0"
 edition = "2024"
+readme = "README.md"
+repository = "https://github.com/abbyssoul/avahi-tui"
+license-file = "LICENSE"
+keywords = ["avahi", "tui", "zeroconf", "dns-sd", "service discovery", "plumber"]
+categories = ["command-line-utilities", "network-programming"]
+
+
 
 [dependencies]
 clap = "4.6.1"
@@ -16,3 +23,4 @@ serde = "1.0.228"
 serde_derive = "1.0.228"
 tokio = "1.52.3"
 tokio-util = "0.7.18"
+zeroconf-tokio = "0.3.2"

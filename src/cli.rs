@@ -42,7 +42,7 @@ pub fn parse() -> Cli {
         .arg(
             Arg::new("fake-discovery")
                 .long("fake-discovery")
-                .help("Use built-in sample records instead of avahi-browse")
+                .help("Use built-in sample records instead of mDNS discovery")
                 .action(ArgAction::SetTrue),
         )
         .subcommand(
