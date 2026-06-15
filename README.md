@@ -10,6 +10,9 @@
 ![GitHub branch check runs](https://img.shields.io/github/check-runs/abbyssoul/avahi-tui/main)
 ![GitHub License](https://img.shields.io/github/license/abbyssoul/avahi-tui)
 
+<img width="1430" height="609" alt="avahi-tui-screenshot" src="https://github.com/user-attachments/assets/319acde6-a3d0-4cb1-aefc-12088bc67328" />
+
+
 </div>
 
 ## What's it for?
