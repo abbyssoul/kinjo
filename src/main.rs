@@ -16,11 +16,14 @@ use color_eyre::eyre::Result;
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let cli = cli::parse();
+    let cli = cli::parse()?;
     let matcher = config::load_matcher(&cli)?;
 
     if cli.command == CliCommand::ListCommands {
         print_commands(&matcher);
+        return Ok(());
+    } else if cli.command != CliCommand::Run {
+        print!("Unknown command. Use `list-commands` to see available commands.");
         return Ok(());
     }
 

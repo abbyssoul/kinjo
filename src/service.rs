@@ -24,15 +24,17 @@ pub enum GroupingMode {
     ServiceType,
     Port,
     Address,
+    Command,
 }
 
 impl GroupingMode {
-    pub const ALL: [GroupingMode; 5] = [
+    pub const ALL: [GroupingMode; 6] = [
         GroupingMode::LogicalService,
         GroupingMode::Host,
         GroupingMode::ServiceType,
         GroupingMode::Port,
         GroupingMode::Address,
+        GroupingMode::Command,
     ];
 
     pub fn label(self) -> &'static str {
@@ -42,6 +44,7 @@ impl GroupingMode {
             GroupingMode::ServiceType => "service type",
             GroupingMode::Port => "port",
             GroupingMode::Address => "address",
+            GroupingMode::Command => "command",
         }
     }
 }
@@ -225,7 +228,9 @@ pub fn group_records(records: &[ServiceRecord], mode: GroupingMode) -> Vec<Servi
 
 fn group_key(record: &ServiceRecord, mode: GroupingMode) -> String {
     match mode {
-        GroupingMode::LogicalService => format!(
+        // `Command` grouping is handled by a dedicated path in `App`; if it ever
+        // reaches `group_records` it behaves like logical-service grouping.
+        GroupingMode::LogicalService | GroupingMode::Command => format!(
             "{}|{}|{}|{}|{}",
             record.name,
             record.service_type,
@@ -254,7 +259,7 @@ fn group_key(record: &ServiceRecord, mode: GroupingMode) -> String {
 
 fn group_label(record: &ServiceRecord, mode: GroupingMode) -> String {
     match mode {
-        GroupingMode::LogicalService => record.display_name(),
+        GroupingMode::LogicalService | GroupingMode::Command => record.display_name(),
         GroupingMode::Host => record
             .hostname
             .clone()

@@ -31,6 +31,8 @@ impl Default for KeyBindings {
         bindings.set("browse", "type_filter", &["t"]);
         bindings.set("browse", "grouping", &["g"]);
         bindings.set("browse", "same_host", &["s"]);
+        bindings.set("browse", "details_down", &["d", "pagedown", "ctrl-d"]);
+        bindings.set("browse", "details_up", &["u", "pageup", "ctrl-u"]);
         bindings.set("browse", "help", &["?"]);
         bindings.set("search", "close", &["esc", "enter"]);
         bindings.set("search", "clear", &["ctrl-u"]);
@@ -124,6 +126,8 @@ impl KeySpec {
             "left" => KeyCode::Left,
             "right" => KeyCode::Right,
             "enter" => KeyCode::Enter,
+            "pageup" => KeyCode::PageUp,
+            "pagedown" => KeyCode::PageDown,
             "esc" | "escape" => KeyCode::Esc,
             "space" => KeyCode::Char(' '),
             "tab" => KeyCode::Tab,

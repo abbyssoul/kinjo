@@ -2,14 +2,17 @@ use std::collections::BTreeSet;
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table},
+    widgets::{
+        Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Table,
+    },
 };
 
 use crate::{
-    app::{App, AppMode},
+    app::{App, AppMode, CommandGroup},
     plumber::MatchResult,
     service::{GroupingMode, ServiceGroup, ServiceRecord},
 };
@@ -45,8 +48,13 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(chunks[2]);
-    render_services(frame, app, body[0]);
-    render_details(frame, app, body[1]);
+    if app.filter.grouping == GroupingMode::Command {
+        render_commands(frame, app, body[0]);
+        render_command_details(frame, app, body[1]);
+    } else {
+        render_services(frame, app, body[0]);
+        render_details(frame, app, body[1]);
+    }
 
     render_footer(frame, app, chunks[3]);
 
@@ -55,6 +63,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         AppMode::Grouping => render_grouping(frame, app),
         AppMode::ActionPicker => render_action_picker(frame, app),
         AppMode::InstancePicker => render_instance_picker(frame, app),
+        AppMode::ServicePicker => render_service_picker(frame, app),
         AppMode::Help => render_help(frame),
         AppMode::Browse | AppMode::Search => {}
     }
@@ -275,6 +284,7 @@ fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Table::new(rows, widths).column_spacing(1).block(block),
         area,
     );
+    render_scrollbar(frame, area, total, inner_h, offset);
 }
 
 fn service_row(group: &ServiceGroup, selected: bool, matches: usize) -> Row<'static> {
@@ -380,7 +390,7 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if !group.txt.is_empty() {
         rows.push(blank_row());
         rows.push(section_row("TXT records"));
-        for (key, value) in group.txt.iter().take(6) {
+        for (key, value) in group.txt.iter() {
             rows.push(Row::new(vec![
                 Cell::from(Span::styled(format!(" {key}"), Style::default().fg(WARN))),
                 Cell::from(Line::from(vec![
@@ -395,7 +405,7 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     rows.push(blank_row());
     rows.push(section_row(&format!("instances ({})", group.instances.len())));
     let last = group.instances.len().saturating_sub(1);
-    for (i, record) in group.instances.iter().take(8).enumerate() {
+    for (i, record) in group.instances.iter().enumerate() {
         let branch = if i == last { "└─" } else { "├─" };
         rows.push(Row::new(vec![
             Cell::from(Line::from(vec![
@@ -409,15 +419,6 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     Style::default().fg(FG_DIM),
                 ),
             ])),
-        ]));
-    }
-    if group.instances.len() > 8 {
-        rows.push(Row::new(vec![
-            Cell::from(""),
-            Cell::from(Span::styled(
-                format!("… {} more", group.instances.len() - 8),
-                Style::default().fg(FG_DIM),
-            )),
         ]));
     }
 
@@ -446,8 +447,23 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ]));
     }
 
+    // Clamp the requested scroll to what the content actually needs, then slice
+    // out the visible window. `details_max_scroll` is written back so the key
+    // handler can clamp the next scroll request against the real content height.
+    let total = rows.len();
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let max_scroll = total.saturating_sub(inner_h);
+    app.details_max_scroll.set(max_scroll);
+    app.details_viewport.set(inner_h);
+    let offset = app.details_scroll.min(max_scroll);
+    let visible: Vec<Row> = rows.into_iter().skip(offset).take(inner_h).collect();
+
     let widths = [Constraint::Length(8), Constraint::Fill(1)];
-    frame.render_widget(Table::new(rows, widths).column_spacing(1).block(block), area);
+    frame.render_widget(
+        Table::new(visible, widths).column_spacing(1).block(block),
+        area,
+    );
+    render_scrollbar(frame, area, total, inner_h, offset);
 }
 
 fn field_row(label: &str, value: &str, value_color: Color) -> Row<'static> {
@@ -505,13 +521,222 @@ fn action_row(action: &MatchResult) -> Row<'static> {
     ])
 }
 
+// ── command list (group-by-command view) ──────────────────────────────────
+fn render_commands(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let total = app.command_groups.len();
+    let inner_h = area.height.saturating_sub(2) as usize;
+
+    let title = if total == 0 {
+        Line::from(vec![Span::styled(
+            " commands ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )])
+    } else {
+        let first = scroll_offset(app.selected, total, inner_h) + 1;
+        let last = (first + inner_h - 1).min(total);
+        Line::from(vec![
+            Span::styled(
+                " commands ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{first}-{last}/{total} "),
+                Style::default().fg(FG_DIM),
+            ),
+        ])
+    };
+
+    let block = panel().title(title);
+
+    if total == 0 {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  no commands configured",
+                    Style::default().fg(FG_DIM),
+                )),
+            ])
+            .block(block),
+            area,
+        );
+        return;
+    }
+
+    let offset = scroll_offset(app.selected, total, inner_h);
+    let rows: Vec<Row> = app
+        .command_groups
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(inner_h)
+        .map(|(index, group)| command_row(group, index == app.selected))
+        .collect();
+
+    let widths = [
+        Constraint::Length(2),  // selection gutter + dot
+        Constraint::Fill(5),    // command name
+        Constraint::Length(11), // matching-services badge
+        Constraint::Fill(6),    // description
+    ];
+    frame.render_widget(
+        Table::new(rows, widths).column_spacing(1).block(block),
+        area,
+    );
+    render_scrollbar(frame, area, total, inner_h, offset);
+}
+
+fn command_row(group: &CommandGroup, selected: bool) -> Row<'static> {
+    let base = if selected {
+        Style::default().bg(BG_SEL)
+    } else {
+        Style::default()
+    };
+    let count = group.services.len();
+    let active = count > 0;
+
+    let gutter = if selected {
+        Span::styled("▌", Style::default().fg(ACCENT).bg(BG_SEL))
+    } else {
+        Span::styled(" ", base)
+    };
+
+    let name_style = if active {
+        base.fg(Color::White).add_modifier(Modifier::BOLD)
+    } else {
+        base.fg(FG_DIM)
+    };
+
+    let count_cell = if active {
+        Span::styled(
+            format!("★{count} svc"),
+            base.fg(STAR).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("·", base.fg(ACCENT_DIM))
+    };
+
+    let description = group
+        .command
+        .description
+        .as_deref()
+        .or(group.command.action.description.as_deref())
+        .unwrap_or("");
+
+    Row::new(vec![
+        Cell::from(Line::from(vec![
+            gutter,
+            Span::styled("●", base.fg(if active { STAR } else { ACCENT_DIM })),
+        ])),
+        Cell::from(Span::styled(group.command.name.clone(), name_style)),
+        Cell::from(count_cell),
+        Cell::from(Span::styled(description.to_string(), base.fg(FG_DIM))),
+    ])
+    .style(base)
+}
+
+fn render_command_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let block = panel().title(Line::from(Span::styled(
+        " command ",
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )));
+
+    let Some(group) = app.command_groups.get(app.selected) else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  no command selected",
+                Style::default().fg(FG_DIM),
+            )))
+            .block(block),
+            area,
+        );
+        return;
+    };
+
+    let command = &group.command;
+    let mut rows: Vec<Row> = vec![Row::new(vec![
+        Cell::from(Span::styled(" ★", Style::default().fg(STAR))),
+        Cell::from(Span::styled(
+            command.name.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ])];
+    if let Some(description) = command
+        .description
+        .as_deref()
+        .or(command.action.description.as_deref())
+    {
+        rows.push(field_row("desc", description, Color::White));
+    }
+    rows.push(field_row("mode", &command.action.mode.to_string(), FG_DIM));
+    rows.push(field_row("run", &command.action.command, GOOD));
+    if !command.requirements.is_empty() {
+        rows.push(field_row("needs", &command.requirements.join(", "), WARN));
+    }
+
+    rows.push(blank_row());
+    rows.push(section_row(&format!(
+        "matching services ({})",
+        group.services.len()
+    )));
+    if group.services.is_empty() {
+        rows.push(Row::new(vec![
+            Cell::from(""),
+            Cell::from(Span::styled(
+                "no discovered service matches this command",
+                Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
+            )),
+        ]));
+    } else {
+        let last = group.services.len().saturating_sub(1);
+        for (i, service) in group.services.iter().enumerate() {
+            let branch = if i == last { "└─" } else { "├─" };
+            let host = service.hostname.as_deref().unwrap_or("…resolving");
+            rows.push(Row::new(vec![
+                Cell::from(Line::from(vec![
+                    Span::styled(format!(" {branch} "), Style::default().fg(ACCENT_DIM)),
+                    Span::styled("●", Style::default().fg(category_color(&service.service_type))),
+                ])),
+                Cell::from(Line::from(vec![
+                    Span::styled(service.label.clone(), Style::default().fg(Color::White)),
+                    Span::styled(format!("  {host}"), Style::default().fg(FG_DIM)),
+                ])),
+            ]));
+        }
+        rows.push(Row::new(vec![
+            Cell::from(""),
+            Cell::from(Span::styled(
+                "press ⏎ to pick a service and run",
+                Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
+            )),
+        ]));
+    }
+
+    let total = rows.len();
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let max_scroll = total.saturating_sub(inner_h);
+    app.details_max_scroll.set(max_scroll);
+    app.details_viewport.set(inner_h);
+    let offset = app.details_scroll.min(max_scroll);
+    let visible: Vec<Row> = rows.into_iter().skip(offset).take(inner_h).collect();
+
+    let widths = [Constraint::Length(8), Constraint::Fill(1)];
+    frame.render_widget(
+        Table::new(visible, widths).column_spacing(1).block(block),
+        area,
+    );
+    render_scrollbar(frame, area, total, inner_h, offset);
+}
+
 // ── footer ───────────────────────────────────────────────────────────────
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let hints: &[(&str, &str)] = match app.mode {
         AppMode::Search => &[("type", "filter"), ("⏎/esc", "done"), ("^U", "clear")],
         AppMode::TypeFilter => &[("jk", "move"), ("space", "toggle"), ("esc", "close")],
         AppMode::Grouping => &[("jk", "move"), ("⏎", "select"), ("esc", "close")],
-        AppMode::ActionPicker | AppMode::InstancePicker => {
+        AppMode::ActionPicker | AppMode::InstancePicker | AppMode::ServicePicker => {
             &[("jk", "move"), ("⏎", "run"), ("esc", "cancel")]
         }
         AppMode::Help => &[("esc", "close")],
@@ -522,6 +747,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             ("t", "types"),
             ("g", "group"),
             ("s", "same-host"),
+            ("u/d", "scroll"),
             ("?", "help"),
             ("q", "quit"),
         ],
@@ -724,14 +950,57 @@ fn render_instance_picker(frame: &mut Frame<'_>, app: &App) {
     );
 }
 
+fn render_service_picker(frame: &mut Frame<'_>, app: &App) {
+    let (command_name, items): (String, Vec<ListItem>) = app
+        .command_groups
+        .get(app.selected)
+        .map(|group| {
+            let items = group
+                .services
+                .iter()
+                .enumerate()
+                .map(|(index, service)| {
+                    let selected = index == app.service_picker_index;
+                    let base = if selected {
+                        Style::default().bg(BG_SEL)
+                    } else {
+                        Style::default()
+                    };
+                    let host = service.hostname.as_deref().unwrap_or("…resolving");
+                    Line::from(vec![
+                        gutter_span(selected),
+                        Span::styled("● ", base.fg(category_color(&service.service_type))),
+                        Span::styled(service.label.clone(), base.fg(Color::White)),
+                        Span::styled(format!("  {host}"), base.fg(FG_DIM)),
+                    ])
+                    .style(base)
+                    .into()
+                })
+                .collect();
+            (group.command.name.clone(), items)
+        })
+        .unwrap_or_else(|| (String::new(), Vec::new()));
+
+    render_popup(
+        frame,
+        &format!(" run {command_name} on "),
+        "⏎ runs · esc closes",
+        List::new(items),
+        72,
+        55,
+    );
+}
+
 fn render_help(frame: &mut Frame<'_>) {
     let rows = [
         ("j / ↓", "move selection down"),
         ("k / ↑", "move selection up"),
+        ("d / ^d", "details down ½ page"),
+        ("u / ^u", "details up ½ page"),
         ("enter", "run matching action(s)"),
         ("/", "fuzzy text filter"),
         ("t", "service-type checklist"),
-        ("g", "change grouping"),
+        ("g", "change grouping (incl. by command)"),
         ("s", "filter to selected host"),
         ("esc", "close modal / clear search"),
         ("?", "toggle this help"),
@@ -886,6 +1155,35 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         ])
         .split(vertical[1]);
     horizontal[1]
+}
+
+/// Draw a vertical scrollbar on the right border of `area`. Renders nothing when
+/// the whole content already fits, so panels without overflow stay uncluttered.
+fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    content_len: usize,
+    viewport: usize,
+    position: usize,
+) {
+    if content_len <= viewport {
+        return;
+    }
+    let mut state = ScrollbarState::new(content_len)
+        .viewport_content_length(viewport)
+        .position(position);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .thumb_style(Style::default().fg(ACCENT))
+            .track_style(Style::default().fg(ACCENT_DIM)),
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
+        &mut state,
+    );
 }
 
 fn scroll_offset(selected: usize, total: usize, view_h: usize) -> usize {
