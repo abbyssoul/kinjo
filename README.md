@@ -63,6 +63,10 @@ Default keys follow Vim-style conventions:
 The service list supports fuzzy text search, service type filtering, and runtime
 grouping by logical service, host, service type, port, or address.
 
+Keybindings are fully customizable: all built-in UI commands can be rebound with
+a keybindings config file. See [docs/keybindings.md](docs/keybindings.md) for
+the full keybinding reference and examples.
+
 ## Configuration
 
 Command files follow the XDG Base Directory Specification. User command files are
@@ -101,6 +105,9 @@ Keybindings can be overridden at:
 ```sh
 $XDG_CONFIG_HOME/avahi-tui/keybindings.toml
 ```
+
+See [docs/keybindings.md](docs/keybindings.md) for examples and the complete
+list of bindable commands.
 
 ## Command Files
 
@@ -150,3 +157,6 @@ Multiple configured actions can match the same service. In that case, the TUI
 shows an action picker. If an action needs instance-specific fields such as
 `address` or `port` and the selected row contains multiple instances, the TUI
 asks which exact instance to use.
+
+For the full command file format, examples, and overlay rules, see
+[docs/actions.md](docs/actions.md).

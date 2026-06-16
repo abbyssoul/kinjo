@@ -1,0 +1,219 @@
+# Custom Keybindings
+
+All built-in UI commands can be rebound from a keybindings file. The file is
+loaded from:
+
+```sh
+$XDG_CONFIG_HOME/avahi-tui/keybindings.toml
+```
+
+If `XDG_CONFIG_HOME` is not set, the fallback path is:
+
+```sh
+~/.config/avahi-tui/keybindings.toml
+```
+
+The file overlays the default bindings. You only need to include commands you
+want to change.
+
+## Format
+
+Keybindings are grouped by UI mode. Each command is assigned an array of quoted
+key names:
+
+```toml
+[browse]
+down = ["down", "j", "n"]
+up = ["up", "k", "p"]
+invoke = ["enter", "o"]
+search = ["/"]
+help = ["?"]
+```
+
+Setting a command to an empty array disables that command's binding in that
+mode:
+
+```toml
+[browse]
+same_host = []
+```
+
+## Key Names
+
+Supported special keys:
+
+- `up`
+- `down`
+- `left`
+- `right`
+- `enter`
+- `pageup`
+- `pagedown`
+- `esc` or `escape`
+- `space`
+- `tab`
+- `backspace`
+
+Single-character keys are written as the character itself:
+
+```toml
+[browse]
+quit = ["q"]
+search = ["/"]
+help = ["?"]
+```
+
+Control keys use the `ctrl-` prefix:
+
+```toml
+[common]
+quit = ["ctrl-c"]
+
+[search]
+clear = ["ctrl-u"]
+```
+
+Key names are case-insensitive when parsed.
+
+## Bindable Commands
+
+### Browse Mode
+
+These commands apply in the main service browser:
+
+```toml
+[browse]
+quit = ["q"]
+up = ["up", "k"]
+down = ["down", "j"]
+invoke = ["enter"]
+search = ["/"]
+type_filter = ["t"]
+grouping = ["g"]
+same_host = ["s"]
+details_down = ["d", "pagedown", "ctrl-d"]
+details_up = ["u", "pageup", "ctrl-u"]
+help = ["?"]
+```
+
+### Search Mode
+
+These commands apply while editing the fuzzy search:
+
+```toml
+[search]
+close = ["esc", "enter"]
+clear = ["ctrl-u"]
+```
+
+Printable characters, backspace, and delete are handled by the search input
+itself; they are not configured here.
+
+### Type Filter Mode
+
+These commands apply in the service type checklist:
+
+```toml
+[type_filter]
+close = ["esc", "t"]
+up = ["up", "k"]
+down = ["down", "j"]
+toggle = ["space", "enter"]
+```
+
+### Grouping Mode
+
+These commands apply in the grouping selector:
+
+```toml
+[grouping]
+close = ["esc", "g"]
+up = ["up", "k"]
+down = ["down", "j"]
+select = ["enter"]
+```
+
+### Picker Mode
+
+These commands apply in action, instance, and service pickers:
+
+```toml
+[picker]
+close = ["esc"]
+up = ["up", "k"]
+down = ["down", "j"]
+select = ["enter"]
+```
+
+### Help Mode
+
+These commands apply in the help overlay:
+
+```toml
+[help]
+close = ["esc", "?", "q"]
+```
+
+### Common Commands
+
+Common commands are checked before mode-specific bindings:
+
+```toml
+[common]
+quit = ["ctrl-c"]
+```
+
+## Examples
+
+Use arrow keys only in the browser and disable Vim navigation there:
+
+```toml
+[browse]
+up = ["up"]
+down = ["down"]
+details_up = ["pageup"]
+details_down = ["pagedown"]
+```
+
+Use Emacs-style navigation for lists:
+
+```toml
+[browse]
+up = ["up", "ctrl-p"]
+down = ["down", "ctrl-n"]
+
+[type_filter]
+up = ["up", "ctrl-p"]
+down = ["down", "ctrl-n"]
+
+[grouping]
+up = ["up", "ctrl-p"]
+down = ["down", "ctrl-n"]
+
+[picker]
+up = ["up", "ctrl-p"]
+down = ["down", "ctrl-n"]
+```
+
+Move search from `/` to `f`:
+
+```toml
+[browse]
+search = ["f"]
+```
+
+Use `x` to close modal views:
+
+```toml
+[type_filter]
+close = ["esc", "x"]
+
+[grouping]
+close = ["esc", "x"]
+
+[picker]
+close = ["esc", "x"]
+
+[help]
+close = ["esc", "x"]
+```
