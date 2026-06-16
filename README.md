@@ -121,6 +121,29 @@ To browse real services on the default `local` domain:
 avahi-tui
 ```
 
+## How It Works
+
+`avahi-tui` has five moving parts:
+
+1. Discovery finds DNS-SD service records on the network. Each record can carry
+   fields such as service name, service type, domain, hostname, address, port,
+   and TXT values.
+2. Filtering and grouping organize those records in the UI. You can fuzzy-search
+   the visible services, limit by service type, and group results by logical
+   service, host, service type, port, address, or matching command.
+3. Actions decide what can be done with a selected service. Action command files
+   define match predicates such as "service type equals `_ssh._tcp`" or "TXT
+   field contains a URL".
+4. Command templates turn service fields into executable commands. For example,
+   `ssh {hostname}` uses the selected service hostname, while
+   `xdg-open http://{hostname}:{port}` builds a URL from the selected instance.
+5. Keybindings control the TUI. The defaults use Vim-style navigation, and every
+   built-in UI command can be rebound in `keybindings.toml`.
+
+The result is a small local service browser that behaves like a configurable
+launcher: discover services, narrow the list, choose a matching action, and run
+the command built from that service's fields.
+
 ## UI
 
 Default keys follow Vim-style conventions:
