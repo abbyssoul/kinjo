@@ -5,7 +5,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table},
 };
 
 use crate::{
@@ -247,7 +247,7 @@ fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 
     let offset = scroll_offset(app.selected, total, inner_h);
-    let items: Vec<ListItem> = app
+    let rows: Vec<Row> = app
         .visible_groups
         .iter()
         .enumerate()
@@ -256,14 +256,28 @@ fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|(index, group)| {
             let selected = index == app.selected;
             let matches = app.group_match_counts.get(index).copied().unwrap_or(0);
-            ListItem::new(service_row(group, selected, matches))
+            service_row(group, selected, matches)
         })
         .collect();
 
-    frame.render_widget(List::new(items).block(block), area);
+    // Column layout — Table handles per-cell truncation and alignment so that
+    // wide/unicode service names no longer shift the trailing columns.
+    let widths = [
+        Constraint::Length(2),  // selection gutter + dot
+        Constraint::Fill(5),    // name
+        Constraint::Length(14), // service type
+        Constraint::Length(4),  // instance count badge
+        Constraint::Length(4),  // matching-commands badge
+        Constraint::Fill(4),    // host
+    ];
+
+    frame.render_widget(
+        Table::new(rows, widths).column_spacing(1).block(block),
+        area,
+    );
 }
 
-fn service_row(group: &ServiceGroup, selected: bool, matches: usize) -> Line<'static> {
+fn service_row(group: &ServiceGroup, selected: bool, matches: usize) -> Row<'static> {
     let color = category_color(&group.service_type);
     let base = if selected {
         Style::default().bg(BG_SEL)
@@ -283,42 +297,38 @@ fn service_row(group: &ServiceGroup, selected: bool, matches: usize) -> Line<'st
         base.fg(Color::White)
     };
 
-    let mut spans = vec![
-        gutter,
-        Span::styled(" ● ", base.fg(color)),
-        Span::styled(fixed(&group.label, 26), name_style),
-        Span::styled(
-            format!("{:<16}", short_type(&group.service_type)),
-            base.fg(color),
-        ),
-    ];
-
     // instance count badge
     let n = group.instances.len();
-    if n > 1 {
-        spans.push(Span::styled(
-            format!("×{n:<3}"),
+    let count = if n > 1 {
+        Span::styled(
+            format!("×{n}"),
             base.fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ));
+        )
     } else {
-        spans.push(Span::styled("    ", base));
-    }
+        Span::styled("", base)
+    };
 
     // matching-commands badge
-    if matches > 0 {
-        spans.push(Span::styled(
-            format!("★{matches} "),
+    let matches_cell = if matches > 0 {
+        Span::styled(
+            format!("★{matches}"),
             base.fg(STAR).add_modifier(Modifier::BOLD),
-        ));
+        )
     } else {
-        spans.push(Span::styled("·  ", base.fg(ACCENT_DIM)));
-    }
+        Span::styled("·", base.fg(ACCENT_DIM))
+    };
 
-    // host hint
     let host = group.hostname.as_deref().unwrap_or("…resolving");
-    spans.push(Span::styled(host.to_string(), base.fg(FG_DIM)));
 
-    Line::from(spans).style(base)
+    Row::new(vec![
+        Cell::from(Line::from(vec![gutter, Span::styled("●", base.fg(color))])),
+        Cell::from(Span::styled(group.label.clone(), name_style)),
+        Cell::from(Span::styled(short_type(&group.service_type), base.fg(color))),
+        Cell::from(count),
+        Cell::from(matches_cell),
+        Cell::from(Span::styled(host.to_string(), base.fg(FG_DIM))),
+    ])
+    .style(base)
 }
 
 // ── details / preview ────────────────────────────────────────────────────
@@ -341,25 +351,24 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
 
     let color = category_color(&group.service_type);
-    let mut lines: Vec<Line> = Vec::new();
-
-    lines.push(Line::from(vec![
-        Span::styled(" ● ", Style::default().fg(color)),
-        Span::styled(
+    // header — name spans the value column, dot sits in the label column
+    let mut rows: Vec<Row> = vec![Row::new(vec![
+        Cell::from(Span::styled(" ●", Style::default().fg(color))),
+        Cell::from(Span::styled(
             group.label.clone(),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
-        ),
-    ]));
-    lines.push(field("type", &group.service_type, color));
-    lines.push(field("domain", &group.domain, FG_DIM));
-    lines.push(field(
+        )),
+    ])];
+    rows.push(field_row("type", &group.service_type, color));
+    rows.push(field_row("domain", &group.domain, FG_DIM));
+    rows.push(field_row(
         "host",
         group.hostname.as_deref().unwrap_or("…resolving"),
         FG_DIM,
     ));
-    lines.push(field(
+    rows.push(field_row(
         "port",
         &group
             .port
@@ -369,71 +378,105 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     ));
 
     if !group.txt.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(section("TXT records"));
+        rows.push(blank_row());
+        rows.push(section_row("TXT records"));
         for (key, value) in group.txt.iter().take(6) {
-            lines.push(Line::from(vec![
-                Span::styled(format!("   {key}"), Style::default().fg(WARN)),
-                Span::styled(" = ", Style::default().fg(ACCENT_DIM)),
-                Span::styled(value.clone(), Style::default().fg(Color::White)),
+            rows.push(Row::new(vec![
+                Cell::from(Span::styled(format!(" {key}"), Style::default().fg(WARN))),
+                Cell::from(Line::from(vec![
+                    Span::styled("= ", Style::default().fg(ACCENT_DIM)),
+                    Span::styled(value.clone(), Style::default().fg(Color::White)),
+                ])),
             ]));
         }
     }
 
     // instance tree
-    lines.push(Line::from(""));
-    lines.push(section(&format!("instances ({})", group.instances.len())));
+    rows.push(blank_row());
+    rows.push(section_row(&format!("instances ({})", group.instances.len())));
     let last = group.instances.len().saturating_sub(1);
     for (i, record) in group.instances.iter().take(8).enumerate() {
         let branch = if i == last { "└─" } else { "├─" };
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {branch} "), Style::default().fg(ACCENT_DIM)),
-            Span::styled(
-                "● ",
-                Style::default().fg(category_color(&record.service_type)),
-            ),
-            Span::styled(instance_endpoint(record), Style::default().fg(Color::White)),
-            Span::styled(
-                format!("  {}s", record.last_seen.elapsed().as_secs()),
-                Style::default().fg(FG_DIM),
-            ),
+        rows.push(Row::new(vec![
+            Cell::from(Line::from(vec![
+                Span::styled(format!(" {branch} "), Style::default().fg(ACCENT_DIM)),
+                Span::styled("●", Style::default().fg(category_color(&record.service_type))),
+            ])),
+            Cell::from(Line::from(vec![
+                Span::styled(instance_endpoint(record), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("  {}s", record.last_seen.elapsed().as_secs()),
+                    Style::default().fg(FG_DIM),
+                ),
+            ])),
         ]));
     }
     if group.instances.len() > 8 {
-        lines.push(Line::from(Span::styled(
-            format!("   … {} more", group.instances.len() - 8),
-            Style::default().fg(FG_DIM),
-        )));
+        rows.push(Row::new(vec![
+            Cell::from(""),
+            Cell::from(Span::styled(
+                format!("… {} more", group.instances.len() - 8),
+                Style::default().fg(FG_DIM),
+            )),
+        ]));
     }
 
     // matching actions
-    lines.push(Line::from(""));
+    rows.push(blank_row());
     let actions = app.matcher.matches_group(group);
-    lines.push(section(&format!("actions ({})", actions.len())));
+    rows.push(section_row(&format!("actions ({})", actions.len())));
     if actions.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "   no configured commands match this service",
-            Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
-        )));
+        rows.push(Row::new(vec![
+            Cell::from(""),
+            Cell::from(Span::styled(
+                "no configured commands match this service",
+                Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
+            )),
+        ]));
     } else {
         for action in &actions {
-            lines.push(action_line(action));
+            rows.push(action_row(action));
         }
-        lines.push(Line::from(Span::styled(
-            "   press ⏎ to run",
-            Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
-        )));
+        rows.push(Row::new(vec![
+            Cell::from(""),
+            Cell::from(Span::styled(
+                "press ⏎ to run",
+                Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
+            )),
+        ]));
     }
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(block),
-        area,
-    );
+    let widths = [Constraint::Length(8), Constraint::Fill(1)];
+    frame.render_widget(Table::new(rows, widths).column_spacing(1).block(block), area);
 }
 
-fn action_line(action: &MatchResult) -> Line<'static> {
+fn field_row(label: &str, value: &str, value_color: Color) -> Row<'static> {
+    Row::new(vec![
+        Cell::from(Span::styled(
+            format!("{label:>7} "),
+            Style::default().fg(FG_DIM),
+        )),
+        Cell::from(Span::styled(value.to_string(), Style::default().fg(value_color))),
+    ])
+}
+
+fn section_row(title: &str) -> Row<'static> {
+    Row::new(vec![
+        Cell::from(""),
+        Cell::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(ACCENT)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        )),
+    ])
+}
+
+fn blank_row() -> Row<'static> {
+    Row::new(vec![Cell::from(""), Cell::from("")])
+}
+
+fn action_row(action: &MatchResult) -> Row<'static> {
     let description = action
         .command
         .action
@@ -442,13 +485,10 @@ fn action_line(action: &MatchResult) -> Line<'static> {
         .or(action.command.description.as_deref())
         .unwrap_or("");
     let mode = action.command.action.mode.to_string();
-    let mut spans = vec![
-        Span::styled("   ★ ", Style::default().fg(STAR)),
-        Span::styled(
-            action.command.name.clone(),
-            Style::default().fg(GOOD).add_modifier(Modifier::BOLD),
-        ),
-    ];
+    let mut spans = vec![Span::styled(
+        action.command.name.clone(),
+        Style::default().fg(GOOD).add_modifier(Modifier::BOLD),
+    )];
     if !description.is_empty() {
         spans.push(Span::styled(
             format!(" — {description}"),
@@ -459,7 +499,10 @@ fn action_line(action: &MatchResult) -> Line<'static> {
         format!("  [{mode}]"),
         Style::default().fg(ACCENT_DIM),
     ));
-    Line::from(spans)
+    Row::new(vec![
+        Cell::from(Span::styled(" ★", Style::default().fg(STAR))),
+        Cell::from(Line::from(spans)),
+    ])
 }
 
 // ── footer ───────────────────────────────────────────────────────────────
@@ -756,22 +799,6 @@ fn panel() -> Block<'static> {
         .border_style(Style::default().fg(ACCENT_DIM))
 }
 
-fn section(title: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!(" {title} "),
-        Style::default()
-            .fg(ACCENT)
-            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-    ))
-}
-
-fn field(label: &str, value: &str, value_color: Color) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(format!(" {label:>7}  "), Style::default().fg(FG_DIM)),
-        Span::styled(value.to_string(), Style::default().fg(value_color)),
-    ])
-}
-
 fn gutter_span(selected: bool) -> Span<'static> {
     if selected {
         Span::styled("▌", Style::default().fg(ACCENT).bg(BG_SEL))
@@ -791,20 +818,6 @@ fn instance_endpoint(record: &ServiceRecord) -> String {
         .map(|p| p.to_string())
         .unwrap_or_else(|| "…".to_string());
     format!("{host}  {addr}:{port}")
-}
-
-/// Truncate to `width` display columns (single-width assumption), padding with
-/// spaces and adding an ellipsis when clipped.
-fn fixed(value: &str, width: usize) -> String {
-    let count = value.chars().count();
-    if count <= width {
-        format!("{value:<width$}")
-    } else {
-        let keep = width.saturating_sub(1);
-        let mut out: String = value.chars().take(keep).collect();
-        out.push('…');
-        out
-    }
 }
 
 fn short_type(service_type: &str) -> String {
