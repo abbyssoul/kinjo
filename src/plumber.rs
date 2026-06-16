@@ -201,10 +201,21 @@ pub const SYSTEM_CONFIG_DIR: &str = "/etc/avahi-tui/commands";
 ///   2. user-local   (`$XDG_CONFIG_HOME/avahi-tui/commands` or `~/.config/...`)
 ///   3. command-line `--config-dir` entries, in the order given
 pub fn config_dirs(extra: &[PathBuf]) -> Vec<PathBuf> {
+    config_dirs_from(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"), extra)
+}
+
+/// Build the ordered command-directory list from the relevant environment
+/// variables. Split out from [`config_dirs`] so the precedence rules can be
+/// unit tested without mutating process-global environment state.
+fn config_dirs_from(
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+    extra: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut dirs = vec![PathBuf::from(SYSTEM_CONFIG_DIR)];
-    if let Some(home) = env::var_os("XDG_CONFIG_HOME") {
+    if let Some(home) = xdg_config_home {
         dirs.push(PathBuf::from(home).join("avahi-tui").join("commands"));
-    } else if let Some(home) = env::var_os("HOME") {
+    } else if let Some(home) = home {
         dirs.push(
             PathBuf::from(home)
                 .join(".config")
@@ -477,10 +488,11 @@ fn optional_array(values: &BTreeMap<String, Value>, key: &str) -> Result<Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{remove, temp_dir};
     use std::{
+        ffi::OsString,
         fs,
         net::{IpAddr, Ipv4Addr},
-        time::{SystemTime, UNIX_EPOCH},
     };
 
     fn command_toml(name: &str, command: &str) -> String {
@@ -497,19 +509,6 @@ command = "{command}"
 mode = "execute"
 "#
         )
-    }
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "avahi-tui-plumber-test-{name}-{}-{unique}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     #[test]
@@ -906,7 +905,7 @@ mode = "execute"
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["first", "second"]);
 
-        fs::remove_dir_all(dir).unwrap();
+        remove(&dir);
     }
 
     #[test]
@@ -923,8 +922,8 @@ mode = "execute"
         assert_eq!(matcher.command_count(), 1);
         assert_eq!(matcher.commands()[0].action.command, "ssh overlay");
 
-        fs::remove_dir_all(base).unwrap();
-        fs::remove_dir_all(overlay).unwrap();
+        remove(&base);
+        remove(&overlay);
     }
 
     #[test]
@@ -1011,5 +1010,231 @@ mode = "execute"
                 expected
             );
         }
+    }
+
+    #[test]
+    fn hash_inside_a_quoted_string_is_not_a_comment() {
+        let mut builder = MatcherBuilder::new();
+        builder
+            .add_str(
+                "fragment",
+                r#"
+[metadata]
+name = "open-anchor"
+
+[match.service_type]
+equals = "_http._tcp"
+
+[action]
+command = "xdg-open http://host/page#section"
+mode = "fork"
+"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            builder.build().commands()[0].action.command,
+            "xdg-open http://host/page#section"
+        );
+    }
+
+    #[test]
+    fn string_escapes_are_decoded() {
+        let mut builder = MatcherBuilder::new();
+        builder
+            .add_str(
+                "escapes",
+                r#"
+[metadata]
+name = "escapes"
+description = "tab\tand\nnewline and quote \" and backslash \\"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "ssh"
+mode = "execute"
+"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            builder.build().commands()[0].description.as_deref(),
+            Some("tab\tand\nnewline and quote \" and backslash \\")
+        );
+    }
+
+    #[test]
+    fn unknown_escape_sequences_are_left_verbatim() {
+        let mut builder = MatcherBuilder::new();
+        builder
+            .add_str(
+                "verbatim",
+                r#"
+[metadata]
+name = "verbatim"
+description = "keep \z as-is"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "ssh"
+mode = "execute"
+"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            builder.build().commands()[0].description.as_deref(),
+            Some(r"keep \z as-is")
+        );
+    }
+
+    #[test]
+    fn invalid_regex_predicate_is_rejected() {
+        let mut builder = MatcherBuilder::new();
+        let err = builder
+            .add_str(
+                "bad-regex",
+                r#"
+[metadata]
+name = "bad-regex"
+
+[match.hostname]
+regex = "("
+
+[action]
+command = "ssh"
+mode = "execute"
+"#,
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("regex"));
+    }
+
+    #[test]
+    fn array_match_value_and_array_description_are_rejected() {
+        let mut builder = MatcherBuilder::new();
+        let array_predicate = builder
+            .add_str(
+                "array-predicate",
+                r#"
+[metadata]
+name = "array-predicate"
+
+[match.service_type]
+equals = ["_ssh._tcp"]
+
+[action]
+command = "ssh"
+mode = "execute"
+"#,
+            )
+            .unwrap_err();
+        let array_description = builder
+            .add_str(
+                "array-description",
+                r#"
+[metadata]
+name = "array-description"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+description = ["nope"]
+command = "ssh"
+mode = "execute"
+"#,
+            )
+            .unwrap_err();
+
+        assert!(
+            array_predicate
+                .to_string()
+                .contains("`service_type.equals` must be a string")
+        );
+        assert!(
+            array_description
+                .to_string()
+                .contains("`description` must be a string")
+        );
+    }
+
+    #[test]
+    fn key_outside_a_section_is_an_error() {
+        let mut builder = MatcherBuilder::new();
+        let err = builder.add_str("stray", "name = \"orphan\"\n").unwrap_err();
+
+        assert!(err.to_string().contains("key outside a section"));
+    }
+
+    #[test]
+    fn add_file_reads_a_command_from_disk() {
+        let dir = temp_dir("add-file");
+        let path = dir.join("ssh.toml");
+        fs::write(&path, command_toml("ssh", "ssh {hostname}")).unwrap();
+
+        let mut builder = MatcherBuilder::new();
+        builder.start_layer();
+        builder.add_file(&path).unwrap();
+
+        assert_eq!(builder.build().commands()[0].name, "ssh");
+
+        remove(&dir);
+    }
+
+    #[test]
+    fn load_from_dirs_skips_missing_directories() {
+        let mut builder = MatcherBuilder::new();
+        load_from_dirs(
+            &mut builder,
+            &[PathBuf::from("/tmp/avahi-tui-definitely-missing-xyz")],
+        )
+        .unwrap();
+
+        assert_eq!(builder.build().command_count(), 0);
+    }
+
+    #[test]
+    fn config_dirs_from_orders_system_user_then_extras() {
+        let extra = PathBuf::from("/tmp/extra");
+        let dirs = config_dirs_from(
+            Some(OsString::from("/xdg")),
+            Some(OsString::from("/home/user")),
+            std::slice::from_ref(&extra),
+        );
+
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from(SYSTEM_CONFIG_DIR),
+                PathBuf::from("/xdg/avahi-tui/commands"),
+                extra,
+            ]
+        );
+    }
+
+    #[test]
+    fn config_dirs_from_uses_home_when_xdg_is_absent() {
+        let dirs = config_dirs_from(None, Some(OsString::from("/home/user")), &[]);
+
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from(SYSTEM_CONFIG_DIR),
+                PathBuf::from("/home/user/.config/avahi-tui/commands"),
+            ]
+        );
+    }
+
+    #[test]
+    fn config_dirs_from_omits_user_dir_without_env() {
+        let dirs = config_dirs_from(None, None, &[]);
+
+        assert_eq!(dirs, vec![PathBuf::from(SYSTEM_CONFIG_DIR)]);
     }
 }

@@ -144,22 +144,35 @@ impl KeySpec {
 }
 
 pub fn default_config_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(home) = std::env::var_os("XDG_CONFIG_HOME") {
-        paths.push(
-            PathBuf::from(home)
+    config_paths(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+}
+
+/// Resolve the keybinding file search path from the relevant environment
+/// variables. Split out from [`default_config_paths`] so the precedence rules
+/// can be unit tested without mutating process-global environment state.
+fn config_paths(
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    if let Some(xdg) = xdg_config_home {
+        vec![
+            PathBuf::from(xdg)
                 .join("avahi-tui")
                 .join("keybindings.toml"),
-        );
-    } else if let Some(home) = std::env::var_os("HOME") {
-        paths.push(
+        ]
+    } else if let Some(home) = home {
+        vec![
             PathBuf::from(home)
                 .join(".config")
                 .join("avahi-tui")
                 .join("keybindings.toml"),
-        );
+        ]
+    } else {
+        Vec::new()
     }
-    paths
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -192,23 +205,8 @@ fn parse_key_array(path: &Path, line_no: usize, value: &str) -> Result<Vec<KeySp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    fn temp_file(name: &str, source: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "avahi-tui-keymap-test-{name}-{}-{unique}.toml",
-            std::process::id()
-        ));
-        fs::write(&path, source).unwrap();
-        path
-    }
+    use crate::test_support::{remove, temp_file};
+    use std::ffi::OsString;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -240,7 +238,7 @@ quit = ["x", "ctrl-x"]
         assert!(bindings.is("browse", "quit", ctrl('x')));
         assert!(!bindings.is("browse", "quit", key(KeyCode::Char('q'))));
 
-        fs::remove_file(path).unwrap();
+        remove(&path);
     }
 
     #[test]
@@ -265,8 +263,8 @@ select = ["tab"]
         assert!(bindings.is("picker", "select", key(KeyCode::Tab)));
         assert!(!bindings.is("picker", "select", key(KeyCode::Char(' '))));
 
-        fs::remove_file(first).unwrap();
-        fs::remove_file(second).unwrap();
+        remove(&first);
+        remove(&second);
     }
 
     #[test]
@@ -285,7 +283,7 @@ close = ["escape", "backspace"] # trailing comment
         assert!(bindings.is("help", "close", key(KeyCode::Esc)));
         assert!(bindings.is("help", "close", key(KeyCode::Backspace)));
 
-        fs::remove_file(path).unwrap();
+        remove(&path);
     }
 
     #[test]
@@ -326,8 +324,64 @@ quit = ["meta-q"]
         );
         assert!(unsupported_err.to_string().contains("unsupported key"));
 
-        fs::remove_file(outside_section).unwrap();
-        fs::remove_file(unquoted).unwrap();
-        fs::remove_file(unsupported).unwrap();
+        remove(&outside_section);
+        remove(&unquoted);
+        remove(&unsupported);
+    }
+
+    #[test]
+    fn empty_key_array_unbinds_a_command() {
+        let path = temp_file(
+            "empty-array",
+            r#"
+[browse]
+quit = []
+"#,
+        );
+
+        let bindings = KeyBindings::load(std::slice::from_ref(&path)).unwrap();
+
+        // The default `q` binding is replaced by an empty list, so nothing fires.
+        assert!(!bindings.is("browse", "quit", key(KeyCode::Char('q'))));
+
+        remove(&path);
+    }
+
+    #[test]
+    fn config_paths_prefer_xdg_config_home_over_home() {
+        let paths = config_paths(
+            Some(OsString::from("/xdg")),
+            Some(OsString::from("/home/user")),
+        );
+
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/xdg/avahi-tui/keybindings.toml")]
+        );
+    }
+
+    #[test]
+    fn config_paths_fall_back_to_dot_config_under_home() {
+        let paths = config_paths(None, Some(OsString::from("/home/user")));
+
+        assert_eq!(
+            paths,
+            vec![PathBuf::from(
+                "/home/user/.config/avahi-tui/keybindings.toml"
+            )]
+        );
+    }
+
+    #[test]
+    fn config_paths_are_empty_without_any_home_variables() {
+        assert!(config_paths(None, None).is_empty());
+    }
+
+    #[test]
+    fn unknown_mode_or_command_never_matches() {
+        let bindings = KeyBindings::default();
+
+        assert!(!bindings.is("no-such-mode", "quit", key(KeyCode::Char('q'))));
+        assert!(!bindings.is("browse", "no-such-command", key(KeyCode::Char('q'))));
     }
 }

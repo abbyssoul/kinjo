@@ -379,4 +379,52 @@ mod tests {
         let types = resolve_service_types(None);
         assert_eq!(types.len(), DEFAULT_SERVICE_TYPES.len());
     }
+
+    #[test]
+    fn unparseable_filter_falls_back_to_default_sweep() {
+        let types = resolve_service_types(Some("not a service type"));
+        assert_eq!(types.len(), DEFAULT_SERVICE_TYPES.len());
+    }
+
+    #[test]
+    fn fake_records_carry_the_requested_domain_and_an_unresolved_entry() {
+        let records = fake_records("corp");
+
+        assert!(records.iter().all(|record| record.domain == "corp"));
+        assert!(
+            records.iter().any(|record| !record.has_instance_data()),
+            "expected at least one pending/unresolved record"
+        );
+        // The two SSH instances differ only by address but keep distinct ids.
+        let ssh_ids: std::collections::BTreeSet<_> = records
+            .iter()
+            .filter(|record| record.service_type == "_ssh._tcp")
+            .map(|record| record.id.0.clone())
+            .collect();
+        assert_eq!(ssh_ids.len(), 2);
+    }
+
+    #[test]
+    fn spawn_fake_streams_status_then_filtered_records() {
+        let (tx, rx) = mpsc::channel();
+        spawn_fake("local".to_string(), Some("_ssh._tcp".to_string()), tx);
+
+        let mut statuses = 0;
+        let mut upserts = Vec::new();
+        while let Ok(event) = rx.recv() {
+            match event {
+                DiscoveryEvent::Status(_) => statuses += 1,
+                DiscoveryEvent::Upsert(record) => upserts.push(record),
+                DiscoveryEvent::Remove(_) => {}
+            }
+        }
+
+        assert_eq!(statuses, 1);
+        assert!(!upserts.is_empty());
+        assert!(
+            upserts
+                .iter()
+                .all(|record| record.service_type == "_ssh._tcp")
+        );
+    }
 }

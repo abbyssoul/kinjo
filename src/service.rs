@@ -364,4 +364,164 @@ mod tests {
 
         assert_eq!(groups[0].label, "HP Printer");
     }
+
+    fn resolved(name: &str, service_type: &str) -> ServiceRecord {
+        let mut record = ServiceRecord::new(name, service_type, "local");
+        record.hostname = Some(format!("{name}.local"));
+        record.address = Some("192.168.1.10".parse().unwrap());
+        record.port = Some(22);
+        record
+    }
+
+    #[test]
+    fn field_exposes_all_supported_keys_and_aliases() {
+        let mut record = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        record.hostname = Some("alpha.local".to_string());
+        record.address = Some("192.0.2.5".parse().unwrap());
+        record.port = Some(22);
+        record.txt.insert("path".to_string(), "/admin".to_string());
+
+        assert_eq!(record.field("name").as_deref(), Some("alpha"));
+        assert_eq!(record.field("type").as_deref(), Some("_ssh._tcp"));
+        assert_eq!(record.field("service_type").as_deref(), Some("_ssh._tcp"));
+        assert_eq!(record.field("domain").as_deref(), Some("local"));
+        assert_eq!(record.field("hostname").as_deref(), Some("alpha.local"));
+        assert_eq!(record.field("address").as_deref(), Some("192.0.2.5"));
+        assert_eq!(record.field("port").as_deref(), Some("22"));
+        assert_eq!(record.field("txt.path").as_deref(), Some("/admin"));
+        assert_eq!(record.field("txt.missing"), None);
+        assert_eq!(record.field("unknown"), None);
+    }
+
+    #[test]
+    fn pending_record_keeps_three_field_id_until_resolved() {
+        let pending = ServiceRecord::new("alpha", "_ssh._tcp", "local").with_instance_id();
+        assert_eq!(pending.id.0, "alpha|_ssh._tcp|local");
+        assert!(!pending.has_instance_data());
+
+        let resolved = resolved("alpha", "_ssh._tcp").with_instance_id();
+        assert_eq!(
+            resolved.id.0,
+            "alpha|_ssh._tcp|local|alpha.local|192.168.1.10|22"
+        );
+        assert!(resolved.has_instance_data());
+    }
+
+    #[test]
+    fn registration_key_keeps_first_three_id_fields() {
+        let resolved = resolved("alpha", "_ssh._tcp").with_instance_id();
+        assert_eq!(resolved.id.registration_key(), "alpha|_ssh._tcp|local");
+    }
+
+    #[test]
+    fn searchable_text_includes_every_instance_field() {
+        let mut record = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        record.hostname = Some("alpha.local".to_string());
+        record.address = Some("192.0.2.5".parse().unwrap());
+        record.port = Some(2222);
+        record
+            .txt
+            .insert("note".to_string(), "third floor".to_string());
+
+        let text = record.searchable_text();
+        for needle in [
+            "alpha",
+            "_ssh._tcp",
+            "local",
+            "alpha.local",
+            "192.0.2.5",
+            "2222",
+            "note",
+            "third floor",
+        ] {
+            assert!(text.contains(needle), "missing `{needle}` in `{text}`");
+        }
+    }
+
+    #[test]
+    fn grouping_by_host_buckets_records_and_labels_unresolved() {
+        let a = resolved("alpha", "_ssh._tcp");
+        let b = resolved("beta", "_http._tcp");
+        let pending = ServiceRecord::new("ghost", "_ipp._tcp", "local");
+
+        let groups = group_records(&[a, b, pending], GroupingMode::Host);
+
+        let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
+        assert!(labels.contains(&"alpha.local"));
+        assert!(labels.contains(&"beta.local"));
+        assert!(labels.contains(&"<unresolved host>"));
+    }
+
+    #[test]
+    fn grouping_by_service_type_merges_same_type() {
+        let a = resolved("alpha", "_ssh._tcp");
+        let b = resolved("beta", "_ssh._tcp");
+        let c = resolved("gamma", "_http._tcp");
+
+        let groups = group_records(&[a, b, c], GroupingMode::ServiceType);
+
+        assert_eq!(groups.len(), 2);
+        let ssh = groups
+            .iter()
+            .find(|g| g.label == "_ssh._tcp")
+            .expect("ssh group");
+        assert_eq!(ssh.instances.len(), 2);
+    }
+
+    #[test]
+    fn grouping_by_port_and_address_uses_value_labels_and_fallbacks() {
+        let mut a = resolved("alpha", "_ssh._tcp");
+        a.port = Some(80);
+        a.address = Some("10.0.0.1".parse().unwrap());
+        let pending = ServiceRecord::new("ghost", "_ipp._tcp", "local");
+
+        let by_port = group_records(&[a.clone(), pending.clone()], GroupingMode::Port);
+        let port_labels: Vec<&str> = by_port.iter().map(|g| g.label.as_str()).collect();
+        assert!(port_labels.contains(&"80"));
+        assert!(port_labels.contains(&"<unknown port>"));
+
+        let by_address = group_records(&[a, pending], GroupingMode::Address);
+        let address_labels: Vec<&str> = by_address.iter().map(|g| g.label.as_str()).collect();
+        assert!(address_labels.contains(&"10.0.0.1"));
+        assert!(address_labels.contains(&"<unknown address>"));
+    }
+
+    #[test]
+    fn groups_are_sorted_by_label() {
+        let groups = group_records(
+            &[
+                resolved("charlie", "_ssh._tcp"),
+                resolved("alpha", "_ssh._tcp"),
+                resolved("bravo", "_ssh._tcp"),
+            ],
+            GroupingMode::LogicalService,
+        );
+
+        let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
+        assert_eq!(labels, vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
+    fn decode_handles_incomplete_and_out_of_range_escapes() {
+        // Fewer than three digits: the backslash and digits are kept verbatim.
+        assert_eq!(decode_dns_sd_escapes(r"a\09b"), r"a\09b");
+        // A trailing lone backslash is preserved.
+        assert_eq!(decode_dns_sd_escapes(r"a\"), r"a\");
+        // `\999` is three digits but 999 does not fit in a byte, so it is kept.
+        assert_eq!(decode_dns_sd_escapes(r"x\999y"), r"x\999y");
+    }
+
+    #[test]
+    fn command_mode_group_key_behaves_like_logical_service() {
+        let mut a = resolved("alpha", "_ssh._tcp");
+        a.address = Some("10.0.0.1".parse().unwrap());
+        let mut b = a.clone();
+        b.address = Some("10.0.0.2".parse().unwrap());
+
+        let groups = group_records(&[a, b], GroupingMode::Command);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].instances.len(), 2);
+        assert_eq!(groups[0].label, "alpha");
+    }
 }

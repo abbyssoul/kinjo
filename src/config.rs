@@ -28,13 +28,10 @@ pub fn load_keybindings() -> Result<KeyBindings> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
-    };
+    use std::{fs, path::PathBuf};
 
     use super::*;
+    use crate::test_support::{remove, temp_dir};
 
     fn test_cli(command: CliCommand, config_dirs: Vec<PathBuf>) -> Cli {
         Cli {
@@ -44,19 +41,6 @@ mod tests {
             fake_discovery: false,
             command,
         }
-    }
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "avahi-tui-config-test-{name}-{}-{unique}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        dir
     }
 
     fn write_command(dir: &std::path::Path, file: &str, name: &str, command: &str) {
@@ -121,8 +105,8 @@ mode = "execute"
         assert_eq!(matcher.commands()[1].name, "ssh");
         assert_eq!(matcher.commands()[1].action.command, "ssh overlay");
 
-        fs::remove_dir_all(base).unwrap();
-        fs::remove_dir_all(overlay).unwrap();
+        remove(&base);
+        remove(&overlay);
     }
 
     #[test]

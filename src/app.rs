@@ -748,4 +748,354 @@ mode = "execute"
         assert_eq!(app.visible_groups.len(), 1);
         assert_eq!(app.visible_groups[0].instances.len(), 2);
     }
+
+    // ── interaction harness ────────────────────────────────────────────────
+    use crate::plumber::MatcherBuilder;
+    use crossterm::event::KeyModifiers;
+
+    const SSH: &str = r#"
+[metadata]
+name = "ssh"
+[match.service_type]
+equals = "_ssh._tcp"
+[action]
+command = "ssh {hostname}"
+mode = "execute"
+"#;
+
+    const PING: &str = r#"
+[metadata]
+name = "ping"
+[match.service_type]
+equals = "_ssh._tcp"
+[action]
+command = "true"
+mode = "fork"
+"#;
+
+    /// Matches every instance by address and echoes it, so picking different
+    /// instances yields observably different argv.
+    const PING_ADDR: &str = r#"
+[metadata]
+name = "ping-addr"
+[match.address]
+regex = "^10[.]"
+[action]
+command = "echo {address}"
+mode = "execute"
+"#;
+
+    fn matcher_from(sources: &[&str]) -> Matcher {
+        let mut builder = MatcherBuilder::new();
+        builder.start_layer();
+        for (index, source) in sources.iter().enumerate() {
+            builder.add_str(&format!("test-{index}"), source).unwrap();
+        }
+        builder.build()
+    }
+
+    fn app_with(matcher: Matcher, records: Vec<ServiceRecord>) -> App {
+        let (_tx, rx) = mpsc::channel();
+        let mut app = App::new(test_cli(), matcher, KeyBindings::default(), rx);
+        for record in records {
+            let record = record.with_instance_id();
+            app.records.insert(record.id.clone(), record);
+        }
+        app.recompute_visible();
+        app
+    }
+
+    fn ssh(name: &str, addr: &str) -> ServiceRecord {
+        let mut record = ServiceRecord::new(name, "_ssh._tcp", "local");
+        record.hostname = Some(format!("{name}.local"));
+        record.address = Some(addr.parse().unwrap());
+        record.port = Some(22);
+        record
+    }
+
+    fn http(name: &str) -> ServiceRecord {
+        let mut record = ServiceRecord::new(name, "_http._tcp", "local");
+        record.hostname = Some(format!("{name}.local"));
+        record.address = Some("192.168.1.50".parse().unwrap());
+        record.port = Some(80);
+        record
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn send(app: &mut App, code: KeyCode) -> Option<PreparedCommand> {
+        app.handle_key(key(code)).unwrap()
+    }
+
+    #[test]
+    fn navigation_moves_and_clamps_selection_and_resets_scroll() {
+        let mut app = app_with(
+            Matcher::default(),
+            vec![ssh("alpha", "10.0.0.1"), ssh("beta", "10.0.0.2")],
+        );
+        assert_eq!(app.visible_groups.len(), 2);
+        app.details_scroll = 4;
+
+        send(&mut app, KeyCode::Down);
+        assert_eq!(app.selected, 1);
+        assert_eq!(
+            app.details_scroll, 0,
+            "moving rows resets the detail scroll"
+        );
+
+        send(&mut app, KeyCode::Down);
+        assert_eq!(app.selected, 1, "down clamps at the last row");
+
+        send(&mut app, KeyCode::Up);
+        send(&mut app, KeyCode::Up);
+        assert_eq!(app.selected, 0, "up clamps at the first row");
+    }
+
+    #[test]
+    fn typing_in_browse_enters_search_and_filters() {
+        let mut app = app_with(
+            Matcher::default(),
+            vec![ssh("alpha", "10.0.0.1"), ssh("zulu", "10.0.0.2")],
+        );
+
+        send(&mut app, KeyCode::Char('z'));
+
+        assert_eq!(app.mode, AppMode::Search);
+        assert_eq!(app.filter.text_query, "z");
+        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.visible_groups[0].label, "zulu");
+    }
+
+    #[test]
+    fn search_backspace_clear_and_close() {
+        let mut app = app_with(Matcher::default(), vec![ssh("zulu", "10.0.0.2")]);
+        send(&mut app, KeyCode::Char('z'));
+        send(&mut app, KeyCode::Char('u'));
+        assert_eq!(app.filter.text_query, "zu");
+
+        send(&mut app, KeyCode::Backspace);
+        assert_eq!(app.filter.text_query, "z");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(app.filter.text_query, "", "ctrl-u clears the query");
+
+        send(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, AppMode::Browse, "enter closes search");
+    }
+
+    #[test]
+    fn type_filter_toggle_hides_a_service_type() {
+        let mut app = app_with(
+            Matcher::default(),
+            vec![ssh("alpha", "10.0.0.1"), http("web")],
+        );
+        assert_eq!(app.visible_groups.len(), 2);
+
+        send(&mut app, KeyCode::Char('t'));
+        assert_eq!(app.mode, AppMode::TypeFilter);
+        // Discovered types are sorted: _http._tcp is first.
+        send(&mut app, KeyCode::Char(' '));
+
+        assert!(
+            app.visible_groups
+                .iter()
+                .all(|g| g.service_type == "_ssh._tcp")
+        );
+        assert_eq!(app.visible_groups.len(), 1);
+    }
+
+    #[test]
+    fn grouping_picker_changes_active_grouping() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+
+        send(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.mode, AppMode::Grouping);
+        // ALL = [Logical, Host, ServiceType, ...]; two steps down lands on ServiceType.
+        send(&mut app, KeyCode::Down);
+        send(&mut app, KeyCode::Down);
+        send(&mut app, KeyCode::Enter);
+
+        assert_eq!(app.filter.grouping, GroupingMode::ServiceType);
+        assert_eq!(app.mode, AppMode::Browse);
+    }
+
+    #[test]
+    fn invoke_single_matching_action_returns_prepared_execute_command() {
+        let mut app = app_with(matcher_from(&[SSH]), vec![ssh("alpha", "10.0.0.1")]);
+
+        let command = send(&mut app, KeyCode::Enter).expect("execute action returns a command");
+
+        assert_eq!(command.argv, vec!["ssh", "alpha.local"]);
+    }
+
+    #[test]
+    fn invoke_with_multiple_actions_opens_picker_then_runs_selection() {
+        let mut app = app_with(matcher_from(&[SSH, PING]), vec![ssh("alpha", "10.0.0.1")]);
+
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::ActionPicker);
+        assert_eq!(app.action_matches.len(), 2);
+
+        // action_index 0 is `ssh` (insertion order); selecting it runs that action.
+        let command = send(&mut app, KeyCode::Enter).expect("picked action runs");
+        assert_eq!(command.argv, vec!["ssh", "alpha.local"]);
+    }
+
+    #[test]
+    fn invoke_without_a_matching_command_reports_status() {
+        let mut app = app_with(matcher_from(&[SSH]), vec![http("web")]);
+
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert!(app.status.contains("no configured actions match"));
+    }
+
+    #[test]
+    fn fork_action_launches_and_returns_to_browse() {
+        let mut app = app_with(matcher_from(&[PING]), vec![ssh("alpha", "10.0.0.1")]);
+
+        assert!(
+            send(&mut app, KeyCode::Enter).is_none(),
+            "fork does not exec"
+        );
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.status.contains("launched `ping`"));
+    }
+
+    #[test]
+    fn instance_picker_disambiguates_then_executes_chosen_instance() {
+        // Two instances of one logical service differing only by address.
+        let mut app = app_with(
+            matcher_from(&[PING_ADDR]),
+            vec![ssh("alpha", "10.0.0.1"), ssh("alpha", "10.0.0.2")],
+        );
+        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.visible_groups[0].instances.len(), 2);
+
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::InstancePicker);
+
+        // Instances sort by ascending address: index 1 is 10.0.0.2.
+        send(&mut app, KeyCode::Down);
+        let command = send(&mut app, KeyCode::Enter).expect("instance chosen");
+        assert_eq!(command.argv, vec!["echo", "10.0.0.2"]);
+    }
+
+    #[test]
+    fn same_host_filter_toggles_on_and_off() {
+        let mut app = app_with(
+            Matcher::default(),
+            vec![ssh("alpha", "10.0.0.1"), ssh("beta", "10.0.0.2")],
+        );
+        // Groups sort by label, so the cursor starts on `alpha`.
+        send(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.filter.host_filter.as_deref(), Some("alpha.local"));
+        assert_eq!(app.visible_groups.len(), 1);
+
+        send(&mut app, KeyCode::Char('s'));
+        assert!(app.filter.host_filter.is_none());
+        assert_eq!(app.visible_groups.len(), 2);
+    }
+
+    #[test]
+    fn remove_event_drops_records_sharing_a_registration_key() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
+
+        tx.send(DiscoveryEvent::Upsert(
+            ssh("alpha", "10.0.0.1").with_instance_id(),
+        ))
+        .unwrap();
+        app.drain_discovery();
+        assert_eq!(app.records.len(), 1);
+
+        let removal = ServiceRecord::new("alpha", "_ssh._tcp", "local")
+            .with_instance_id()
+            .id;
+        tx.send(DiscoveryEvent::Remove(removal)).unwrap();
+        app.drain_discovery();
+
+        assert!(app.records.is_empty());
+        assert!(app.visible_groups.is_empty());
+    }
+
+    #[test]
+    fn command_view_runs_single_service_and_picks_among_many() {
+        let mut single = app_with(matcher_from(&[SSH]), vec![ssh("alpha", "10.0.0.1")]);
+        single.filter.grouping = GroupingMode::Command;
+        single.recompute_visible();
+        assert_eq!(single.command_groups.len(), 1);
+        assert_eq!(single.command_groups[0].services.len(), 1);
+
+        let command = send(&mut single, KeyCode::Enter).expect("single service runs");
+        assert_eq!(command.argv, vec!["ssh", "alpha.local"]);
+
+        let mut many = app_with(
+            matcher_from(&[SSH]),
+            vec![ssh("alpha", "10.0.0.1"), ssh("beta", "10.0.0.2")],
+        );
+        many.filter.grouping = GroupingMode::Command;
+        many.recompute_visible();
+        assert_eq!(many.command_groups[0].services.len(), 2);
+
+        assert!(send(&mut many, KeyCode::Enter).is_none());
+        assert_eq!(many.mode, AppMode::ServicePicker);
+        // Services sort by label; index 1 is `beta`.
+        send(&mut many, KeyCode::Down);
+        let command = send(&mut many, KeyCode::Enter).expect("picked service runs");
+        assert_eq!(command.argv, vec!["ssh", "beta.local"]);
+    }
+
+    #[test]
+    fn quit_keys_set_status_to_quit() {
+        let mut common = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+        assert!(
+            common
+                .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(common.status, "quit");
+
+        let mut browse = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+        send(&mut browse, KeyCode::Char('q'));
+        assert_eq!(browse.status, "quit");
+    }
+
+    #[test]
+    fn help_modal_opens_and_closes() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+
+        send(&mut app, KeyCode::Char('?'));
+        assert_eq!(app.mode, AppMode::Help);
+
+        send(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, AppMode::Browse);
+    }
+
+    #[test]
+    fn scroll_details_steps_by_half_viewport_and_clamps() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+        app.details_viewport.set(10);
+        app.details_max_scroll.set(5);
+
+        send(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.details_scroll, 5, "half of 10 clamps to the max of 5");
+
+        send(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.details_scroll, 5, "cannot scroll past the maximum");
+
+        send(&mut app, KeyCode::Char('u'));
+        assert_eq!(app.details_scroll, 0, "scrolling up returns to the top");
+    }
+
+    #[test]
+    fn move_index_clamps_and_handles_empty_lists() {
+        assert_eq!(move_index(0, 0, 1), 0);
+        assert_eq!(move_index(0, 3, -1), 0);
+        assert_eq!(move_index(2, 3, 1), 2);
+        assert_eq!(move_index(1, 3, 1), 2);
+    }
 }

@@ -7,6 +7,8 @@ mod keymap;
 mod plumber;
 mod process;
 mod service;
+#[cfg(test)]
+mod test_support;
 mod ui;
 
 use app::App;

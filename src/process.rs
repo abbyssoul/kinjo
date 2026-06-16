@@ -242,6 +242,61 @@ mod tests {
     }
 
     #[test]
+    fn fork_spawns_a_real_process() {
+        let record = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let action = CommandAction {
+            description: None,
+            command: "true".to_string(),
+            mode: ActionMode::Fork,
+        };
+
+        let prepared = prepare(&action, &record).unwrap();
+        assert_eq!(prepared.mode, ActionMode::Fork);
+        // `true` exits 0 immediately; forking it should succeed without error.
+        fork(&prepared).unwrap();
+    }
+
+    #[test]
+    fn fork_reports_a_missing_binary() {
+        let command = PreparedCommand {
+            argv: vec!["avahi-tui-no-such-binary-xyz".to_string()],
+            mode: ActionMode::Fork,
+        };
+
+        assert!(fork(&command).is_err());
+    }
+
+    #[test]
+    fn interpolates_txt_record_fields() {
+        let mut record = ServiceRecord::new("nas", "_http._tcp", "local");
+        record.hostname = Some("nas.local".to_string());
+        record.txt.insert("path".to_string(), "/admin".to_string());
+        let action = CommandAction {
+            description: None,
+            command: "xdg-open http://{hostname}{txt.path}".to_string(),
+            mode: ActionMode::Fork,
+        };
+
+        let prepared = prepare(&action, &record).unwrap();
+
+        assert_eq!(prepared.argv, vec!["xdg-open", "http://nas.local/admin"]);
+    }
+
+    #[test]
+    fn missing_txt_field_is_an_error() {
+        let record = ServiceRecord::new("nas", "_http._tcp", "local");
+        let action = CommandAction {
+            description: None,
+            command: "echo {txt.path}".to_string(),
+            mode: ActionMode::Fork,
+        };
+
+        let err = prepare(&action, &record).unwrap_err();
+
+        assert!(err.to_string().contains("service field `txt.path`"));
+    }
+
+    #[test]
     fn empty_command_after_splitting_is_an_error() {
         let record = ServiceRecord::new("alpha", "_ssh._tcp", "local");
         let action = CommandAction {

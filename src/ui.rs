@@ -1157,3 +1157,89 @@ fn build_list_items<T>(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn short_type_strips_leading_underscore_and_protocol() {
+        assert_eq!(short_type("_https._tcp"), "https");
+        assert_eq!(short_type("_ssh._tcp"), "ssh");
+        assert_eq!(short_type("bare"), "bare");
+    }
+
+    #[test]
+    fn category_color_groups_related_service_types() {
+        assert_eq!(category_color("_ssh._tcp"), GOOD);
+        assert_eq!(category_color("_https._tcp"), ACCENT);
+        assert_eq!(category_color("_ipp._tcp"), Color::Magenta);
+        assert_eq!(category_color("_smb._tcp"), WARN);
+        assert_eq!(category_color("_workstation._tcp"), Color::Cyan);
+        // Anything uncategorised falls back to the dim foreground.
+        assert_eq!(category_color("_unknown._tcp"), FG_DIM);
+    }
+
+    #[test]
+    fn instance_endpoint_shows_placeholders_until_resolved() {
+        let pending = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        assert_eq!(instance_endpoint(&pending), "…resolving  …:…");
+
+        let mut resolved = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        resolved.hostname = Some("alpha.local".to_string());
+        resolved.address = Some("192.0.2.5".parse().unwrap());
+        resolved.port = Some(22);
+        assert_eq!(instance_endpoint(&resolved), "alpha.local  192.0.2.5:22");
+    }
+
+    #[test]
+    fn scroll_offset_keeps_selection_in_view() {
+        // Everything fits: no scrolling.
+        assert_eq!(scroll_offset(4, 5, 10), 0);
+        // Selection within the first window: still pinned to the top.
+        assert_eq!(scroll_offset(3, 20, 5), 0);
+        // Selection past the window: scroll so the selected row is the last visible.
+        assert_eq!(scroll_offset(6, 20, 5), 2);
+        // Never scroll past the end of the content.
+        assert_eq!(scroll_offset(19, 20, 5), 15);
+        // A zero-height viewport never scrolls.
+        assert_eq!(scroll_offset(5, 20, 0), 0);
+    }
+
+    #[test]
+    fn push_right_aligned_pads_to_the_full_width() {
+        let mut spans = vec![Span::raw("left")];
+        push_right_aligned(&mut spans, vec![Span::raw("right")], 20);
+
+        let width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        assert_eq!(width, 20);
+        assert!(line_text(&Line::from(spans)).starts_with("left"));
+    }
+
+    #[test]
+    fn push_right_aligned_does_not_underflow_when_too_narrow() {
+        let mut spans = vec![Span::raw("left")];
+        // Width smaller than the combined content must not panic.
+        push_right_aligned(&mut spans, vec![Span::raw("right")], 3);
+
+        assert_eq!(line_text(&Line::from(spans)), "leftright");
+    }
+
+    #[test]
+    fn list_title_adds_a_range_chip_only_when_non_empty() {
+        let empty = list_title("Services", 0, 0, 10);
+        assert_eq!(line_text(&empty), "Services");
+
+        let populated = list_title("Services", 42, 0, 10);
+        let text = line_text(&populated);
+        assert!(text.starts_with("Services"));
+        assert!(text.contains("1-10/42"));
+    }
+}

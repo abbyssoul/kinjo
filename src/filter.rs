@@ -183,6 +183,47 @@ mod tests {
     }
 
     #[test]
+    fn fuzzy_match_accepts_empty_needle() {
+        assert!(fuzzy_match("anything", ""));
+    }
+
+    #[test]
+    fn clear_text_resets_query_and_active_state() {
+        let mut filter = FilterState {
+            text_query: "alpha".to_string(),
+            ..Default::default()
+        };
+        assert!(filter.is_active());
+
+        filter.clear_text();
+
+        assert!(filter.text_query.is_empty());
+        assert!(!filter.is_active());
+    }
+
+    #[test]
+    fn disabling_every_type_hides_all_records() {
+        let ssh = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let mut filter = FilterState::default();
+        filter.sync_service_types(std::slice::from_ref(&ssh));
+        filter.toggle_service_type("_ssh._tcp");
+
+        assert!(filter.is_active());
+        assert!(filter.apply(&[ssh]).is_empty());
+    }
+
+    #[test]
+    fn whitespace_only_query_is_not_active_and_matches_all() {
+        let ssh = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let mut filter = FilterState::default();
+        filter.sync_service_types(std::slice::from_ref(&ssh));
+        filter.text_query = "   ".to_string();
+
+        assert!(!filter.is_active());
+        assert_eq!(filter.apply(&[ssh]).len(), 1);
+    }
+
+    #[test]
     fn text_query_matches_searchable_txt_and_instance_fields() {
         let mut printer = ServiceRecord::new("printer", "_ipp._tcp", "local");
         printer.hostname = Some("print.local".to_string());
