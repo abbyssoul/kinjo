@@ -47,6 +47,80 @@ required. When a `--service-type` is given, only that type is browsed; otherwise
 a curated set of common service types is swept in parallel. If mDNS discovery is
 unavailable, it falls back to sample records so the UI remains usable.
 
+## Installation
+
+### Debian / Ubuntu
+
+Download the latest `.deb` package from the project's
+[GitHub Releases](https://github.com/abbyssoul/avahi-tui/releases) page, then
+install it with `apt`:
+
+```sh
+sudo apt install ./avahi-tui_*_amd64.deb
+```
+
+The package installs `avahi-tui` and the bundled system command files under
+`/etc/avahi-tui/commands`.
+
+For real local-network discovery, make sure Avahi is installed and running:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y avahi-daemon
+sudo systemctl enable --now avahi-daemon
+```
+
+### Cargo
+
+Install from crates.io with Cargo:
+
+```sh
+cargo install avahi-tui
+```
+
+On Debian or Ubuntu, install native build dependencies first:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y clang libavahi-client-dev libxcb-shape0-dev libxcb-xfixes0-dev xorg-dev
+```
+
+### Build From Source
+
+Clone the repository and build locally:
+
+```sh
+git clone https://github.com/abbyssoul/avahi-tui.git
+cd avahi-tui
+cargo build --locked
+```
+
+Run from the source tree:
+
+```sh
+cargo run -- --fake-discovery
+```
+
+Install the built binary into Cargo's bin directory:
+
+```sh
+cargo install --path .
+```
+
+### Smoke Test
+
+You can verify the UI without a running Avahi daemon:
+
+```sh
+avahi-tui --fake-discovery
+```
+
+To browse real services on the default `local` domain:
+
+```sh
+avahi-tui
+```
+
 ## UI
 
 Default keys follow Vim-style conventions:
