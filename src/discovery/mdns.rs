@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, net::IpAddr, str::FromStr, sync::mpsc, thread, time::Duration};
+use std::{collections::BTreeMap, net::IpAddr, str::FromStr, sync::mpsc, thread};
 
 use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
@@ -7,10 +7,8 @@ use zeroconf_tokio::{
     BrowserEvent, MdnsBrowser, MdnsBrowserAsync, ServiceDiscovery, ServiceRemoval, ServiceType,
 };
 
-use crate::{
-    cli::Cli,
-    service::{ServiceId, ServiceRecord},
-};
+use super::fake;
+use super::{Discovery, DiscoveryConfig, DiscoveryEvent, Entry, EntryId};
 
 /// DNS-SD service types browsed when the user does not pass `--service-type`.
 ///
@@ -41,28 +39,37 @@ const DEFAULT_SERVICE_TYPES: &[&str] = &[
     "_spotify-connect._tcp",
 ];
 
-#[derive(Debug, Clone)]
-pub enum DiscoveryEvent {
-    Upsert(ServiceRecord),
-    Remove(ServiceId),
-    Status(String),
-}
-
-pub struct DiscoveryHandle {
+/// mDNS/Avahi discovery backend: sweeps the link for DNS-SD services and streams
+/// them as [`DiscoveryEvent`]s. Falls back to the [`fake`] backend when no
+/// browser can be started.
+pub struct MdnsDiscovery {
     receiver: Option<mpsc::Receiver<DiscoveryEvent>>,
     shutdown: CancellationToken,
     worker: Option<thread::JoinHandle<()>>,
 }
 
-impl DiscoveryHandle {
-    pub fn take_receiver(&mut self) -> mpsc::Receiver<DiscoveryEvent> {
+impl MdnsDiscovery {
+    pub fn start(config: &DiscoveryConfig) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let shutdown = CancellationToken::new();
+        let worker = spawn_zeroconf(config, tx, shutdown.clone());
+        Self {
+            receiver: Some(rx),
+            shutdown,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl Discovery for MdnsDiscovery {
+    fn events(&mut self) -> mpsc::Receiver<DiscoveryEvent> {
         self.receiver
             .take()
             .expect("discovery receiver can only be taken once")
     }
 }
 
-impl Drop for DiscoveryHandle {
+impl Drop for MdnsDiscovery {
     fn drop(&mut self) {
         self.shutdown.cancel();
         if let Some(worker) = self.worker.take() {
@@ -71,34 +78,13 @@ impl Drop for DiscoveryHandle {
     }
 }
 
-pub fn start(cli: &Cli) -> DiscoveryHandle {
-    let (tx, rx) = mpsc::channel();
-    let shutdown = CancellationToken::new();
-
-    if cli.fake_discovery {
-        spawn_fake(cli.domain.clone(), cli.service_type.clone(), tx);
-        return DiscoveryHandle {
-            receiver: Some(rx),
-            shutdown,
-            worker: None,
-        };
-    }
-
-    let worker = spawn_zeroconf(cli, tx, shutdown.clone());
-    DiscoveryHandle {
-        receiver: Some(rx),
-        shutdown,
-        worker: Some(worker),
-    }
-}
-
 fn spawn_zeroconf(
-    cli: &Cli,
+    config: &DiscoveryConfig,
     tx: mpsc::Sender<DiscoveryEvent>,
     shutdown: CancellationToken,
 ) -> thread::JoinHandle<()> {
-    let domain = cli.domain.clone();
-    let service_type_filter = cli.service_type.clone();
+    let domain = config.domain.clone();
+    let service_type_filter = config.service_type.clone();
     let service_types = resolve_service_types(service_type_filter.as_deref());
 
     thread::spawn(move || {
@@ -108,7 +94,7 @@ fn spawn_zeroconf(
                 let _ = tx.send(DiscoveryEvent::Status(format!(
                     "failed to start mDNS runtime ({err}); using sample records"
                 )));
-                spawn_fake(domain, service_type_filter, tx);
+                fake::spawn(domain, service_type_filter, tx);
                 return;
             }
         };
@@ -158,7 +144,7 @@ async fn browse_loop(
         let _ = tx.send(DiscoveryEvent::Status(
             "mDNS discovery unavailable; using sample records".to_string(),
         ));
-        spawn_fake(domain, service_type_filter, tx);
+        fake::spawn(domain, service_type_filter, tx);
         return;
     }
 
@@ -207,7 +193,7 @@ fn to_discovery_event(event: BrowserEvent) -> DiscoveryEvent {
     }
 }
 
-fn record_from_discovery(discovery: &ServiceDiscovery) -> ServiceRecord {
+fn record_from_discovery(discovery: &ServiceDiscovery) -> Entry {
     let txt = discovery
         .txt()
         .as_ref()
@@ -225,13 +211,13 @@ fn record_from_discovery(discovery: &ServiceDiscovery) -> ServiceRecord {
     )
 }
 
-fn id_from_removal(removal: &ServiceRemoval) -> ServiceId {
-    ServiceRecord::new(removal.name(), removal.kind(), removal.domain())
+fn id_from_removal(removal: &ServiceRemoval) -> EntryId {
+    Entry::new(removal.name(), removal.kind(), removal.domain())
         .with_instance_id()
         .id
 }
 
-/// Builds a resolved [`ServiceRecord`] from the individual fields reported by a
+/// Builds a resolved [`Entry`] from the individual fields reported by a
 /// browse event. Kept separate from the `zeroconf` types so it can be unit
 /// tested without standing up the mDNS stack.
 fn upsert_record(
@@ -242,8 +228,8 @@ fn upsert_record(
     address: Option<&str>,
     port: Option<u16>,
     txt: BTreeMap<String, String>,
-) -> ServiceRecord {
-    let mut record = ServiceRecord::new(name, service_type, domain);
+) -> Entry {
+    let mut record = Entry::new(name, service_type, domain);
     record.hostname = hostname
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -269,57 +255,6 @@ fn resolve_service_types(filter: Option<&str>) -> Vec<ServiceType> {
         .iter()
         .filter_map(|kind| ServiceType::from_str(kind).ok())
         .collect()
-}
-
-fn spawn_fake(
-    domain: String,
-    service_type_filter: Option<String>,
-    tx: mpsc::Sender<DiscoveryEvent>,
-) {
-    thread::spawn(move || {
-        let _ = tx.send(DiscoveryEvent::Status(
-            "using sample discovery records".to_string(),
-        ));
-        let mut records = fake_records(&domain);
-        if let Some(service_type) = service_type_filter {
-            records.retain(|record| record.service_type == service_type);
-        }
-        for record in records {
-            let _ = tx.send(DiscoveryEvent::Upsert(record));
-            thread::sleep(Duration::from_millis(150));
-        }
-    });
-}
-
-fn fake_records(domain: &str) -> Vec<ServiceRecord> {
-    let mut ssh_a = ServiceRecord::new("workstation", "_ssh._tcp", domain);
-    ssh_a.hostname = Some("workstation.local".to_string());
-    ssh_a.address = Some("192.168.1.20".parse().unwrap());
-    ssh_a.port = Some(22);
-
-    let mut ssh_b = ssh_a.clone();
-    ssh_b.address = Some("192.168.1.21".parse().unwrap());
-
-    let mut http = ServiceRecord::new("nas", "_http._tcp", domain);
-    http.hostname = Some("nas.local".to_string());
-    http.address = Some("192.168.1.30".parse().unwrap());
-    http.port = Some(8080);
-    http.txt.insert("path".to_string(), "/admin".to_string());
-
-    let mut https = ServiceRecord::new("router", "_https._tcp", domain);
-    https.hostname = Some("router.local".to_string());
-    https.address = Some("192.168.1.1".parse().unwrap());
-    https.port = Some(443);
-
-    let unresolved = ServiceRecord::new("pending-printer", "_ipp._tcp", domain);
-
-    vec![
-        ssh_a.with_instance_id(),
-        ssh_b.with_instance_id(),
-        http.with_instance_id(),
-        https.with_instance_id(),
-        unresolved.with_instance_id(),
-    ]
 }
 
 #[cfg(test)]
@@ -384,47 +319,5 @@ mod tests {
     fn unparseable_filter_falls_back_to_default_sweep() {
         let types = resolve_service_types(Some("not a service type"));
         assert_eq!(types.len(), DEFAULT_SERVICE_TYPES.len());
-    }
-
-    #[test]
-    fn fake_records_carry_the_requested_domain_and_an_unresolved_entry() {
-        let records = fake_records("corp");
-
-        assert!(records.iter().all(|record| record.domain == "corp"));
-        assert!(
-            records.iter().any(|record| !record.has_instance_data()),
-            "expected at least one pending/unresolved record"
-        );
-        // The two SSH instances differ only by address but keep distinct ids.
-        let ssh_ids: std::collections::BTreeSet<_> = records
-            .iter()
-            .filter(|record| record.service_type == "_ssh._tcp")
-            .map(|record| record.id.0.clone())
-            .collect();
-        assert_eq!(ssh_ids.len(), 2);
-    }
-
-    #[test]
-    fn spawn_fake_streams_status_then_filtered_records() {
-        let (tx, rx) = mpsc::channel();
-        spawn_fake("local".to_string(), Some("_ssh._tcp".to_string()), tx);
-
-        let mut statuses = 0;
-        let mut upserts = Vec::new();
-        while let Ok(event) = rx.recv() {
-            match event {
-                DiscoveryEvent::Status(_) => statuses += 1,
-                DiscoveryEvent::Upsert(record) => upserts.push(record),
-                DiscoveryEvent::Remove(_) => {}
-            }
-        }
-
-        assert_eq!(statuses, 1);
-        assert!(!upserts.is_empty());
-        assert!(
-            upserts
-                .iter()
-                .all(|record| record.service_type == "_ssh._tcp")
-        );
     }
 }

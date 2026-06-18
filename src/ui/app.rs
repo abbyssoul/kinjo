@@ -10,22 +10,18 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::DefaultTerminal;
 
 use crate::{
-    cli::Cli,
-    discovery::DiscoveryEvent,
-    filter::FilterState,
-    keymap::KeyBindings,
-    plumber::{ActionMode, CommandConfig, MatchResult, Matcher},
-    process::{self, PreparedCommand},
-    service::{self, GroupingMode, ServiceGroup, ServiceId, ServiceRecord},
-    ui,
+    discovery::{DiscoveryEvent, Entry, EntryGroup, EntryId, GroupingMode, group_entries},
+    plumber::{self, ActionMode, CommandConfig, MatchResult, PreparedCommand, RuleEngine},
 };
+
+use super::{cli::Cli, filter::FilterState, keymap::KeyBindings, render};
 
 /// One row of the "group by command" view: a configured command together with
 /// the distinct logical services it matches.
 #[derive(Debug, Clone)]
 pub struct CommandGroup {
     pub command: CommandConfig,
-    pub services: Vec<ServiceGroup>,
+    pub services: Vec<EntryGroup>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,12 +37,12 @@ pub enum AppMode {
 
 pub struct App {
     pub cli: Cli,
-    pub matcher: Matcher,
+    pub matcher: Box<dyn RuleEngine>,
     pub keybindings: KeyBindings,
     pub discovery_rx: mpsc::Receiver<DiscoveryEvent>,
-    pub records: BTreeMap<ServiceId, ServiceRecord>,
+    pub records: BTreeMap<EntryId, Entry>,
     pub filter: FilterState,
-    pub visible_groups: Vec<ServiceGroup>,
+    pub visible_groups: Vec<EntryGroup>,
     pub selected: usize,
     pub mode: AppMode,
     pub type_filter_index: usize,
@@ -72,7 +68,7 @@ pub struct App {
 impl App {
     pub fn new(
         cli: Cli,
-        matcher: Matcher,
+        matcher: impl RuleEngine + 'static,
         keybindings: KeyBindings,
         discovery_rx: mpsc::Receiver<DiscoveryEvent>,
     ) -> Self {
@@ -83,7 +79,7 @@ impl App {
         );
         Self {
             cli,
-            matcher,
+            matcher: Box::new(matcher),
             keybindings,
             discovery_rx,
             records: BTreeMap::new(),
@@ -113,7 +109,7 @@ impl App {
         loop {
             self.ticks = self.ticks.wrapping_add(1);
             self.drain_discovery();
-            terminal.draw(|frame| ui::render(frame, self))?;
+            terminal.draw(|frame| render::render(frame, self))?;
 
             if event::poll(Duration::from_millis(120))?
                 && let Event::Key(key) = event::read()?
@@ -173,7 +169,7 @@ impl App {
             .visible_groups
             .get(self.selected)
             .map(|group| group.id.clone());
-        self.visible_groups = service::group_records(&filtered, self.filter.grouping);
+        self.visible_groups = group_entries(&filtered, self.filter.grouping);
         self.group_match_counts = self
             .visible_groups
             .iter()
@@ -187,13 +183,13 @@ impl App {
 
     /// Build the command-grouped rows: each configured command paired with the
     /// distinct logical services that match at least one of its instances.
-    fn recompute_command_groups(&mut self, filtered: &[ServiceRecord]) {
+    fn recompute_command_groups(&mut self, filtered: &[Entry]) {
         let previous = self
             .command_groups
             .get(self.selected)
             .map(|group| group.command.name.clone());
 
-        let service_groups = service::group_records(filtered, GroupingMode::LogicalService);
+        let service_groups = group_entries(filtered, GroupingMode::LogicalService);
         let mut command_groups: Vec<CommandGroup> = self
             .matcher
             .commands()
@@ -497,7 +493,7 @@ impl App {
     fn run_command_on(
         &mut self,
         command: &CommandConfig,
-        service: &ServiceGroup,
+        service: &EntryGroup,
     ) -> Result<Option<PreparedCommand>> {
         let Some(result) = self
             .matcher
@@ -562,23 +558,23 @@ impl App {
     fn execute_action(
         &mut self,
         action: &MatchResult,
-        record: &ServiceRecord,
+        record: &Entry,
     ) -> Result<Option<PreparedCommand>> {
         let name = &action.command.name;
 
-        if let Some(missing) = process::missing_requirement(&action.command.requirements) {
+        if let Some(missing) = plumber::exec::missing_requirement(&action.command.requirements) {
             return self.fail(format!(
                 "`{name}` needs `{missing}`, which is not installed"
             ));
         }
 
-        let prepared = match process::prepare(&action.command.action, record) {
+        let prepared = match plumber::exec::prepare(&action.command.action, record) {
             Ok(prepared) => prepared,
             Err(err) => return self.fail(format!("cannot run `{name}`: {err}")),
         };
 
         match prepared.mode {
-            ActionMode::Fork => match process::fork(&prepared) {
+            ActionMode::Fork => match plumber::exec::fork(&prepared) {
                 Ok(()) => {
                     self.status = format!("launched `{name}`");
                     self.return_to_browse();
@@ -655,7 +651,8 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::keymap::KeyBindings;
+    use crate::plumber::Matcher;
+    use crate::ui::keymap::KeyBindings;
 
     fn test_cli() -> Cli {
         Cli {
@@ -663,7 +660,7 @@ mod tests {
             config_dirs: Vec::new(),
             service_type: None,
             fake_discovery: true,
-            command: crate::cli::CliCommand::Run,
+            command: crate::ui::cli::CliCommand::Run,
         }
     }
 
@@ -672,8 +669,8 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
 
-        let pending = ServiceRecord::new("workstation", "_ssh._tcp", "local").with_instance_id();
-        let mut resolved = ServiceRecord::new("workstation", "_ssh._tcp", "local");
+        let pending = Entry::new("workstation", "_ssh._tcp", "local").with_instance_id();
+        let mut resolved = Entry::new("workstation", "_ssh._tcp", "local");
         resolved.hostname = Some("workstation.local".to_string());
         resolved.address = Some("192.168.1.20".parse().unwrap());
         resolved.port = Some(22);
@@ -719,15 +716,15 @@ mode = "execute"
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(test_cli(), matcher, KeyBindings::default(), rx);
 
-        let mut alpha = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let mut alpha = Entry::new("alpha", "_ssh._tcp", "local");
         alpha.hostname = Some("alpha.local".to_string());
         alpha.address = Some("192.168.1.10".parse().unwrap());
         alpha.port = Some(22);
-        let mut beta = ServiceRecord::new("beta", "_ssh._tcp", "local");
+        let mut beta = Entry::new("beta", "_ssh._tcp", "local");
         beta.hostname = Some("beta.local".to_string());
         beta.address = Some("192.168.1.11".parse().unwrap());
         beta.port = Some(22);
-        let web = ServiceRecord::new("web", "_http._tcp", "local");
+        let web = Entry::new("web", "_http._tcp", "local");
 
         tx.send(DiscoveryEvent::Upsert(alpha.with_instance_id()))
             .unwrap();
@@ -751,7 +748,7 @@ mode = "execute"
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
 
-        let mut first = ServiceRecord::new("workstation", "_ssh._tcp", "local");
+        let mut first = Entry::new("workstation", "_ssh._tcp", "local");
         first.hostname = Some("workstation.local".to_string());
         first.address = Some("192.168.1.20".parse().unwrap());
         first.port = Some(22);
@@ -816,7 +813,7 @@ mode = "execute"
         builder.build()
     }
 
-    fn app_with(matcher: Matcher, records: Vec<ServiceRecord>) -> App {
+    fn app_with(matcher: Matcher, records: Vec<Entry>) -> App {
         let (_tx, rx) = mpsc::channel();
         let mut app = App::new(test_cli(), matcher, KeyBindings::default(), rx);
         for record in records {
@@ -827,16 +824,16 @@ mode = "execute"
         app
     }
 
-    fn ssh(name: &str, addr: &str) -> ServiceRecord {
-        let mut record = ServiceRecord::new(name, "_ssh._tcp", "local");
+    fn ssh(name: &str, addr: &str) -> Entry {
+        let mut record = Entry::new(name, "_ssh._tcp", "local");
         record.hostname = Some(format!("{name}.local"));
         record.address = Some(addr.parse().unwrap());
         record.port = Some(22);
         record
     }
 
-    fn http(name: &str) -> ServiceRecord {
-        let mut record = ServiceRecord::new(name, "_http._tcp", "local");
+    fn http(name: &str) -> Entry {
+        let mut record = Entry::new(name, "_http._tcp", "local");
         record.hostname = Some(format!("{name}.local"));
         record.address = Some("192.168.1.50".parse().unwrap());
         record.port = Some(80);
@@ -1056,7 +1053,7 @@ mode = "execute"
         app.drain_discovery();
         assert_eq!(app.records.len(), 1);
 
-        let removal = ServiceRecord::new("alpha", "_ssh._tcp", "local")
+        let removal = Entry::new("alpha", "_ssh._tcp", "local")
             .with_instance_id()
             .id;
         tx.send(DiscoveryEvent::Remove(removal)).unwrap();

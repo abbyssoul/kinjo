@@ -3,6 +3,8 @@ use std::{ffi::OsString, path::PathBuf};
 use clap::{Arg, ArgAction, Command, error::ErrorKind};
 use color_eyre::eyre::Result;
 
+use crate::discovery::DiscoveryConfig;
+
 #[derive(Debug, Clone)]
 pub struct Cli {
     pub domain: String,
@@ -16,6 +18,18 @@ pub struct Cli {
 pub enum CliCommand {
     Run,
     ListCommands,
+}
+
+impl Cli {
+    /// Project the CLI options onto the inputs the discovery layer needs, so
+    /// discovery stays decoupled from CLI parsing.
+    pub fn discovery_config(&self) -> DiscoveryConfig {
+        DiscoveryConfig {
+            fake: self.fake_discovery,
+            domain: self.domain.clone(),
+            service_type: self.service_type.clone(),
+        }
+    }
 }
 
 pub fn parse() -> Result<Cli> {

@@ -3,10 +3,9 @@ use std::process::{Command, Stdio};
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::{
-    plumber::{ActionMode, CommandAction},
-    service::ServiceRecord,
-};
+use crate::discovery::Entry;
+
+use super::{ActionMode, CommandAction};
 
 #[derive(Debug, Clone)]
 pub struct PreparedCommand {
@@ -14,7 +13,7 @@ pub struct PreparedCommand {
     pub mode: ActionMode,
 }
 
-pub fn prepare(action: &CommandAction, record: &ServiceRecord) -> Result<PreparedCommand> {
+pub fn prepare(action: &CommandAction, record: &Entry) -> Result<PreparedCommand> {
     let expanded = interpolate(&action.command, record)?;
     let argv = split_command_line(&expanded)?;
     if argv.is_empty() {
@@ -135,7 +134,7 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-fn interpolate(template: &str, record: &ServiceRecord) -> Result<String> {
+fn interpolate(template: &str, record: &Entry) -> Result<String> {
     let mut output = String::new();
     let mut chars = template.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -211,7 +210,7 @@ mod tests {
 
     #[test]
     fn interpolates_and_splits() {
-        let mut record = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let mut record = Entry::new("alpha", "_ssh._tcp", "local");
         record.hostname = Some("alpha.local".to_string());
         let action = CommandAction {
             description: None,
@@ -224,7 +223,7 @@ mod tests {
 
     #[test]
     fn prepares_all_supported_service_fields() {
-        let mut record = ServiceRecord::new("Kitchen Printer", "_ipp._tcp", "local");
+        let mut record = Entry::new("Kitchen Printer", "_ipp._tcp", "local");
         record.hostname = Some("printer.local".to_string());
         record.address = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20)));
         record.port = Some(631);
@@ -258,7 +257,7 @@ mod tests {
 
     #[test]
     fn splits_quoted_and_escaped_arguments() {
-        let record = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let record = Entry::new("alpha", "_ssh._tcp", "local");
         let action = CommandAction {
             description: None,
             command: r#"printf "two words" one\ arg 'single quoted' "\\""#.to_string(),
@@ -275,7 +274,7 @@ mod tests {
 
     #[test]
     fn missing_interpolation_field_is_an_error() {
-        let record = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let record = Entry::new("alpha", "_ssh._tcp", "local");
         let action = CommandAction {
             description: None,
             command: "ssh {hostname}".to_string(),
@@ -290,7 +289,7 @@ mod tests {
 
     #[test]
     fn malformed_templates_and_quotes_are_errors() {
-        let record = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let record = Entry::new("alpha", "_ssh._tcp", "local");
         let unterminated_interpolation = CommandAction {
             description: None,
             command: "echo {name".to_string(),
@@ -318,7 +317,7 @@ mod tests {
 
     #[test]
     fn fork_spawns_a_real_process() {
-        let record = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let record = Entry::new("alpha", "_ssh._tcp", "local");
         let action = CommandAction {
             description: None,
             command: "true".to_string(),
@@ -347,7 +346,7 @@ mod tests {
 
     #[test]
     fn interpolates_txt_record_fields() {
-        let mut record = ServiceRecord::new("nas", "_http._tcp", "local");
+        let mut record = Entry::new("nas", "_http._tcp", "local");
         record.hostname = Some("nas.local".to_string());
         record.txt.insert("path".to_string(), "/admin".to_string());
         let action = CommandAction {
@@ -363,7 +362,7 @@ mod tests {
 
     #[test]
     fn missing_txt_field_is_an_error() {
-        let record = ServiceRecord::new("nas", "_http._tcp", "local");
+        let record = Entry::new("nas", "_http._tcp", "local");
         let action = CommandAction {
             description: None,
             command: "echo {txt.path}".to_string(),
@@ -377,7 +376,7 @@ mod tests {
 
     #[test]
     fn empty_command_after_splitting_is_an_error() {
-        let record = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let record = Entry::new("alpha", "_ssh._tcp", "local");
         let action = CommandAction {
             description: None,
             command: "   ".to_string(),

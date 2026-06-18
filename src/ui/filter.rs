@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::service::{GroupingMode, ServiceRecord};
+use crate::discovery::{Entry, GroupingMode};
 
 #[derive(Debug, Clone)]
 pub struct FilterState {
@@ -24,7 +24,7 @@ impl Default for FilterState {
 }
 
 impl FilterState {
-    pub fn sync_service_types(&mut self, records: &[ServiceRecord]) {
+    pub fn sync_service_types(&mut self, records: &[Entry]) {
         for record in records {
             if !self.disabled_service_types.contains(&record.service_type) {
                 self.enabled_service_types
@@ -33,7 +33,7 @@ impl FilterState {
         }
     }
 
-    pub fn discovered_types(records: &[ServiceRecord]) -> Vec<String> {
+    pub fn discovered_types(records: &[Entry]) -> Vec<String> {
         records
             .iter()
             .map(|record| record.service_type.clone())
@@ -69,7 +69,7 @@ impl FilterState {
             || !self.disabled_service_types.is_empty()
     }
 
-    pub fn apply(&self, records: &[ServiceRecord]) -> Vec<ServiceRecord> {
+    pub fn apply(&self, records: &[Entry]) -> Vec<Entry> {
         records
             .iter()
             .filter(|record| self.enabled_service_types.contains(&record.service_type))
@@ -108,8 +108,8 @@ mod tests {
 
     #[test]
     fn type_filter_and_text_filter_combine() {
-        let ssh = ServiceRecord::new("alpha", "_ssh._tcp", "local");
-        let http = ServiceRecord::new("beta", "_http._tcp", "local");
+        let ssh = Entry::new("alpha", "_ssh._tcp", "local");
+        let http = Entry::new("beta", "_http._tcp", "local");
         let mut filter = FilterState::default();
         filter.sync_service_types(&[ssh.clone(), http.clone()]);
         filter.toggle_service_type("_http._tcp");
@@ -123,9 +123,9 @@ mod tests {
     #[test]
     fn discovered_types_are_unique_and_sorted() {
         let records = vec![
-            ServiceRecord::new("printer", "_ipp._tcp", "local"),
-            ServiceRecord::new("shell", "_ssh._tcp", "local"),
-            ServiceRecord::new("other printer", "_ipp._tcp", "local"),
+            Entry::new("printer", "_ipp._tcp", "local"),
+            Entry::new("shell", "_ssh._tcp", "local"),
+            Entry::new("other printer", "_ipp._tcp", "local"),
         ];
 
         assert_eq!(
@@ -137,12 +137,12 @@ mod tests {
     #[test]
     fn sync_service_types_does_not_reenable_disabled_types() {
         let mut filter = FilterState::default();
-        filter.sync_service_types(&[ServiceRecord::new("alpha", "_ssh._tcp", "local")]);
+        filter.sync_service_types(&[Entry::new("alpha", "_ssh._tcp", "local")]);
         filter.toggle_service_type("_ssh._tcp");
 
         filter.sync_service_types(&[
-            ServiceRecord::new("beta", "_ssh._tcp", "local"),
-            ServiceRecord::new("site", "_http._tcp", "local"),
+            Entry::new("beta", "_ssh._tcp", "local"),
+            Entry::new("site", "_http._tcp", "local"),
         ]);
 
         assert!(!filter.enabled_service_types.contains("_ssh._tcp"));
@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn toggling_disabled_type_reenables_it() {
         let mut filter = FilterState::default();
-        filter.sync_service_types(&[ServiceRecord::new("alpha", "_ssh._tcp", "local")]);
+        filter.sync_service_types(&[Entry::new("alpha", "_ssh._tcp", "local")]);
 
         filter.toggle_service_type("_ssh._tcp");
         filter.toggle_service_type("_ssh._tcp");
@@ -164,9 +164,9 @@ mod tests {
 
     #[test]
     fn host_filter_matches_exact_hostname_and_can_be_cleared() {
-        let mut alpha = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let mut alpha = Entry::new("alpha", "_ssh._tcp", "local");
         alpha.hostname = Some("alpha.local".to_string());
-        let mut beta = ServiceRecord::new("beta", "_ssh._tcp", "local");
+        let mut beta = Entry::new("beta", "_ssh._tcp", "local");
         beta.hostname = Some("beta.local".to_string());
         let records = vec![alpha, beta];
 
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn disabling_every_type_hides_all_records() {
-        let ssh = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let ssh = Entry::new("alpha", "_ssh._tcp", "local");
         let mut filter = FilterState::default();
         filter.sync_service_types(std::slice::from_ref(&ssh));
         filter.toggle_service_type("_ssh._tcp");
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn whitespace_only_query_is_not_active_and_matches_all() {
-        let ssh = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let ssh = Entry::new("alpha", "_ssh._tcp", "local");
         let mut filter = FilterState::default();
         filter.sync_service_types(std::slice::from_ref(&ssh));
         filter.text_query = "   ".to_string();
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn text_query_matches_searchable_txt_and_instance_fields() {
-        let mut printer = ServiceRecord::new("printer", "_ipp._tcp", "local");
+        let mut printer = Entry::new("printer", "_ipp._tcp", "local");
         printer.hostname = Some("print.local".to_string());
         printer.port = Some(631);
         printer

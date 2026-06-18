@@ -12,10 +12,11 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, AppMode, CommandGroup},
+    discovery::{Entry, EntryGroup, GroupingMode},
     plumber::MatchResult,
-    service::{GroupingMode, ServiceGroup, ServiceRecord},
 };
+
+use super::app::{App, AppMode, CommandGroup};
 
 // ── palette ──────────────────────────────────────────────────────────────
 const ACCENT: Color = Color::Rgb(0x7a, 0xa2, 0xf7); // soft blue
@@ -247,7 +248,7 @@ fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-fn service_row(group: &ServiceGroup, selected: bool, matches: usize) -> Row<'static> {
+fn service_row(group: &EntryGroup, selected: bool, matches: usize) -> Row<'static> {
     let color = category_color(&group.service_type);
     let base = selection_style(selected);
     let gutter = gutter_span(selected);
@@ -885,7 +886,7 @@ fn gutter_span(selected: bool) -> Span<'static> {
     }
 }
 
-fn instance_endpoint(record: &ServiceRecord) -> String {
+fn instance_endpoint(record: &Entry) -> String {
     let host = record.hostname.as_deref().unwrap_or("…resolving");
     let addr = record
         .address
@@ -1156,10 +1157,10 @@ mod tests {
 
     #[test]
     fn instance_endpoint_shows_placeholders_until_resolved() {
-        let pending = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let pending = Entry::new("alpha", "_ssh._tcp", "local");
         assert_eq!(instance_endpoint(&pending), "…resolving  …:…");
 
-        let mut resolved = ServiceRecord::new("alpha", "_ssh._tcp", "local");
+        let mut resolved = Entry::new("alpha", "_ssh._tcp", "local");
         resolved.hostname = Some("alpha.local".to_string());
         resolved.address = Some("192.0.2.5".parse().unwrap());
         resolved.port = Some(22);

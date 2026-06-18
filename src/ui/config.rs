@@ -1,9 +1,10 @@
 use color_eyre::eyre::Result;
 
-use crate::{
+use crate::plumber::{self, Matcher, MatcherBuilder};
+
+use super::{
     cli::{Cli, CliCommand},
     keymap::{self, KeyBindings},
-    plumber::{self, Matcher, MatcherBuilder},
 };
 
 pub fn load_matcher(cli: &Cli) -> Result<Matcher> {

@@ -1,37 +1,36 @@
-mod app;
-mod cli;
-mod config;
+//! avahi-tui wires together three independent parts: [`discovery`] produces
+//! entries (mDNS today, swappable behind a trait), [`plumber`] is the rules
+//! engine that matches and runs commands, and [`ui`] ties them together for a
+//! person at the terminal. `main` is the composition root that connects them.
+
 mod discovery;
-mod filter;
-mod keymap;
 mod plumber;
-mod process;
-mod service;
 #[cfg(test)]
 mod test_support;
 mod ui;
 
-use app::App;
-use cli::CliCommand;
 use color_eyre::eyre::{Result, WrapErr};
+
+use plumber::Matcher;
+use ui::App;
+use ui::cli::CliCommand;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let cli = cli::parse()?;
-    let matcher = config::load_matcher(&cli)?;
+    let cli = ui::cli::parse()?;
+    let matcher = ui::config::load_matcher(&cli)?;
 
     if cli.command == CliCommand::ListCommands {
         print_commands(&matcher);
         return Ok(());
     } else if cli.command != CliCommand::Run {
-        print!("Unknown command. Use `list-commands` to see available commands.");
         return Ok(());
     }
 
-    let keybindings = config::load_keybindings()?;
-    let mut discovery = discovery::start(&cli);
-    let discovery_rx = discovery.take_receiver();
+    let keybindings = ui::config::load_keybindings()?;
+    let mut discovery = discovery::start(&cli.discovery_config());
+    let discovery_rx = discovery.events();
 
     let mut app = App::new(cli, matcher, keybindings, discovery_rx);
     let exec_action = ratatui::run(|terminal| app.run(terminal))?;
@@ -40,13 +39,13 @@ fn main() -> Result<()> {
 
     if let Some(action) = exec_action {
         let command_line = action.argv.join(" ");
-        process::exec(action).wrap_err_with(|| format!("failed to run `{command_line}`"))?;
+        plumber::exec::exec(action).wrap_err_with(|| format!("failed to run `{command_line}`"))?;
     }
 
     Ok(())
 }
 
-fn print_commands(matcher: &plumber::Matcher) {
+fn print_commands(matcher: &Matcher) {
     println!("{:<22} {:<8} {:<36} COMMAND", "NAME", "MODE", "DESCRIPTION");
     for command in matcher.commands() {
         println!(
