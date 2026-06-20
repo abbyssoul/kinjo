@@ -36,17 +36,27 @@ jobs:
 
   build:
 
-    runs-on: ubuntu-latest
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      matrix:
+        # Defines the target operating systems
+        os: [ubuntu-latest, windows-latest, macos-latest]
 
     steps:
     - uses: actions/checkout@v6
-    - name: Install dependencies
+
+    - name: Install dependencies 
+      if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
-        # sudo apt-get install -y avahi-daemon avahi-utils
         sudo apt-get install -y xorg-dev libxcb-shape0-dev libxcb-xfixes0-dev clang avahi-daemon libavahi-client-dev
+    
     - uses: Swatinem/rust-cache@v2
+    
     - name: Build
       run: cargo build --locked --verbose
+    
     - name: Run tests
       run: cargo test --locked --verbose
