@@ -660,6 +660,7 @@ mod tests {
             config_dirs: Vec::new(),
             service_type: None,
             fake_discovery: true,
+            backend: crate::discovery::DiscoveryBackend::default(),
             command: crate::ui::cli::CliCommand::Run,
         }
     }

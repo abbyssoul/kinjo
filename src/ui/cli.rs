@@ -3,7 +3,7 @@ use std::{ffi::OsString, path::PathBuf};
 use clap::{Arg, ArgAction, Command, error::ErrorKind};
 use color_eyre::eyre::Result;
 
-use crate::discovery::DiscoveryConfig;
+use crate::discovery::{DiscoveryBackend, DiscoveryConfig};
 
 #[derive(Debug, Clone)]
 pub struct Cli {
@@ -11,6 +11,7 @@ pub struct Cli {
     pub config_dirs: Vec<PathBuf>,
     pub service_type: Option<String>,
     pub fake_discovery: bool,
+    pub backend: DiscoveryBackend,
     pub command: CliCommand,
 }
 
@@ -26,6 +27,7 @@ impl Cli {
     pub fn discovery_config(&self) -> DiscoveryConfig {
         DiscoveryConfig {
             fake: self.fake_discovery,
+            backend: self.backend,
             domain: self.domain.clone(),
             service_type: self.service_type.clone(),
         }
@@ -68,6 +70,11 @@ where
         config_dirs,
         service_type: matches.get_one::<String>("service-type").cloned(),
         fake_discovery: matches.get_flag("fake-discovery"),
+        backend: match matches.get_one::<String>("backend").map(String::as_str) {
+            Some("zeroconf") => DiscoveryBackend::Zeroconf,
+            // `mdns-sd` and the default both map to the mdns-sd backend.
+            _ => DiscoveryBackend::MdnsSd,
+        },
         command,
     })
 }
@@ -105,6 +112,14 @@ fn command() -> Command {
                 .help("Use built-in sample records instead of mDNS discovery")
                 .action(ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("backend")
+                .long("backend")
+                .help("mDNS/DNS-SD discovery backend to use")
+                .value_parser(["mdns-sd", "zeroconf"])
+                .default_value("mdns-sd")
+                .value_name("BACKEND"),
+        )
         .subcommand(
             Command::new("list-commands")
                 .about("Validate and list registered command configs")
@@ -139,7 +154,19 @@ mod tests {
         assert!(cli.config_dirs.is_empty());
         assert_eq!(cli.service_type, None);
         assert!(!cli.fake_discovery);
+        assert_eq!(cli.backend, DiscoveryBackend::MdnsSd);
         assert_eq!(cli.command, CliCommand::Run);
+    }
+
+    #[test]
+    fn parses_zeroconf_backend_selection() {
+        let cli = parse_from(["avahi-tui", "--backend", "zeroconf"]).unwrap();
+        assert_eq!(cli.backend, DiscoveryBackend::Zeroconf);
+    }
+
+    #[test]
+    fn rejects_unknown_backend() {
+        assert!(parse_from(["avahi-tui", "--backend", "bonjour"]).is_err());
     }
 
     #[test]

@@ -41,10 +41,20 @@ For development without a running Avahi setup:
 avahi-tui --fake-discovery
 ```
 
-The app discovers services over mDNS/DNS-SD using the `zeroconf-tokio` crate
-(which talks to the system Avahi daemon on Linux), so no external CLI tools are
-required. When a `--service-type` is given, only that type is browsed; otherwise
-a curated set of common service types is swept in parallel. If mDNS discovery is
+The app discovers services over mDNS/DNS-SD so no external CLI tools are
+required. Two discovery backends are available, selectable with `--backend`:
+
+- `mdns-sd` (default): the `mdns-sd-discovery` crate. A single browser
+  enumerates every service type on the link via the native DNS-SD meta-query.
+- `zeroconf`: the `zeroconf-tokio` crate, which talks to the system Avahi daemon
+  on Linux. It browses one service type at a time, so a curated set of common
+  types is swept in parallel when no `--service-type` is given.
+
+```sh
+avahi-tui --backend zeroconf
+```
+
+When a `--service-type` is given, only that type is browsed. If mDNS discovery is
 unavailable, it falls back to sample records so the UI remains usable.
 
 ## Installation

@@ -8,10 +8,23 @@
 mod entry;
 mod fake;
 mod mdns;
+mod zeroconf;
 
 use std::sync::mpsc;
 
 pub use entry::{Entry, EntryGroup, EntryId, GroupingMode, decode_dns_sd_escapes, group_entries};
+
+/// The mDNS/DNS-SD library used to discover services.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiscoveryBackend {
+    /// `mdns-sd-discovery`: a single browser enumerates every service type via
+    /// the native DNS-SD meta-query. This is the default.
+    #[default]
+    MdnsSd,
+    /// `zeroconf`: wraps the system Avahi/Bonjour stack, sweeping a curated set
+    /// of common service types in parallel.
+    Zeroconf,
+}
 
 /// An event emitted by a discovery backend.
 #[derive(Debug, Clone)]
@@ -30,6 +43,8 @@ pub enum DiscoveryEvent {
 pub struct DiscoveryConfig {
     /// Use the built-in sample records instead of real mDNS discovery.
     pub fake: bool,
+    /// Which mDNS/DNS-SD library to discover with when `fake` is unset.
+    pub backend: DiscoveryBackend,
     /// DNS-SD domain to browse.
     pub domain: String,
     /// Limit discovery to a single DNS-SD service type, if set.
@@ -45,8 +60,10 @@ pub trait Discovery {
 /// Construct the discovery backend selected by `config`.
 pub fn start(config: &DiscoveryConfig) -> Box<dyn Discovery> {
     if config.fake {
-        Box::new(fake::FakeDiscovery::start(config))
-    } else {
-        Box::new(mdns::MdnsDiscovery::start(config))
+        return Box::new(fake::FakeDiscovery::start(config));
+    }
+    match config.backend {
+        DiscoveryBackend::MdnsSd => Box::new(mdns::MdnsDiscovery::start(config)),
+        DiscoveryBackend::Zeroconf => Box::new(zeroconf::ZeroconfDiscovery::start(config)),
     }
 }
