@@ -28,7 +28,7 @@ use ui::cli::CliCommand;
 pub fn run() -> Result<()> {
     color_eyre::install()?;
 
-    let cli = ui::cli::parse()?;
+    let cli = ui::cli::parse();
     let matcher = ui::config::load_matcher(&cli)?;
 
     if cli.command == CliCommand::ListCommands {

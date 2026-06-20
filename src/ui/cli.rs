@@ -1,7 +1,6 @@
 use std::{ffi::OsString, path::PathBuf};
 
 use clap::{Arg, ArgAction, Command, error::ErrorKind};
-use color_eyre::eyre::Result;
 
 use crate::discovery::{DiscoveryBackend, DiscoveryConfig};
 
@@ -34,11 +33,15 @@ impl Cli {
     }
 }
 
-pub fn parse() -> Result<Cli> {
-    parse_from(std::env::args_os())
+/// Parse the process arguments. On a usage error (unknown flag, bad subcommand,
+/// invalid value) clap renders a friendly message — with usage hints — to stderr
+/// and exits, rather than surfacing a `color_eyre` report with code locations.
+/// `--help`/`--version` likewise print and exit through the same path.
+pub fn parse() -> Cli {
+    parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit())
 }
 
-pub fn parse_from<I, T>(args: I) -> Result<Cli>
+pub fn parse_from<I, T>(args: I) -> Result<Cli, clap::Error>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -52,13 +55,12 @@ where
         None => (CliCommand::Run, collect_config_dirs(&matches)),
         Some(("list-commands", sub)) => (CliCommand::ListCommands, collect_config_dirs(sub)),
         Some((name, _)) => {
-            return Err(clap::Error::raw(
+            return Err(command().error(
                 ErrorKind::InvalidSubcommand,
                 format!(
-                    "unknown subcommand `{name}`; use `list-commands` to see available commands\n"
+                    "unknown subcommand `{name}`; use `list-commands` to see available commands"
                 ),
-            )
-            .into());
+            ));
         }
     };
 
@@ -220,9 +222,6 @@ mod tests {
     fn rejects_unknown_subcommand_instead_of_treating_it_as_domain() {
         let err = parse_from(["avahi-tui", "browse"]).unwrap_err();
 
-        assert_eq!(
-            err.downcast_ref::<clap::Error>().map(|err| err.kind()),
-            Some(ErrorKind::InvalidSubcommand)
-        );
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }
 }
