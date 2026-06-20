@@ -9,7 +9,7 @@
 [![Crates.io](https://img.shields.io/crates/v/avahi-tui.svg)](https://crates.io/crates/avahi-tui)
 [![docs.rs](https://img.shields.io/docsrs/avahi-tui)](https://docs.rs/avahi-tui)
 [![GitHub branch check runs](https://img.shields.io/github/check-runs/abbyssoul/avahi-tui/main)](https://github.com/abbyssoul/avahi-tui/actions/workflows/ci-test.yml)
-[![License: MIT](https://img.shields.io/crates/l/avahi-tui.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/github/license/abbyssoul/avahi-tui)](LICENSE)
 
 <img width="1430" height="609" alt="avahi-tui-screenshot" src="https://github.com/user-attachments/assets/319acde6-a3d0-4cb1-aefc-12088bc67328" />
 
