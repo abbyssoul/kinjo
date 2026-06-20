@@ -408,14 +408,20 @@ mod tests {
         assert!(!parse_requirement("foo, please").optional);
     }
 
+    /// A command guaranteed to be on `PATH` for the current platform.
+    #[cfg(windows)]
+    const PRESENT_COMMAND: &str = "cmd.exe";
+    #[cfg(not(windows))]
+    const PRESENT_COMMAND: &str = "sh";
+
     #[test]
     fn locate_resolves_absolute_paths_and_path_lookups() {
         // The running test binary is an executable file at a known absolute path.
         let exe = std::env::current_exe().unwrap();
         assert!(locate(exe.to_str().unwrap()).is_some());
 
-        // `sh` is present on every supported (unix) platform.
-        assert!(locate("sh").is_some());
+        // A shell interpreter is present on every supported platform.
+        assert!(locate(PRESENT_COMMAND).is_some());
 
         assert!(locate("avahi-tui-no-such-binary-xyz").is_none());
         assert!(locate("/no/such/absolute/path/xyz").is_none());
@@ -425,13 +431,16 @@ mod tests {
     #[test]
     fn missing_requirement_skips_optional_and_present_commands() {
         assert_eq!(missing_requirement(&[]), None);
-        assert_eq!(missing_requirement(&["sh".to_string()]), None);
+        assert_eq!(missing_requirement(&[PRESENT_COMMAND.to_string()]), None);
         assert_eq!(
             missing_requirement(&["definitely-absent-xyz, optional".to_string()]),
             None
         );
         assert_eq!(
-            missing_requirement(&["sh".to_string(), "definitely-absent-xyz".to_string()]),
+            missing_requirement(&[
+                PRESENT_COMMAND.to_string(),
+                "definitely-absent-xyz".to_string()
+            ]),
             Some("definitely-absent-xyz".to_string())
         );
     }
