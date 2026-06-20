@@ -888,10 +888,16 @@ fn gutter_span(selected: bool) -> Span<'static> {
 
 fn instance_endpoint(record: &Entry) -> String {
     let host = record.hostname.as_deref().unwrap_or("…resolving");
-    let addr = record
-        .address
-        .map(|a| a.to_string())
-        .unwrap_or_else(|| "…".to_string());
+    let addr = if record.addresses.is_empty() {
+        "…".to_string()
+    } else {
+        record
+            .addresses
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let port = record
         .port
         .map(|p| p.to_string())
@@ -1162,7 +1168,7 @@ mod tests {
 
         let mut resolved = Entry::new("alpha", "_ssh._tcp", "local");
         resolved.hostname = Some("alpha.local".to_string());
-        resolved.address = Some("192.0.2.5".parse().unwrap());
+        resolved.addresses = vec!["192.0.2.5".parse().unwrap()];
         resolved.port = Some(22);
         assert_eq!(instance_endpoint(&resolved), "alpha.local  192.0.2.5:22");
     }

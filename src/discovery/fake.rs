@@ -47,30 +47,31 @@ pub(super) fn spawn(
 }
 
 fn fake_records(domain: &str) -> Vec<Entry> {
-    let mut ssh_a = Entry::new("workstation", "_ssh._tcp", domain);
-    ssh_a.hostname = Some("workstation.local".to_string());
-    ssh_a.address = Some("192.168.1.20".parse().unwrap());
-    ssh_a.port = Some(22);
-
-    let mut ssh_b = ssh_a.clone();
-    ssh_b.address = Some("192.168.1.21".parse().unwrap());
+    // A single logical SSH service reachable at two addresses (load-balanced /
+    // dual-stack), kept together on one entry.
+    let mut ssh = Entry::new("workstation", "_ssh._tcp", domain);
+    ssh.hostname = Some("workstation.local".to_string());
+    ssh.addresses = vec![
+        "192.168.1.20".parse().unwrap(),
+        "192.168.1.21".parse().unwrap(),
+    ];
+    ssh.port = Some(22);
 
     let mut http = Entry::new("nas", "_http._tcp", domain);
     http.hostname = Some("nas.local".to_string());
-    http.address = Some("192.168.1.30".parse().unwrap());
+    http.addresses = vec!["192.168.1.30".parse().unwrap()];
     http.port = Some(8080);
     http.txt.insert("path".to_string(), "/admin".to_string());
 
     let mut https = Entry::new("router", "_https._tcp", domain);
     https.hostname = Some("router.local".to_string());
-    https.address = Some("192.168.1.1".parse().unwrap());
+    https.addresses = vec!["192.168.1.1".parse().unwrap()];
     https.port = Some(443);
 
     let unresolved = Entry::new("pending-printer", "_ipp._tcp", domain);
 
     vec![
-        ssh_a.with_instance_id(),
-        ssh_b.with_instance_id(),
+        ssh.with_instance_id(),
         http.with_instance_id(),
         https.with_instance_id(),
         unresolved.with_instance_id(),
@@ -90,13 +91,13 @@ mod tests {
             records.iter().any(|record| !record.has_instance_data()),
             "expected at least one pending/unresolved record"
         );
-        // The two SSH instances differ only by address but keep distinct ids.
-        let ssh_ids: std::collections::BTreeSet<_> = records
+        // The SSH service is one logical entry carrying both of its addresses.
+        let ssh: Vec<_> = records
             .iter()
             .filter(|record| record.service_type == "_ssh._tcp")
-            .map(|record| record.id.0.clone())
             .collect();
-        assert_eq!(ssh_ids.len(), 2);
+        assert_eq!(ssh.len(), 1);
+        assert_eq!(ssh[0].addresses.len(), 2);
     }
 
     #[test]

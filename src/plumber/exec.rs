@@ -225,7 +225,7 @@ mod tests {
     fn prepares_all_supported_service_fields() {
         let mut record = Entry::new("Kitchen Printer", "_ipp._tcp", "local");
         record.hostname = Some("printer.local".to_string());
-        record.address = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20)));
+        record.addresses = vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20))];
         record.port = Some(631);
         record
             .txt

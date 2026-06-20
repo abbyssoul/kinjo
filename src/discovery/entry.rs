@@ -61,7 +61,10 @@ pub struct Entry {
     pub service_type: String,
     pub domain: String,
     pub hostname: Option<String>,
-    pub address: Option<IpAddr>,
+    /// All IP addresses the service's host resolved to. A service may advertise
+    /// several (e.g. IPv4 + IPv6, or DNS load-balanced A records); they are kept
+    /// together on the single logical-service entry. The first is the primary.
+    pub addresses: Vec<IpAddr>,
     pub port: Option<u16>,
     pub txt: BTreeMap<String, String>,
     pub last_seen: Instant,
@@ -83,7 +86,7 @@ impl Entry {
             service_type,
             domain,
             hostname: None,
-            address: None,
+            addresses: Vec::new(),
             port: None,
             txt: BTreeMap::new(),
             last_seen: Instant::now(),
@@ -96,13 +99,15 @@ impl Entry {
             return self;
         }
 
+        // A logical service is identified by host and port, not by its
+        // addresses: a service's address set can change (records added/removed)
+        // without it becoming a different service, so addresses stay out of the id.
         self.id = EntryId(format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             self.name,
             self.service_type,
             self.domain,
             self.hostname.as_deref().unwrap_or(""),
-            self.address.map(|a| a.to_string()).unwrap_or_default(),
             self.port.map(|p| p.to_string()).unwrap_or_default()
         ));
         self
@@ -116,7 +121,13 @@ impl Entry {
     }
 
     pub fn has_instance_data(&self) -> bool {
-        self.hostname.is_some() || self.address.is_some() || self.port.is_some()
+        self.hostname.is_some() || !self.addresses.is_empty() || self.port.is_some()
+    }
+
+    /// The primary (first) address, used wherever a single IP is needed
+    /// (command templating, sorting, compact display).
+    pub fn primary_address(&self) -> Option<IpAddr> {
+        self.addresses.first().copied()
     }
 
     pub fn field(&self, field: &str) -> Option<String> {
@@ -125,7 +136,7 @@ impl Entry {
             "type" | "service_type" => Some(self.service_type.clone()),
             "domain" => Some(self.domain.clone()),
             "hostname" => self.hostname.clone(),
-            "address" => self.address.map(|value| value.to_string()),
+            "address" => self.primary_address().map(|value| value.to_string()),
             "port" => self.port.map(|value| value.to_string()),
             field if field.starts_with("txt.") => {
                 let key = field.trim_start_matches("txt.");
@@ -147,7 +158,7 @@ impl Entry {
             text.push(' ');
             text.push_str(hostname);
         }
-        if let Some(address) = self.address {
+        for address in &self.addresses {
             text.push(' ');
             text.push_str(&address.to_string());
         }
@@ -198,7 +209,7 @@ pub fn group_entries(records: &[Entry], mode: GroupingMode) -> Vec<EntryGroup> {
                     .cmp(&b.name)
                     .then_with(|| a.service_type.cmp(&b.service_type))
                     .then_with(|| a.hostname.cmp(&b.hostname))
-                    .then_with(|| a.address.cmp(&b.address))
+                    .then_with(|| a.addresses.cmp(&b.addresses))
                     .then_with(|| a.port.cmp(&b.port))
             });
             let first = instances[0].clone();
@@ -301,17 +312,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logical_grouping_preserves_distinct_addresses() {
-        let mut a = Entry::new("host", "_ssh._tcp", "local");
-        a.hostname = Some("host.local".to_string());
-        a.address = Some("192.168.1.10".parse().unwrap());
-        a.port = Some(22);
-        let mut b = a.clone();
-        b.address = Some("192.168.1.11".parse().unwrap());
+    fn logical_service_keeps_all_its_addresses_on_one_entry() {
+        let mut entry = Entry::new("host", "_ssh._tcp", "local");
+        entry.hostname = Some("host.local".to_string());
+        entry.addresses = vec![
+            "192.168.1.10".parse().unwrap(),
+            "192.168.1.11".parse().unwrap(),
+        ];
+        entry.port = Some(22);
 
-        let groups = group_entries(&[a, b], GroupingMode::LogicalService);
+        let groups = group_entries(&[entry], GroupingMode::LogicalService);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].instances.len(), 2);
+        assert_eq!(groups[0].instances.len(), 1);
+        assert_eq!(groups[0].instances[0].addresses.len(), 2);
     }
 
     #[test]
@@ -351,7 +364,7 @@ mod tests {
     fn resolved(name: &str, service_type: &str) -> Entry {
         let mut record = Entry::new(name, service_type, "local");
         record.hostname = Some(format!("{name}.local"));
-        record.address = Some("192.168.1.10".parse().unwrap());
+        record.addresses = vec!["192.168.1.10".parse().unwrap()];
         record.port = Some(22);
         record
     }
@@ -360,7 +373,7 @@ mod tests {
     fn field_exposes_all_supported_keys_and_aliases() {
         let mut record = Entry::new("alpha", "_ssh._tcp", "local");
         record.hostname = Some("alpha.local".to_string());
-        record.address = Some("192.0.2.5".parse().unwrap());
+        record.addresses = vec!["192.0.2.5".parse().unwrap()];
         record.port = Some(22);
         record.txt.insert("path".to_string(), "/admin".to_string());
 
@@ -383,10 +396,7 @@ mod tests {
         assert!(!pending.has_instance_data());
 
         let resolved = resolved("alpha", "_ssh._tcp").with_instance_id();
-        assert_eq!(
-            resolved.id.0,
-            "alpha|_ssh._tcp|local|alpha.local|192.168.1.10|22"
-        );
+        assert_eq!(resolved.id.0, "alpha|_ssh._tcp|local|alpha.local|22");
         assert!(resolved.has_instance_data());
     }
 
@@ -400,7 +410,7 @@ mod tests {
     fn searchable_text_includes_every_instance_field() {
         let mut record = Entry::new("alpha", "_ssh._tcp", "local");
         record.hostname = Some("alpha.local".to_string());
-        record.address = Some("192.0.2.5".parse().unwrap());
+        record.addresses = vec!["192.0.2.5".parse().unwrap()];
         record.port = Some(2222);
         record
             .txt
@@ -478,15 +488,13 @@ mod tests {
 
     #[test]
     fn command_mode_group_key_behaves_like_logical_service() {
-        let mut a = resolved("alpha", "_ssh._tcp");
-        a.address = Some("10.0.0.1".parse().unwrap());
-        let mut b = a.clone();
-        b.address = Some("10.0.0.2".parse().unwrap());
+        let mut entry = resolved("alpha", "_ssh._tcp");
+        entry.addresses = vec!["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()];
 
-        let groups = group_entries(&[a, b], GroupingMode::Command);
+        let groups = group_entries(&[entry], GroupingMode::Command);
 
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].instances.len(), 2);
+        assert_eq!(groups[0].instances.len(), 1);
         assert_eq!(groups[0].label, "alpha");
     }
 }

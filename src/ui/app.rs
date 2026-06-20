@@ -672,7 +672,7 @@ mod tests {
         let pending = Entry::new("workstation", "_ssh._tcp", "local").with_instance_id();
         let mut resolved = Entry::new("workstation", "_ssh._tcp", "local");
         resolved.hostname = Some("workstation.local".to_string());
-        resolved.address = Some("192.168.1.20".parse().unwrap());
+        resolved.addresses = vec!["192.168.1.20".parse().unwrap()];
         resolved.port = Some(22);
         let resolved = resolved.with_instance_id();
 
@@ -718,11 +718,11 @@ mode = "execute"
 
         let mut alpha = Entry::new("alpha", "_ssh._tcp", "local");
         alpha.hostname = Some("alpha.local".to_string());
-        alpha.address = Some("192.168.1.10".parse().unwrap());
+        alpha.addresses = vec!["192.168.1.10".parse().unwrap()];
         alpha.port = Some(22);
         let mut beta = Entry::new("beta", "_ssh._tcp", "local");
         beta.hostname = Some("beta.local".to_string());
-        beta.address = Some("192.168.1.11".parse().unwrap());
+        beta.addresses = vec!["192.168.1.11".parse().unwrap()];
         beta.port = Some(22);
         let web = Entry::new("web", "_http._tcp", "local");
 
@@ -744,28 +744,28 @@ mode = "execute"
     }
 
     #[test]
-    fn multiple_resolved_addresses_remain_instances() {
+    fn multiple_resolved_addresses_collapse_onto_one_service() {
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
 
-        let mut first = Entry::new("workstation", "_ssh._tcp", "local");
-        first.hostname = Some("workstation.local".to_string());
-        first.address = Some("192.168.1.20".parse().unwrap());
-        first.port = Some(22);
+        let mut service = Entry::new("workstation", "_ssh._tcp", "local");
+        service.hostname = Some("workstation.local".to_string());
+        service.addresses = vec![
+            "192.168.1.20".parse().unwrap(),
+            "192.168.1.21".parse().unwrap(),
+        ];
+        service.port = Some(22);
 
-        let mut second = first.clone();
-        second.address = Some("192.168.1.21".parse().unwrap());
-
-        tx.send(DiscoveryEvent::Upsert(first.with_instance_id()))
-            .unwrap();
-        tx.send(DiscoveryEvent::Upsert(second.with_instance_id()))
+        tx.send(DiscoveryEvent::Upsert(service.with_instance_id()))
             .unwrap();
 
         app.drain_discovery();
 
-        assert_eq!(app.records.len(), 2);
+        // One logical service that carries both of its addresses.
+        assert_eq!(app.records.len(), 1);
         assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].instances.len(), 2);
+        assert_eq!(app.visible_groups[0].instances.len(), 1);
+        assert_eq!(app.visible_groups[0].instances[0].addresses.len(), 2);
     }
 
     // ── interaction harness ────────────────────────────────────────────────
@@ -827,15 +827,22 @@ mode = "execute"
     fn ssh(name: &str, addr: &str) -> Entry {
         let mut record = Entry::new(name, "_ssh._tcp", "local");
         record.hostname = Some(format!("{name}.local"));
-        record.address = Some(addr.parse().unwrap());
+        record.addresses = vec![addr.parse().unwrap()];
         record.port = Some(22);
+        record
+    }
+
+    /// An SSH service reachable at several addresses (load-balanced).
+    fn ssh_multi(name: &str, addrs: &[&str]) -> Entry {
+        let mut record = ssh(name, addrs[0]);
+        record.addresses = addrs.iter().map(|a| a.parse().unwrap()).collect();
         record
     }
 
     fn http(name: &str) -> Entry {
         let mut record = Entry::new(name, "_http._tcp", "local");
         record.hostname = Some(format!("{name}.local"));
-        record.address = Some("192.168.1.50".parse().unwrap());
+        record.addresses = vec!["192.168.1.50".parse().unwrap()];
         record.port = Some(80);
         record
     }
@@ -1007,19 +1014,21 @@ mode = "execute"
     }
 
     #[test]
-    fn instance_picker_disambiguates_then_executes_chosen_instance() {
-        // Two instances of one logical service differing only by address.
+    fn instance_picker_disambiguates_then_executes_chosen_address() {
+        // One logical service reachable at two addresses; an address-specific
+        // command expands them into per-address candidates to pick between.
         let mut app = app_with(
             matcher_from(&[PING_ADDR]),
-            vec![ssh("alpha", "10.0.0.1"), ssh("alpha", "10.0.0.2")],
+            vec![ssh_multi("alpha", &["10.0.0.1", "10.0.0.2"])],
         );
         assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].instances.len(), 2);
+        assert_eq!(app.visible_groups[0].instances.len(), 1);
+        assert_eq!(app.visible_groups[0].instances[0].addresses.len(), 2);
 
         assert!(send(&mut app, KeyCode::Enter).is_none());
         assert_eq!(app.mode, AppMode::InstancePicker);
 
-        // Instances sort by ascending address: index 1 is 10.0.0.2.
+        // Candidates follow address order: index 1 is 10.0.0.2.
         send(&mut app, KeyCode::Down);
         let command = send(&mut app, KeyCode::Enter).expect("instance chosen");
         assert_eq!(command.argv, vec!["echo", "10.0.0.2"]);

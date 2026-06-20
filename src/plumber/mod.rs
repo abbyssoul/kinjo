@@ -1,3 +1,5 @@
+use std::net::IpAddr;
+
 use regex::Regex;
 
 use crate::discovery::{Entry, EntryGroup};
@@ -67,7 +69,7 @@ impl Matcher {
                     .instances
                     .iter()
                     .filter(|record| command.matches_record(record))
-                    .cloned()
+                    .flat_map(|record| command.candidate_instances(record))
                     .collect();
                 if matching_records.is_empty() {
                     return None;
@@ -109,17 +111,79 @@ impl CommandConfig {
     fn has_instance_specific_template(&self) -> bool {
         self.action.command.contains("{address}") || self.action.command.contains("{port}")
     }
+
+    /// Whether this command distinguishes between a service's individual
+    /// addresses (it matches on `address` or templates `{address}`).
+    fn uses_address(&self) -> bool {
+        self.action.command.contains("{address}")
+            || self.predicates.iter().any(|p| p.field == "address")
+    }
+
+    /// Expands a matched service into the per-instance candidates the command
+    /// can act on. A service carries all of its addresses on one entry; when the
+    /// command distinguishes addresses, each (matching) address becomes its own
+    /// single-address candidate so the instance picker can offer them. Otherwise
+    /// the service stays a single candidate.
+    fn candidate_instances(&self, record: &Entry) -> Vec<Entry> {
+        if !self.uses_address() || record.addresses.len() <= 1 {
+            return vec![record.clone()];
+        }
+        let matching: Vec<IpAddr> = record
+            .addresses
+            .iter()
+            .copied()
+            .filter(|addr| self.address_predicates_match(addr))
+            .collect();
+        let addresses = if matching.is_empty() {
+            record.addresses.clone()
+        } else {
+            matching
+        };
+        addresses
+            .into_iter()
+            .map(|addr| {
+                let mut candidate = record.clone();
+                candidate.addresses = vec![addr];
+                candidate
+            })
+            .collect()
+    }
+
+    /// Whether `addr` satisfies every `address` predicate on this command (so it
+    /// is an address worth offering as a candidate). Vacuously true when the
+    /// command has no `address` predicate.
+    fn address_predicates_match(&self, addr: &IpAddr) -> bool {
+        let value = addr.to_string();
+        self.predicates
+            .iter()
+            .filter(|p| p.field == "address")
+            .all(|p| p.predicate.matches_value(&value))
+    }
 }
 
 impl FieldPredicate {
     fn matches(&self, record: &Entry) -> bool {
+        // A service may advertise several addresses; match if ANY satisfies the
+        // predicate, then `candidate_instances` narrows to the matching ones.
+        if self.field == "address" {
+            return record
+                .addresses
+                .iter()
+                .any(|addr| self.predicate.matches_value(&addr.to_string()));
+        }
         let Some(value) = record.field(&self.field) else {
             return false;
         };
-        match &self.predicate {
-            Predicate::Equals(expected) => value == *expected,
+        self.predicate.matches_value(&value)
+    }
+}
+
+impl Predicate {
+    fn matches_value(&self, value: &str) -> bool {
+        match self {
+            Predicate::Equals(expected) => value == expected,
             Predicate::Contains(expected) => value.contains(expected),
-            Predicate::Regex(regex) => regex.is_match(&value),
+            Predicate::Regex(regex) => regex.is_match(value),
         }
     }
 }
@@ -500,7 +564,7 @@ mode = "execute"
         let matcher = builder.build();
         let mut record = Entry::new("site", "_http._tcp", "local");
         record.hostname = Some("site.local".to_string());
-        record.address = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+        record.addresses = vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))];
         record.port = Some(8080);
         let group = crate::discovery::group_entries(
             &[record],
