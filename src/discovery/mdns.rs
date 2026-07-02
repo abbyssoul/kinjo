@@ -10,7 +10,8 @@ use mdns_sd_discovery::{
     BrowseEvent, DiscoveredService, RemovedService, ServiceBrowserBuilder, ServiceResolverBuilder,
     TxtRecord,
 };
-use tokio::{runtime::Builder, task::JoinSet};
+use futures::future::join_all;
+use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
 use super::fake;
@@ -261,23 +262,17 @@ fn track_event(event: &BrowseEvent, tracker: &mut LivenessTracker) {
 /// each key with the resolved data on success or `None` when the service did
 /// not answer in time.
 async fn probe_services(keys: Vec<ServiceKey>) -> Vec<(ServiceKey, Option<DiscoveredService>)> {
-    let mut probes = JoinSet::new();
-    for key in keys {
-        probes.spawn(async move {
-            let result = ServiceResolverBuilder::new(&key.0, &key.1, &key.2)
-                .timeout(PROBE_TIMEOUT)
-                .resolve()
-                .await;
-            (key, result.ok())
-        });
-    }
-    let mut results = Vec::new();
-    while let Some(joined) = probes.join_next().await {
-        if let Ok(result) = joined {
-            results.push(result);
-        }
-    }
-    results
+    // Joined in-task rather than spawned: the resolve future is not `Send` on
+    // Windows (it holds raw PWSTR pointers across an await), and the browse
+    // loop runs on a current-thread runtime anyway.
+    let probes = keys.into_iter().map(|key| async move {
+        let result = ServiceResolverBuilder::new(&key.0, &key.1, &key.2)
+            .timeout(PROBE_TIMEOUT)
+            .resolve()
+            .await;
+        (key, result.ok())
+    });
+    join_all(probes).await
 }
 
 /// Feeds probe outcomes into the tracker and emits the resulting events:
