@@ -158,9 +158,7 @@ fn record_from_service(service: &DiscoveredService) -> Entry {
 }
 
 fn id_from_removal(removal: &RemovedService) -> EntryId {
-    Entry::new(&removal.name, &removal.service_type, &removal.domain)
-        .with_instance_id()
-        .id
+    EntryId::registration(&removal.name, &removal.service_type, &removal.domain)
 }
 
 /// Collapses DNS-SD TXT records into the string map [`Entry`] carries. Binary

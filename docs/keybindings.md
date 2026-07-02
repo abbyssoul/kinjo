@@ -38,6 +38,12 @@ mode:
 same_host = []
 ```
 
+The file is standard TOML. Mode and command names are validated against the
+set listed under [Bindable Commands](#bindable-commands); a typo such as
+`[brwose]` is reported as an error instead of being silently ignored. A
+configuration that unbinds every quit key (`common.quit` and `browse.quit`) is
+rejected, so the app always remains quittable.
+
 ## Key Names
 
 Supported special keys:

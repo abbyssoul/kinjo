@@ -225,9 +225,7 @@ fn record_from_discovery(discovery: &ServiceDiscovery) -> Entry {
 }
 
 fn id_from_removal(removal: &ServiceRemoval) -> EntryId {
-    Entry::new(removal.name(), removal.kind(), removal.domain())
-        .with_instance_id()
-        .id
+    EntryId::registration(removal.name(), removal.kind(), removal.domain())
 }
 
 /// Builds a resolved [`Entry`] from the individual fields reported by a

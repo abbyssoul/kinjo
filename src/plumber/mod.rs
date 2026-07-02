@@ -711,7 +711,7 @@ name = "bad-section"
 [commands]
 name = "ignored"
 "#,
-                "unsupported section",
+                "unknown field `commands`",
             ),
             (
                 "bad-requirements",
@@ -727,7 +727,7 @@ equals = "_ssh._tcp"
 command = "ssh"
 mode = "execute"
 "#,
-                "`requirements` must be an array",
+                "expected a sequence",
             ),
             (
                 "bad-predicate",
@@ -812,9 +812,12 @@ mode = "execute"
     }
 
     #[test]
-    fn unknown_escape_sequences_are_left_verbatim() {
+    fn unknown_escape_sequences_are_rejected() {
+        // `\z` is not a valid TOML escape; a real TOML parser reports it
+        // instead of silently keeping it verbatim like the old hand-rolled
+        // parser did.
         let mut builder = MatcherBuilder::new();
-        builder
+        let err = builder
             .add_str(
                 "verbatim",
                 r#"
@@ -830,12 +833,9 @@ command = "ssh"
 mode = "execute"
 "#,
             )
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(
-            builder.build().commands()[0].description.as_deref(),
-            Some(r"keep \z as-is")
-        );
+        assert!(err.to_string().starts_with("verbatim:"));
     }
 
     #[test]
@@ -903,11 +903,7 @@ mode = "execute"
                 .to_string()
                 .contains("`service_type.equals` must be a string")
         );
-        assert!(
-            array_description
-                .to_string()
-                .contains("`description` must be a string")
-        );
+        assert!(array_description.to_string().contains("expected a string"));
     }
 
     #[test]
@@ -915,7 +911,7 @@ mode = "execute"
         let mut builder = MatcherBuilder::new();
         let err = builder.add_str("stray", "name = \"orphan\"\n").unwrap_err();
 
-        assert!(err.to_string().contains("key outside a section"));
+        assert!(err.to_string().contains("unknown field `name`"));
     }
 
     #[test]
@@ -929,6 +925,24 @@ mode = "execute"
         builder.add_file(&path).unwrap();
 
         assert_eq!(builder.build().commands()[0].name, "ssh");
+
+        remove(&dir);
+    }
+
+    #[test]
+    fn lenient_load_skips_malformed_files_with_a_warning() {
+        let dir = temp_dir("lenient");
+        fs::write(dir.join("good.toml"), command_toml("good", "true")).unwrap();
+        fs::write(dir.join("bad.toml"), "not toml at all [").unwrap();
+
+        let mut builder = MatcherBuilder::new();
+        let warnings = load_from_dirs_lenient(&mut builder, std::slice::from_ref(&dir));
+
+        let matcher = builder.build();
+        assert_eq!(matcher.command_count(), 1);
+        assert_eq!(matcher.commands()[0].name, "good");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("bad.toml"));
 
         remove(&dir);
     }

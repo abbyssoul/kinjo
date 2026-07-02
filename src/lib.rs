@@ -29,12 +29,10 @@ pub fn run() -> Result<()> {
     color_eyre::install()?;
 
     let cli = ui::cli::parse();
-    let matcher = ui::config::load_matcher(&cli)?;
+    let (matcher, config_warnings) = ui::config::load_matcher(&cli)?;
 
     if cli.command == CliCommand::ListCommands {
         print_commands(&matcher);
-        return Ok(());
-    } else if cli.command != CliCommand::Run {
         return Ok(());
     }
 
@@ -43,9 +41,21 @@ pub fn run() -> Result<()> {
     let discovery_rx = discovery.events();
 
     let mut app = App::new(cli, matcher, keybindings, discovery_rx);
+    if !config_warnings.is_empty() {
+        app.status = format!(
+            "skipped {} command config file(s); details printed on exit",
+            config_warnings.len()
+        );
+    }
     let exec_action = ratatui::run(|terminal| app.run(terminal))?;
 
     drop(discovery);
+
+    // The status line is transient; repeat skipped-config details somewhere
+    // they survive — the terminal scrollback after the TUI has been torn down.
+    for warning in &config_warnings {
+        eprintln!("warning: {warning}");
+    }
 
     if let Some(action) = exec_action {
         let command_line = action.argv.join(" ");

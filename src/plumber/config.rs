@@ -9,6 +9,7 @@ use std::{
 
 use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
+use serde_derive::Deserialize;
 
 use super::{ActionMode, CommandAction, CommandConfig, FieldPredicate, Matcher, Predicate};
 
@@ -110,254 +111,151 @@ pub fn load_from_dirs(builder: &mut MatcherBuilder, dirs: &[PathBuf]) -> Result<
             continue;
         }
         builder.start_layer();
-        let mut files = fs::read_dir(dir)?
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
-            .collect::<Vec<_>>();
-        files.sort();
-        for path in files {
+        for path in toml_files_in(dir)? {
             builder.add_file(&path)?;
         }
     }
     Ok(())
 }
 
-#[derive(Debug, Default)]
+/// Like [`load_from_dirs`], but never fails: unreadable directories and
+/// malformed command files are skipped and reported as warnings, so one bad
+/// file (e.g. in the shared system directory) cannot prevent the app from
+/// starting. `list-commands` keeps using the strict variant, since validating
+/// configs is its whole point.
+pub fn load_from_dirs_lenient(builder: &mut MatcherBuilder, dirs: &[PathBuf]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for dir in dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        builder.start_layer();
+        let files = match toml_files_in(dir) {
+            Ok(files) => files,
+            Err(err) => {
+                warnings.push(format!("cannot read {}: {err}", dir.display()));
+                continue;
+            }
+        };
+        for path in files {
+            if let Err(err) = builder.add_file(&path) {
+                warnings.push(err.to_string());
+            }
+        }
+    }
+    warnings
+}
+
+/// The `.toml` files directly inside `dir`, sorted by name (the load order
+/// within one overlay layer).
+fn toml_files_in(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+        .collect::<Vec<_>>();
+    files.sort();
+    Ok(files)
+}
+
+/// On-disk shape of a command file, deserialized by the `toml` crate. The
+/// `match` table stays a generic [`toml::Table`] because its keys are service
+/// field names (possibly dotted, e.g. `txt.path`), not a fixed schema.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
-    metadata: BTreeMap<String, Value>,
-    action: BTreeMap<String, Value>,
-    predicates: BTreeMap<String, BTreeMap<String, Value>>,
+    metadata: RawMetadata,
+    action: RawAction,
+    #[serde(rename = "match", default)]
+    matchers: toml::Table,
 }
 
-#[derive(Debug, Clone)]
-enum Section {
-    Metadata,
-    Action,
-    Match(String),
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMetadata {
+    name: String,
+    description: Option<String>,
+    #[serde(default)]
+    requirements: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-enum Value {
-    String(String),
-    Array(Vec<String>),
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAction {
+    description: Option<String>,
+    command: String,
+    mode: String,
 }
 
 fn parse_command_config(source_name: &str, source: &str) -> Result<CommandConfig> {
-    let raw = parse_minimal_toml(source_name, source)?;
-    let name = required_string(&raw.metadata, "name", source_name)?;
-    let description = optional_string(&raw.metadata, "description")?;
-    let requirements = optional_array(&raw.metadata, "requirements")?;
-    let action_description = optional_string(&raw.action, "description")?;
-    let command = required_string(&raw.action, "command", source_name)?;
-    let mode = match required_string(&raw.action, "mode", source_name)?.as_str() {
+    let raw: RawConfig = toml::from_str(source).map_err(|err| eyre!("{source_name}: {err}"))?;
+
+    let mode = match raw.action.mode.as_str() {
         "fork" => ActionMode::Fork,
         "execute" | "exec" => ActionMode::Execute,
         value => return Err(eyre!("{source_name}: invalid action mode `{value}`")),
     };
 
     let mut predicates = Vec::new();
-    for (field, values) in raw.predicates {
-        for (kind, value) in values {
-            let value = match value {
-                Value::String(value) => value,
-                Value::Array(_) => {
-                    return Err(eyre!(
-                        "{source_name}: match `{field}.{kind}` must be a string"
-                    ));
-                }
-            };
-            let predicate = match kind.as_str() {
-                "equals" => Predicate::Equals(value),
-                "contains" => Predicate::Contains(value),
-                "regex" => Predicate::Regex(Regex::new(&value)?),
-                _ => {
-                    return Err(eyre!(
-                        "{source_name}: unsupported predicate `{field}.{kind}`"
-                    ));
-                }
-            };
-            predicates.push(FieldPredicate {
-                field: field.clone(),
-                predicate,
-            });
-        }
-    }
-
+    collect_predicates(source_name, "", &raw.matchers, &mut predicates)?;
     if predicates.is_empty() {
         return Err(eyre!(
-            "{source_name}: command `{name}` has no match predicates"
+            "{source_name}: command `{}` has no match predicates",
+            raw.metadata.name
         ));
     }
 
     Ok(CommandConfig {
-        name,
-        description,
-        requirements,
+        name: raw.metadata.name,
+        description: raw.metadata.description,
+        requirements: raw.metadata.requirements,
         predicates,
         action: CommandAction {
-            description: action_description,
-            command,
+            description: raw.action.description,
+            command: raw.action.command,
             mode,
         },
     })
 }
 
-fn parse_minimal_toml(source_name: &str, source: &str) -> Result<RawConfig> {
-    let mut raw = RawConfig::default();
-    let mut section: Option<Section> = None;
-
-    for (index, line) in source.lines().enumerate() {
-        let line_no = index + 1;
-        let line = strip_comment(line).trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            let name = &line[1..line.len() - 1];
-            section = Some(match name {
-                "metadata" => Section::Metadata,
-                "action" => Section::Action,
-                value if value.starts_with("match.") => {
-                    Section::Match(value.trim_start_matches("match.").to_string())
-                }
-                _ => {
-                    return Err(eyre!(
-                        "{source_name}:{line_no}: unsupported section `{name}`"
-                    ));
-                }
-            });
-            continue;
-        }
-
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(eyre!("{source_name}:{line_no}: expected key = value"));
-        };
-        let key = key.trim().to_string();
-        let value = parse_value(source_name, line_no, value.trim())?;
-        match &section {
-            Some(Section::Metadata) => {
-                raw.metadata.insert(key, value);
-            }
-            Some(Section::Action) => {
-                raw.action.insert(key, value);
-            }
-            Some(Section::Match(field)) => {
-                raw.predicates
-                    .entry(field.clone())
-                    .or_default()
-                    .insert(key, value);
-            }
-            None => return Err(eyre!("{source_name}:{line_no}: key outside a section")),
-        }
-    }
-
-    Ok(raw)
-}
-
-fn strip_comment(line: &str) -> &str {
-    let mut in_string = false;
-    let mut escaped = false;
-    for (index, ch) in line.char_indices() {
-        match ch {
-            '\\' if in_string => escaped = !escaped,
-            '"' if !escaped => in_string = !in_string,
-            '#' if !in_string => return &line[..index],
-            _ => escaped = false,
-        }
-    }
-    line
-}
-
-fn parse_value(source_name: &str, line_no: usize, value: &str) -> Result<Value> {
-    if value.starts_with('"') {
-        return Ok(Value::String(parse_string(source_name, line_no, value)?));
-    }
-    if value.starts_with('[') && value.ends_with(']') {
-        let inner = value[1..value.len() - 1].trim();
-        if inner.is_empty() {
-            return Ok(Value::Array(Vec::new()));
-        }
-        let mut values = Vec::new();
-        for item in split_array(inner) {
-            values.push(parse_string(source_name, line_no, item.trim())?);
-        }
-        return Ok(Value::Array(values));
-    }
-    Err(eyre!(
-        "{source_name}:{line_no}: only quoted strings and string arrays are supported"
-    ))
-}
-
-fn parse_string(source_name: &str, line_no: usize, value: &str) -> Result<String> {
-    if !value.starts_with('"') || !value.ends_with('"') || value.len() < 2 {
-        return Err(eyre!("{source_name}:{line_no}: expected quoted string"));
-    }
-    let raw = &value[1..value.len() - 1];
-    let mut parsed = String::new();
-    let mut chars = raw.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            let Some(next) = chars.next() else {
-                return Err(eyre!("{source_name}:{line_no}: trailing string escape"));
-            };
-            match next {
-                'n' => parsed.push('\n'),
-                't' => parsed.push('\t'),
-                'r' => parsed.push('\r'),
-                '"' => parsed.push('"'),
-                '\\' => parsed.push('\\'),
-                other => {
-                    parsed.push('\\');
-                    parsed.push(other);
-                }
-            }
-        } else {
-            parsed.push(ch);
-        }
-    }
-    Ok(parsed)
-}
-
-fn split_array(value: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut start = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (index, ch) in value.char_indices() {
-        match ch {
-            '\\' if in_string => escaped = !escaped,
-            '"' if !escaped => in_string = !in_string,
-            ',' if !in_string => {
-                result.push(&value[start..index]);
-                start = index + 1;
-            }
-            _ => escaped = false,
-        }
-    }
-    result.push(&value[start..]);
-    result
-}
-
-fn required_string(
-    values: &BTreeMap<String, Value>,
-    key: &str,
+/// Walks the `[match.*]` table tree, turning each `<kind> = "value"` leaf into
+/// a [`FieldPredicate`] on the field named by the table path. Nested tables
+/// extend the field name with a dot (`[match.txt.path]` matches the `txt.path`
+/// service field).
+fn collect_predicates(
     source_name: &str,
-) -> Result<String> {
-    optional_string(values, key)?.ok_or_else(|| eyre!("{source_name}: missing `{key}`"))
-}
-
-fn optional_string(values: &BTreeMap<String, Value>, key: &str) -> Result<Option<String>> {
-    match values.get(key) {
-        Some(Value::String(value)) => Ok(Some(value.clone())),
-        Some(Value::Array(_)) => Err(eyre!("`{key}` must be a string")),
-        None => Ok(None),
+    field: &str,
+    table: &toml::Table,
+    predicates: &mut Vec<FieldPredicate>,
+) -> Result<()> {
+    for (key, value) in table {
+        let path = if field.is_empty() {
+            key.clone()
+        } else {
+            format!("{field}.{key}")
+        };
+        match value {
+            toml::Value::Table(nested) => {
+                collect_predicates(source_name, &path, nested, predicates)?;
+            }
+            _ if field.is_empty() => {
+                return Err(eyre!(
+                    "{source_name}: match `{path}` must be a table like `[match.<field>]`"
+                ));
+            }
+            toml::Value::String(value) => {
+                let predicate = match key.as_str() {
+                    "equals" => Predicate::Equals(value.clone()),
+                    "contains" => Predicate::Contains(value.clone()),
+                    "regex" => Predicate::Regex(Regex::new(value)?),
+                    _ => return Err(eyre!("{source_name}: unsupported predicate `{path}`")),
+                };
+                predicates.push(FieldPredicate {
+                    field: field.to_string(),
+                    predicate,
+                });
+            }
+            _ => return Err(eyre!("{source_name}: match `{path}` must be a string")),
+        }
     }
-}
-
-fn optional_array(values: &BTreeMap<String, Value>, key: &str) -> Result<Vec<String>> {
-    match values.get(key) {
-        Some(Value::Array(value)) => Ok(value.clone()),
-        Some(Value::String(_)) => Err(eyre!("`{key}` must be an array")),
-        None => Ok(Vec::new()),
-    }
+    Ok(())
 }

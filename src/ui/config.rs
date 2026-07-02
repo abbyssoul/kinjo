@@ -7,12 +7,21 @@ use super::{
     keymap::{self, KeyBindings},
 };
 
-pub fn load_matcher(cli: &Cli) -> Result<Matcher> {
+/// Load the command rules for this invocation. For a normal run, malformed
+/// files are skipped and returned as warnings so a single bad config cannot
+/// prevent the TUI from starting; `list-commands` loads strictly, since it is
+/// the config validation tool.
+pub fn load_matcher(cli: &Cli) -> Result<(Matcher, Vec<String>)> {
     let mut builder = MatcherBuilder::new();
 
     let dirs = matcher_config_dirs(cli);
-    plumber::load_from_dirs(&mut builder, &dirs)?;
-    Ok(builder.build())
+    let warnings = if cli.command == CliCommand::ListCommands {
+        plumber::load_from_dirs(&mut builder, &dirs)?;
+        Vec::new()
+    } else {
+        plumber::load_from_dirs_lenient(&mut builder, &dirs)
+    };
+    Ok((builder.build(), warnings))
 }
 
 fn matcher_config_dirs(cli: &Cli) -> Vec<std::path::PathBuf> {
@@ -96,11 +105,12 @@ mode = "execute"
         write_command(&base, "mosh.toml", "mosh", "mosh base");
         write_command(&overlay, "ssh.toml", "ssh", "ssh overlay");
 
-        let matcher = load_matcher(&test_cli(
+        let (matcher, warnings) = load_matcher(&test_cli(
             CliCommand::ListCommands,
             vec![base.clone(), overlay.clone()],
         ))
         .unwrap();
+        assert!(warnings.is_empty());
 
         assert_eq!(matcher.command_count(), 2);
         assert_eq!(matcher.commands()[0].name, "mosh");

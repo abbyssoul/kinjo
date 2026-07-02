@@ -4,12 +4,38 @@ use std::{
     time::Instant,
 };
 
+/// Identity of an [`Entry`]. The registration triple (name, service type,
+/// domain) identifies a DNS-SD registration; `instance` carries the resolved
+/// SRV host/port identity once known, keeping concurrent instances of the same
+/// registration distinct. A structured key (rather than a joined string) so
+/// that separator characters appearing in a service name cannot make two
+/// different identities compare equal.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntryId(pub String);
+pub struct EntryId {
+    pub name: String,
+    pub service_type: String,
+    pub domain: String,
+    pub instance: Option<(String, Option<u16>)>,
+}
 
 impl EntryId {
-    pub fn registration_key(&self) -> String {
-        self.0.split('|').take(3).collect::<Vec<_>>().join("|")
+    /// The id of a (not yet resolved) registration.
+    pub fn registration(
+        name: impl Into<String>,
+        service_type: impl Into<String>,
+        domain: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            service_type: service_type.into(),
+            domain: domain.into(),
+            instance: None,
+        }
+    }
+
+    /// The registration triple shared by every instance id of one registration.
+    pub fn registration_key(&self) -> (&str, &str, &str) {
+        (&self.name, &self.service_type, &self.domain)
     }
 }
 
@@ -79,7 +105,7 @@ impl Entry {
         let name = name.into();
         let service_type = service_type.into();
         let domain = domain.into();
-        let id = EntryId(format!("{name}|{service_type}|{domain}"));
+        let id = EntryId::registration(name.clone(), service_type.clone(), domain.clone());
         Self {
             id,
             name,
@@ -94,30 +120,23 @@ impl Entry {
     }
 
     pub fn with_instance_id(mut self) -> Self {
-        if !self.has_instance_data() {
-            self.id = self.pending_id();
-            return self;
+        let mut id = self.pending_id();
+        if self.has_instance_data() {
+            // A logical service is identified by host and port, not by its
+            // addresses: a service's address set can change (records added/removed)
+            // without it becoming a different service, so addresses stay out of the id.
+            id.instance = Some((self.hostname.clone().unwrap_or_default(), self.port));
         }
-
-        // A logical service is identified by host and port, not by its
-        // addresses: a service's address set can change (records added/removed)
-        // without it becoming a different service, so addresses stay out of the id.
-        self.id = EntryId(format!(
-            "{}|{}|{}|{}|{}",
-            self.name,
-            self.service_type,
-            self.domain,
-            self.hostname.as_deref().unwrap_or(""),
-            self.port.map(|p| p.to_string()).unwrap_or_default()
-        ));
+        self.id = id;
         self
     }
 
     pub fn pending_id(&self) -> EntryId {
-        EntryId(format!(
-            "{}|{}|{}",
-            self.name, self.service_type, self.domain
-        ))
+        EntryId::registration(
+            self.name.clone(),
+            self.service_type.clone(),
+            self.domain.clone(),
+        )
     }
 
     pub fn has_instance_data(&self) -> bool {
@@ -390,20 +409,41 @@ mod tests {
     }
 
     #[test]
-    fn pending_record_keeps_three_field_id_until_resolved() {
+    fn pending_record_has_no_instance_identity_until_resolved() {
         let pending = Entry::new("alpha", "_ssh._tcp", "local").with_instance_id();
-        assert_eq!(pending.id.0, "alpha|_ssh._tcp|local");
+        assert_eq!(pending.id, pending.pending_id());
+        assert_eq!(pending.id.instance, None);
         assert!(!pending.has_instance_data());
 
         let resolved = resolved("alpha", "_ssh._tcp").with_instance_id();
-        assert_eq!(resolved.id.0, "alpha|_ssh._tcp|local|alpha.local|22");
+        assert_eq!(
+            resolved.id.instance,
+            Some(("alpha.local".to_string(), Some(22)))
+        );
         assert!(resolved.has_instance_data());
     }
 
     #[test]
-    fn registration_key_keeps_first_three_id_fields() {
+    fn registration_key_is_the_name_type_domain_triple() {
         let resolved = resolved("alpha", "_ssh._tcp").with_instance_id();
-        assert_eq!(resolved.id.registration_key(), "alpha|_ssh._tcp|local");
+        assert_eq!(
+            resolved.id.registration_key(),
+            ("alpha", "_ssh._tcp", "local")
+        );
+        assert_eq!(
+            resolved.id.registration_key(),
+            resolved.pending_id().registration_key()
+        );
+    }
+
+    #[test]
+    fn separator_characters_in_names_cannot_collide_ids() {
+        // With a joined-string id, `a|b` + `c` and `a` + `b|c` were equal.
+        let first = Entry::new("a|b", "c", "local").with_instance_id();
+        let second = Entry::new("a", "b|c", "local").with_instance_id();
+
+        assert_ne!(first.id, second.id);
+        assert_ne!(first.id.registration_key(), second.id.registration_key());
     }
 
     #[test]

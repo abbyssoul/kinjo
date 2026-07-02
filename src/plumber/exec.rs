@@ -14,8 +14,14 @@ pub struct PreparedCommand {
 }
 
 pub fn prepare(action: &CommandAction, record: &Entry) -> Result<PreparedCommand> {
-    let expanded = interpolate(&action.command, record)?;
-    let argv = split_command_line(&expanded)?;
+    // Split the template into arguments *before* interpolating, so a service
+    // field (which arrives from untrusted devices on the network) can only ever
+    // fill in an argument — quotes or whitespace in a value cannot add, remove,
+    // or reshape arguments.
+    let argv = split_command_line(&action.command)?
+        .iter()
+        .map(|token| interpolate(token, record))
+        .collect::<Result<Vec<_>>>()?;
     if argv.is_empty() {
         return Err(eyre!("action command expanded to an empty argv"));
     }
@@ -26,13 +32,19 @@ pub fn prepare(action: &CommandAction, record: &Entry) -> Result<PreparedCommand
 }
 
 pub fn fork(command: &PreparedCommand) -> Result<()> {
-    Command::new(&command.argv[0])
+    let mut child = Command::new(&command.argv[0])
         .args(&command.argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|err| spawn_error(&command.argv[0], err))?;
+    // Reap the child once it exits so it does not linger as a zombie for the
+    // lifetime of the TUI. The thread parks in `wait` and goes away with the
+    // child; if the TUI exits first, orphans are re-parented and reaped by init.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
@@ -269,6 +281,43 @@ mod tests {
         assert_eq!(
             prepared.argv,
             vec!["printf", "two words", "one arg", "single quoted", "\\"]
+        );
+    }
+
+    #[test]
+    fn interpolated_values_cannot_inject_arguments() {
+        // Service fields arrive from untrusted devices on the network. Quotes
+        // and whitespace in a value must land inside one argument, never create
+        // new ones (e.g. an extra `-oProxyCommand=...` for ssh).
+        let mut record = Entry::new("alpha", "_ssh._tcp", "local");
+        record.hostname = Some("h.local' -oProxyCommand=evil '".to_string());
+        let action = CommandAction {
+            description: None,
+            command: "ssh {hostname}".to_string(),
+            mode: ActionMode::Execute,
+        };
+
+        let prepared = prepare(&action, &record).unwrap();
+
+        assert_eq!(prepared.argv, vec!["ssh", "h.local' -oProxyCommand=evil '"]);
+    }
+
+    #[test]
+    fn values_with_quotes_and_spaces_stay_single_arguments() {
+        // A legitimate name like `O'Brien Printer` must not break tokenizing.
+        let mut record = Entry::new("O'Brien Printer", "_ipp._tcp", "local");
+        record.hostname = Some("printer.local".to_string());
+        let action = CommandAction {
+            description: None,
+            command: "notify-send {name} {hostname}".to_string(),
+            mode: ActionMode::Fork,
+        };
+
+        let prepared = prepare(&action, &record).unwrap();
+
+        assert_eq!(
+            prepared.argv,
+            vec!["notify-send", "O'Brien Printer", "printer.local"]
         );
     }
 

@@ -35,3 +35,4 @@ tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "macros"] }
 tokio-util = "0.7.18"
 mdns-sd-discovery = "0.1.0"
 zeroconf-tokio = "0.3.2"
+toml = "1.1.2"

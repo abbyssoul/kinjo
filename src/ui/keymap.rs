@@ -59,6 +59,7 @@ impl KeyBindings {
                 bindings.apply_file(path)?;
             }
         }
+        bindings.ensure_quit_reachable()?;
         Ok(bindings)
     }
 
@@ -79,34 +80,50 @@ impl KeyBindings {
 
     fn apply_file(&mut self, path: &Path) -> Result<()> {
         let source = fs::read_to_string(path)?;
-        let mut mode: Option<String> = None;
-        for (index, line) in source.lines().enumerate() {
-            let line_no = index + 1;
-            let line = strip_comment(line).trim();
-            if line.is_empty() {
-                continue;
+        let parsed: BTreeMap<String, BTreeMap<String, Vec<String>>> =
+            toml::from_str(&source).map_err(|err| eyre!("{}: {err}", path.display()))?;
+        for (mode, commands) in parsed {
+            for (command, keys) in commands {
+                // Only bindings that exist in the defaults are meaningful; an
+                // unknown pair is a typo that would otherwise silently do nothing.
+                let binding = (mode.clone(), command);
+                if !self.bindings.contains_key(&binding) {
+                    return Err(eyre!(
+                        "{}: unknown keybinding `{mode}.{}`",
+                        path.display(),
+                        binding.1
+                    ));
+                }
+                let specs = keys
+                    .iter()
+                    .map(|key| {
+                        KeySpec::parse(key).map_err(|err| {
+                            eyre!("{}: `{mode}.{}`: {err}", path.display(), binding.1)
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                self.bindings.insert(binding, specs);
             }
-            if line.starts_with('[') && line.ends_with(']') {
-                mode = Some(line[1..line.len() - 1].trim().to_string());
-                continue;
-            }
-            let Some((command, value)) = line.split_once('=') else {
-                return Err(eyre!(
-                    "{}:{line_no}: expected command = [keys]",
-                    path.display()
-                ));
-            };
-            let Some(mode) = &mode else {
-                return Err(eyre!(
-                    "{}:{line_no}: keybinding outside a section",
-                    path.display()
-                ));
-            };
-            let keys = parse_key_array(path, line_no, value.trim())?;
-            self.bindings
-                .insert((mode.clone(), command.trim().to_string()), keys);
         }
         Ok(())
+    }
+
+    /// Guard against a configuration that unbinds every way out of the app.
+    fn ensure_quit_reachable(&self) -> Result<()> {
+        let quit_bound = [("common", "quit"), ("browse", "quit")]
+            .iter()
+            .any(|(mode, command)| {
+                self.bindings
+                    .get(&(mode.to_string(), command.to_string()))
+                    .is_some_and(|keys| !keys.is_empty())
+            });
+        if quit_bound {
+            Ok(())
+        } else {
+            Err(eyre!(
+                "keybindings leave no way to quit: bind `common.quit` or `browse.quit`"
+            ))
+        }
     }
 }
 
@@ -137,7 +154,12 @@ impl KeySpec {
     }
 
     fn matches(&self, event: KeyEvent) -> bool {
-        self.code == event.code && event.modifiers.contains(KeyModifiers::CONTROL) == self.ctrl
+        // SHIFT is deliberately ignored: it is already encoded in the char
+        // (`?` arrives as Char('?') with SHIFT set). ALT is not part of any
+        // spec, so an ALT-modified key must not trigger a plain binding.
+        self.code == event.code
+            && event.modifiers.contains(KeyModifiers::CONTROL) == self.ctrl
+            && !event.modifiers.contains(KeyModifiers::ALT)
     }
 }
 
@@ -171,33 +193,6 @@ fn config_paths(
     } else {
         Vec::new()
     }
-}
-
-fn strip_comment(line: &str) -> &str {
-    line.split_once('#').map(|(line, _)| line).unwrap_or(line)
-}
-
-fn parse_key_array(path: &Path, line_no: usize, value: &str) -> Result<Vec<KeySpec>> {
-    if !value.starts_with('[') || !value.ends_with(']') {
-        return Err(eyre!("{}:{line_no}: expected key array", path.display()));
-    }
-    let inner = value[1..value.len() - 1].trim();
-    if inner.is_empty() {
-        return Ok(Vec::new());
-    }
-    inner
-        .split(',')
-        .map(|item| {
-            let item = item.trim();
-            if !item.starts_with('"') || !item.ends_with('"') {
-                return Err(eyre!(
-                    "{}:{line_no}: keys must be quoted strings",
-                    path.display()
-                ));
-            }
-            KeySpec::parse(&item[1..item.len() - 1])
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -293,7 +288,7 @@ close = ["escape", "backspace"] # trailing comment
     }
 
     #[test]
-    fn invalid_files_report_line_or_key_errors() {
+    fn invalid_files_report_file_and_key_errors() {
         let outside_section = temp_file("outside-section", r#"quit = ["q"]"#);
         let unquoted = temp_file(
             "unquoted",
@@ -314,17 +309,80 @@ quit = ["meta-q"]
         let unquoted_err = KeyBindings::load(std::slice::from_ref(&unquoted)).unwrap_err();
         let unsupported_err = KeyBindings::load(std::slice::from_ref(&unsupported)).unwrap_err();
 
-        assert!(outside_err.to_string().contains("outside a section"));
+        // Every parse error is prefixed with the offending file's path; the
+        // TOML errors also carry a snippet of the offending line.
         assert!(
-            unquoted_err
+            outside_err
                 .to_string()
-                .contains("keys must be quoted strings")
+                .contains(&outside_section.display().to_string())
         );
+        assert!(unquoted_err.to_string().contains("quit = [q]"));
         assert!(unsupported_err.to_string().contains("unsupported key"));
+        assert!(unsupported_err.to_string().contains("`browse.quit`"));
 
         remove(&outside_section);
         remove(&unquoted);
         remove(&unsupported);
+    }
+
+    #[test]
+    fn unknown_modes_and_commands_are_rejected() {
+        let bad_mode = temp_file(
+            "bad-mode",
+            r#"
+[brwose]
+quit = ["x"]
+"#,
+        );
+        let bad_command = temp_file(
+            "bad-command",
+            r#"
+[browse]
+qiut = ["x"]
+"#,
+        );
+
+        let mode_err = KeyBindings::load(std::slice::from_ref(&bad_mode)).unwrap_err();
+        let command_err = KeyBindings::load(std::slice::from_ref(&bad_command)).unwrap_err();
+
+        assert!(mode_err.to_string().contains("unknown keybinding"));
+        assert!(mode_err.to_string().contains("brwose.quit"));
+        assert!(command_err.to_string().contains("browse.qiut"));
+
+        remove(&bad_mode);
+        remove(&bad_command);
+    }
+
+    #[test]
+    fn unbinding_every_quit_key_is_rejected() {
+        let path = temp_file(
+            "no-quit",
+            r#"
+[browse]
+quit = []
+
+[common]
+quit = []
+"#,
+        );
+
+        let err = KeyBindings::load(std::slice::from_ref(&path)).unwrap_err();
+
+        assert!(err.to_string().contains("no way to quit"));
+
+        remove(&path);
+    }
+
+    #[test]
+    fn alt_modified_keys_do_not_trigger_plain_bindings() {
+        let bindings = KeyBindings::default();
+
+        assert!(bindings.is("browse", "down", key(KeyCode::Char('j'))));
+        assert!(!bindings.is(
+            "browse",
+            "down",
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT)
+        ));
     }
 
     #[test]

@@ -209,6 +209,12 @@ mode = "fork"
 
 ## Parser Notes
 
-The command parser supports the subset of TOML used above: section headers,
-quoted strings, string arrays, and comments with `#`. Values must be quoted
-strings unless the field expects an array, such as `requirements`.
+Command files are standard TOML. Values must be quoted strings unless the
+field expects an array of strings, such as `requirements`. Unknown sections,
+unknown metadata/action keys, and unknown predicate kinds are rejected with an
+error naming the offending file.
+
+When the TUI starts normally, a malformed command file is skipped with a
+warning (shown on the status line and printed on exit) so one bad file cannot
+prevent the app from starting. `avahi-tui list-commands` loads strictly and
+fails on the first invalid file — use it to validate your configuration.

@@ -140,9 +140,10 @@ impl App {
                 }
                 DiscoveryEvent::Remove(id) => {
                     let registration_key = id.registration_key();
+                    let before = self.records.len();
                     self.records
                         .retain(|record_id, _| record_id.registration_key() != registration_key);
-                    changed = true;
+                    changed |= self.records.len() != before;
                 }
                 DiscoveryEvent::Status(status) => {
                     self.status = status;
