@@ -1379,9 +1379,9 @@ dependencies = [
 
 [[package]]
 name = "mdns-sd-discovery"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cd4645d670afdaf6eeb95d83a900a94032b9577c67d6d8f15b3a7a0f462f566"
+checksum = "300f46b9a2c2d4f4c6b544d0fc87ff9f01b19b65b161a5726250f3f738556abf"
 dependencies = [
  "futures-util",
  "libc",
