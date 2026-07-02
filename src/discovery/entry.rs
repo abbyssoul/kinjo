@@ -197,6 +197,36 @@ impl Entry {
     pub fn display_name(&self) -> String {
         decode_dns_sd_escapes(&self.name)
     }
+
+    /// The display name with Avahi's per-interface ` [aa:bb:cc:dd:ee:ff]` MAC
+    /// decoration stripped. A multi-homed host publishing the same service on
+    /// several interfaces (e.g. avahi-daemon's workstation publisher) uses one
+    /// instance name per interface, differing only in this suffix; the base
+    /// name is what identifies the service to a person. Bracket suffixes that
+    /// are not a MAC address (e.g. a printer's `[9917FB]` serial) are kept.
+    pub fn base_display_name(&self) -> String {
+        let display = self.display_name();
+        match display.rsplit_once(" [") {
+            Some((base, rest)) if !base.is_empty() && is_mac_suffix(rest) => base.to_string(),
+            _ => display,
+        }
+    }
+}
+
+/// Whether `rest` (the text following ` [`) is a MAC address plus the closing
+/// bracket: six pairs of hex digits separated by colons.
+fn is_mac_suffix(rest: &str) -> bool {
+    let Some(mac) = rest.strip_suffix(']') else {
+        return false;
+    };
+    let mut groups = 0;
+    for group in mac.split(':') {
+        if group.len() != 2 || !group.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            return false;
+        }
+        groups += 1;
+    }
+    groups == 6
 }
 
 #[derive(Debug, Clone)]
@@ -259,9 +289,14 @@ fn group_key(record: &Entry, mode: GroupingMode) -> String {
     match mode {
         // `Command` grouping is handled by a dedicated path in `App`; if it ever
         // reaches `group_entries` it behaves like logical-service grouping.
+        //
+        // The base display name (not the raw instance name) keys the group, so
+        // a multi-homed host's per-interface instances — same service, names
+        // differing only in Avahi's ` [MAC]` decoration — collapse into one
+        // logical service whose instances carry the per-interface addresses.
         GroupingMode::LogicalService | GroupingMode::Command => format!(
             "{}|{}|{}|{}|{}",
-            record.name,
+            record.base_display_name(),
             record.service_type,
             record.domain,
             record.hostname.as_deref().unwrap_or("<unresolved-host>"),
@@ -280,7 +315,7 @@ fn group_key(record: &Entry, mode: GroupingMode) -> String {
 
 fn group_label(record: &Entry, mode: GroupingMode) -> String {
     match mode {
-        GroupingMode::LogicalService | GroupingMode::Command => record.display_name(),
+        GroupingMode::LogicalService | GroupingMode::Command => record.base_display_name(),
         GroupingMode::Host => record
             .hostname
             .clone()
@@ -369,6 +404,69 @@ mod tests {
         let record = Entry::new(r"Caf\195\169", "_http._tcp", "local");
 
         assert_eq!(record.display_name(), "Café");
+    }
+
+    #[test]
+    fn base_display_name_strips_interface_mac_decoration() {
+        // Raw Avahi escapes for `rpi5-0 [d8:3a:dd:f4:b1:dc]`.
+        let per_interface = Entry::new(
+            r"rpi5-0\032\091d8\0583a\058dd\058f4\058b1\058dc\093",
+            "_workstation._tcp",
+            "local",
+        );
+        assert_eq!(per_interface.base_display_name(), "rpi5-0");
+
+        // A non-MAC bracket suffix (printer serial) is not decoration.
+        let printer = Entry::new(r"HP\032Printer\032\0919917FB\093", "_ipp._tcp", "local");
+        assert_eq!(printer.base_display_name(), "HP Printer [9917FB]");
+
+        // Plain names and near-misses are untouched.
+        assert_eq!(
+            Entry::new("plain", "_ssh._tcp", "local").base_display_name(),
+            "plain"
+        );
+        assert_eq!(
+            Entry::new("x [d8:3a:dd:f4:b1]", "_ssh._tcp", "local").base_display_name(),
+            "x [d8:3a:dd:f4:b1]"
+        );
+        assert_eq!(
+            Entry::new("[d8:3a:dd:f4:b1:dc]", "_ssh._tcp", "local").base_display_name(),
+            "[d8:3a:dd:f4:b1:dc]"
+        );
+    }
+
+    #[test]
+    fn per_interface_instances_merge_into_one_logical_service() {
+        let mut wired = Entry::new("rpi5-0 [d8:3a:dd:f4:b1:dc]", "_workstation._tcp", "local");
+        wired.hostname = Some("rpi5-0.local".to_string());
+        wired.addresses = vec!["192.168.50.244".parse().unwrap()];
+        wired.port = Some(9);
+        let mut wireless = Entry::new("rpi5-0 [d8:3a:dd:f4:b1:dd]", "_workstation._tcp", "local");
+        wireless.hostname = Some("rpi5-0.local".to_string());
+        wireless.addresses = vec!["192.168.50.245".parse().unwrap()];
+        wireless.port = Some(9);
+
+        let groups = group_entries(&[wired, wireless], GroupingMode::LogicalService);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "rpi5-0");
+        assert_eq!(groups[0].instances.len(), 2);
+    }
+
+    #[test]
+    fn different_services_sharing_an_endpoint_stay_separate() {
+        // Two genuinely different services (e.g. HTTP virtual hosts) on the
+        // same host and port must not be merged by the base-name grouping.
+        let mut site_a = Entry::new("Site A", "_http._tcp", "local");
+        site_a.hostname = Some("nas.local".to_string());
+        site_a.port = Some(80);
+        let mut site_b = Entry::new("Site B", "_http._tcp", "local");
+        site_b.hostname = Some("nas.local".to_string());
+        site_b.port = Some(80);
+
+        let groups = group_entries(&[site_a, site_b], GroupingMode::LogicalService);
+
+        assert_eq!(groups.len(), 2);
     }
 
     #[test]

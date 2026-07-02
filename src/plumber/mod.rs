@@ -589,6 +589,60 @@ mode = "execute"
     }
 
     #[test]
+    fn merged_per_interface_instances_offer_address_selection() {
+        let mut builder = MatcherBuilder::new();
+        builder
+            .add_str(
+                "by-address",
+                r#"
+[metadata]
+name = "by-address"
+
+[match.service_type]
+equals = "_workstation._tcp"
+
+[action]
+command = "ping {address}"
+mode = "execute"
+"#,
+            )
+            .unwrap();
+        let matcher = builder.build();
+
+        // A multi-homed host: one service instance per interface, names
+        // differing only in Avahi's ` [MAC]` decoration. Grouping merges them
+        // into one logical service with two instances.
+        let mut wired = Entry::new("rpi5-0 [d8:3a:dd:f4:b1:dc]", "_workstation._tcp", "local");
+        wired.hostname = Some("rpi5-0.local".to_string());
+        wired.addresses = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 50, 244))];
+        wired.port = Some(9);
+        let mut wireless = Entry::new("rpi5-0 [d8:3a:dd:f4:b1:dd]", "_workstation._tcp", "local");
+        wireless.hostname = Some("rpi5-0.local".to_string());
+        wireless.addresses = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 50, 245))];
+        wireless.port = Some(9);
+        let group = crate::discovery::group_entries(
+            &[wired, wireless],
+            crate::discovery::GroupingMode::LogicalService,
+        )
+        .remove(0);
+        assert_eq!(group.instances.len(), 2);
+
+        let matches = matcher.matches_group(&group);
+
+        // The `{address}` command needs a concrete IP, so both interfaces'
+        // addresses are offered for selection.
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].needs_instance);
+        let addresses: Vec<String> = matches[0]
+            .matching_records
+            .iter()
+            .map(|record| record.primary_address().unwrap().to_string())
+            .collect();
+        assert!(addresses.contains(&"192.168.50.244".to_string()));
+        assert!(addresses.contains(&"192.168.50.245".to_string()));
+    }
+
+    #[test]
     fn lists_loaded_command_names() {
         let mut builder = MatcherBuilder::new();
         builder
