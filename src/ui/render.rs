@@ -49,6 +49,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(chunks[2]);
+    // Record the pane rectangles so mouse events can be hit-tested against
+    // them (same render→input feedback pattern as `details_viewport`).
+    app.list_area.set(body[0]);
+    app.details_area.set(body[1]);
     if app.filter.grouping == GroupingMode::Command {
         render_commands(frame, app, body[0]);
         render_command_details(frame, app, body[1]);
@@ -1007,7 +1011,7 @@ fn render_scrollbar(
     );
 }
 
-fn scroll_offset(selected: usize, total: usize, view_h: usize) -> usize {
+pub(crate) fn scroll_offset(selected: usize, total: usize, view_h: usize) -> usize {
     if view_h == 0 || total <= view_h {
         return 0;
     }

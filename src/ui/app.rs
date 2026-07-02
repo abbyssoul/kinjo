@@ -6,8 +6,13 @@ use std::{
 };
 
 use color_eyre::eyre::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use ratatui::DefaultTerminal;
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::{
+    DefaultTerminal,
+    layout::{Position, Rect},
+};
 
 use crate::{
     discovery::{DiscoveryEvent, Entry, EntryGroup, EntryId, GroupingMode, group_entries},
@@ -63,6 +68,11 @@ pub struct App {
     pub details_max_scroll: Cell<usize>,
     /// Visible height of the details pane, recomputed by the renderer each frame.
     pub details_viewport: Cell<usize>,
+    /// Screen rectangle of the left list panel, recorded by the renderer each
+    /// frame so mouse events can be hit-tested against it.
+    pub list_area: Cell<Rect>,
+    /// Screen rectangle of the details pane, recorded by the renderer each frame.
+    pub details_area: Cell<Rect>,
 }
 
 impl App {
@@ -100,10 +110,13 @@ impl App {
             details_scroll: 0,
             details_max_scroll: Cell::new(0),
             details_viewport: Cell::new(0),
+            list_area: Cell::new(Rect::default()),
+            details_area: Cell::new(Rect::default()),
         }
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<Option<PreparedCommand>> {
+        let _mouse_capture = MouseCaptureGuard::enable();
         self.recompute_visible();
 
         loop {
@@ -111,17 +124,21 @@ impl App {
             self.drain_discovery();
             terminal.draw(|frame| render::render(frame, self))?;
 
-            if event::poll(Duration::from_millis(120))?
-                && let Event::Key(key) = event::read()?
-            {
-                if key.kind == KeyEventKind::Release {
-                    continue;
-                }
-                if let Some(command) = self.handle_key(key)? {
-                    return Ok(Some(command));
-                }
-                if matches!(self.mode, AppMode::Browse) && self.status == "quit" {
-                    return Ok(None);
+            if event::poll(Duration::from_millis(120))? {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if key.kind == KeyEventKind::Release {
+                            continue;
+                        }
+                        if let Some(command) = self.handle_key(key)? {
+                            return Ok(Some(command));
+                        }
+                        if matches!(self.mode, AppMode::Browse) && self.status == "quit" {
+                            return Ok(None);
+                        }
+                    }
+                    Event::Mouse(mouse) => self.handle_mouse(mouse),
+                    _ => {}
                 }
             }
         }
@@ -437,9 +454,64 @@ impl App {
     /// `direction` is +1 to scroll down, -1 to scroll up.
     fn scroll_details(&mut self, direction: isize) {
         let step = (self.details_viewport.get() / 2).max(1) as isize;
+        self.scroll_details_by(direction * step);
+    }
+
+    /// Scroll the details pane by `delta` lines, clamped to the content bounds.
+    fn scroll_details_by(&mut self, delta: isize) {
         let max = self.details_max_scroll.get() as isize;
-        self.details_scroll =
-            (self.details_scroll as isize + direction * step).clamp(0, max) as usize;
+        self.details_scroll = (self.details_scroll as isize + delta).clamp(0, max) as usize;
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Modal pickers and help stay keyboard-driven; the mouse only drives
+        // the browse layer (which remains visible while searching).
+        if !matches!(self.mode, AppMode::Browse | AppMode::Search) {
+            return;
+        }
+        let position = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.mouse_scroll(position, 1),
+            MouseEventKind::ScrollUp => self.mouse_scroll(position, -1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(index) = self.list_row_at(position) {
+                    self.selected = index;
+                    // A different row is in focus — start its details from the top.
+                    self.details_scroll = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A wheel event over the details pane scrolls its content; over the list
+    /// it moves the selection (the list window follows the selected row).
+    fn mouse_scroll(&mut self, position: Position, direction: isize) {
+        if self.details_area.get().contains(position) {
+            self.scroll_details_by(direction);
+        } else if self.list_area.get().contains(position) {
+            self.move_selection(direction);
+        }
+    }
+
+    /// The list index under `position`, when it falls on a rendered row of the
+    /// left panel — accounting for the panel border and the scroll window the
+    /// renderer derives from the current selection.
+    fn list_row_at(&self, position: Position) -> Option<usize> {
+        let area = self.list_area.get();
+        if !area.contains(position) {
+            return None;
+        }
+        // First content row sits below the top border; the bottom border and
+        // anything past the last row are not selectable.
+        let row = (position.y.checked_sub(area.y + 1))? as usize;
+        let inner_h = area.height.saturating_sub(2) as usize;
+        if row >= inner_h {
+            return None;
+        }
+        let total = self.active_count();
+        let index = render::scroll_offset(self.selected, total, inner_h) + row;
+        (index < total).then_some(index)
     }
 
     fn invoke_selected(&mut self) -> Result<Option<PreparedCommand>> {
@@ -625,6 +697,24 @@ impl App {
 
     pub fn service_types(&self) -> Vec<String> {
         FilterState::discovered_types(&self.records.values().cloned().collect::<Vec<_>>())
+    }
+}
+
+/// Enables terminal mouse reporting for its lifetime. Dropping it — including
+/// during unwinding — restores the terminal's native mouse handling (text
+/// selection, scrollback) before the rest of the terminal state is torn down.
+struct MouseCaptureGuard;
+
+impl MouseCaptureGuard {
+    fn enable() -> Self {
+        let _ = crossterm::execute!(std::io::stdout(), event::EnableMouseCapture);
+        Self
+    }
+}
+
+impl Drop for MouseCaptureGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture);
     }
 }
 
@@ -832,6 +922,114 @@ mode = "execute"
         record.addresses = vec![addr.parse().unwrap()];
         record.port = Some(22);
         record
+    }
+
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    /// An app with `count` distinct services and the pane rectangles a render
+    /// pass would have recorded: a bordered list panel at y = 2..=8 whose five
+    /// content rows sit at y = 3..=7, and the details pane to its right.
+    fn mouse_app(count: usize) -> App {
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+        let records = names[..count]
+            .iter()
+            .map(|name| ssh(name, "10.0.0.1"))
+            .collect();
+        let app = app_with(Matcher::default(), records);
+        app.list_area.set(Rect::new(0, 2, 60, 7));
+        app.details_area.set(Rect::new(60, 2, 40, 7));
+        app
+    }
+
+    #[test]
+    fn wheel_over_list_moves_the_selection() {
+        let mut app = mouse_app(8);
+        assert_eq!(app.selected, 0);
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 5, 4));
+        assert_eq!(app.selected, 1);
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 5, 4));
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 5, 4));
+        assert_eq!(app.selected, 0, "selection clamps at the top");
+
+        // A wheel event outside both panes does nothing.
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 5, 0));
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn wheel_over_details_scrolls_content_line_by_line() {
+        let mut app = mouse_app(8);
+        app.details_max_scroll.set(3);
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 70, 4));
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 70, 4));
+        assert_eq!(app.details_scroll, 2);
+
+        // Clamped to the content bounds on both ends.
+        for _ in 0..5 {
+            app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 70, 4));
+        }
+        assert_eq!(app.details_scroll, 3);
+        for _ in 0..9 {
+            app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 70, 4));
+        }
+        assert_eq!(app.details_scroll, 0);
+
+        // Scrolling the details never moves the list selection.
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn click_selects_the_row_under_the_cursor() {
+        let mut app = mouse_app(8);
+
+        // Clicking the fourth visible content row (y = 6) selects index 3.
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 6));
+        assert_eq!(app.selected, 3);
+
+        // With the selection at the end the window shows indices 3..=7, so
+        // the first visible row (y = 3) is index 3.
+        app.selected = 7;
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 3));
+        assert_eq!(app.selected, 3);
+    }
+
+    #[test]
+    fn clicks_on_borders_and_empty_rows_are_ignored() {
+        let mut app = mouse_app(8);
+        app.selected = 2;
+
+        // Top border, bottom border, and the details pane.
+        for (x, y) in [(5, 2), (5, 8), (70, 4)] {
+            app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), x, y));
+            assert_eq!(app.selected, 2, "click at ({x},{y}) must not select");
+        }
+
+        // A row below the last record is not selectable.
+        let mut small = mouse_app(2);
+        small.selected = 1;
+        small.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 6));
+        assert_eq!(small.selected, 1);
+    }
+
+    #[test]
+    fn mouse_is_ignored_in_modal_modes() {
+        let mut app = mouse_app(8);
+        app.mode = AppMode::Help;
+
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 5, 4));
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 6));
+
+        assert_eq!(app.selected, 0);
     }
 
     /// An SSH service reachable at several addresses (load-balanced).

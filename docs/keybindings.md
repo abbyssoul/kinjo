@@ -44,6 +44,13 @@ set listed under [Bindable Commands](#bindable-commands); a typo such as
 configuration that unbinds every quit key (`common.quit` and `browse.quit`) is
 rejected, so the app always remains quittable.
 
+## Mouse
+
+The mouse works alongside the keyboard while browsing: the wheel over the
+service list moves the selection, the wheel over the details pane scrolls its
+content, and a left click on a list row selects it. Modal dialogs (pickers,
+help) remain keyboard-driven. Mouse behavior is not configurable.
+
 ## Key Names
 
 Supported special keys:
