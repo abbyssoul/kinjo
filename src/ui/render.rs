@@ -88,7 +88,7 @@ fn render_top_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let tab_count = |mode: GroupingMode| match mode {
         GroupingMode::LogicalService => app.records.len(),
         GroupingMode::Host => hosts,
-        GroupingMode::ServiceType => app.service_types().len(),
+        GroupingMode::ServiceType => app.service_types.len(),
         GroupingMode::Command => app.matcher.command_count(),
     };
 
@@ -162,7 +162,7 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     // right-side chips: type filter + host filter
     let mut chips: Vec<Span> = Vec::new();
-    let total_types = app.service_types().len();
+    let total_types = app.service_types.len();
     let enabled = app.filter.enabled_service_types.len().min(total_types);
     if total_types > 0 {
         let narrowed = enabled < total_types;
@@ -251,7 +251,7 @@ fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
             service_row(
                 &app.visible_groups[index],
                 index == app.selected,
-                app.group_match_counts.get(index).copied().unwrap_or(0),
+                app.group_matches.get(index).map(Vec::len).unwrap_or(0),
             )
         },
     );
@@ -394,7 +394,11 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     // matching actions
     rows.push(blank_row());
-    let actions = app.matcher.matches_group(group);
+    let actions = app
+        .group_matches
+        .get(app.selected)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
     rows.push(section_row(&format!("actions ({})", actions.len())));
     if actions.is_empty() {
         rows.push(Row::new(vec![
@@ -405,7 +409,7 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
             )),
         ]));
     } else {
-        for action in &actions {
+        for action in actions {
             rows.push(action_row(action));
         }
         rows.push(Row::new(vec![
@@ -685,7 +689,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 // ── modals ───────────────────────────────────────────────────────────────
 fn render_type_filter(frame: &mut Frame<'_>, app: &App) {
-    let service_types = app.service_types();
+    let service_types = &app.service_types;
     let items: Vec<ListItem> = if service_types.is_empty() {
         vec![ListItem::new(Line::from(Span::styled(
             "  no service types discovered yet",
@@ -693,7 +697,7 @@ fn render_type_filter(frame: &mut Frame<'_>, app: &App) {
         )))]
     } else {
         build_list_items(
-            &service_types,
+            service_types,
             app.type_filter_index,
             |service_type, selected, base| {
                 let enabled = app.filter.enabled_service_types.contains(service_type);

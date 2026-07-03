@@ -1,21 +1,19 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    net::IpAddr,
     sync::mpsc,
-    thread,
     time::Duration,
 };
 
+use futures::future::join_all;
 use mdns_sd_discovery::{
     BrowseEvent, DiscoveredService, RemovedService, ServiceBrowserBuilder, ServiceResolverBuilder,
     TxtRecord,
 };
-use futures::future::join_all;
-use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 
 use super::fake;
-use super::{Discovery, DiscoveryConfig, DiscoveryEvent, Entry, EntryId};
+use super::worker::{DiscoveryWorker, RuntimeFlavor};
+use super::{DiscoveryConfig, DiscoveryEvent, Entry, EntryId};
 
 /// How often known services are re-confirmed with a one-shot resolve.
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
@@ -99,72 +97,19 @@ impl LivenessTracker {
     }
 }
 
-/// mDNS/Avahi discovery backend: browses the link for DNS-SD services via the
-/// `mdns-sd-discovery` crate and streams them as [`DiscoveryEvent`]s. Falls back
-/// to the [`fake`] backend when the browse cannot be started.
+/// Start the mDNS/Avahi discovery backend: it browses the link for DNS-SD
+/// services via the `mdns-sd-discovery` crate and streams them as
+/// [`DiscoveryEvent`]s. Falls back to the [`fake`] backend when the browse
+/// cannot be started.
 ///
-/// Unlike the previous `zeroconf` backend, `mdns-sd-discovery` exposes the
-/// native DNS-SD service-type enumeration meta-query, so a single browser
-/// discovers every service type on the network — there is no need to sweep a
-/// curated list of types in parallel.
-pub struct MdnsDiscovery {
-    receiver: Option<mpsc::Receiver<DiscoveryEvent>>,
-    shutdown: CancellationToken,
-    worker: Option<thread::JoinHandle<()>>,
-}
-
-impl MdnsDiscovery {
-    pub fn start(config: &DiscoveryConfig) -> Self {
-        let (tx, rx) = mpsc::channel();
-        let shutdown = CancellationToken::new();
-        let worker = spawn_browser(config, tx, shutdown.clone());
-        Self {
-            receiver: Some(rx),
-            shutdown,
-            worker: Some(worker),
-        }
-    }
-}
-
-impl Discovery for MdnsDiscovery {
-    fn events(&mut self) -> mpsc::Receiver<DiscoveryEvent> {
-        self.receiver
-            .take()
-            .expect("discovery receiver can only be taken once")
-    }
-}
-
-impl Drop for MdnsDiscovery {
-    fn drop(&mut self) {
-        self.shutdown.cancel();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-fn spawn_browser(
-    config: &DiscoveryConfig,
-    tx: mpsc::Sender<DiscoveryEvent>,
-    shutdown: CancellationToken,
-) -> thread::JoinHandle<()> {
-    let domain = config.domain.clone();
-    let service_type_filter = config.service_type.clone();
-
-    thread::spawn(move || {
-        let runtime = match Builder::new_current_thread().enable_all().build() {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                let _ = tx.send(DiscoveryEvent::Status(format!(
-                    "failed to start mDNS runtime ({err}); using sample records"
-                )));
-                fake::spawn(domain, service_type_filter, tx);
-                return;
-            }
-        };
-
-        runtime.block_on(browse_loop(domain, service_type_filter, tx, shutdown));
-    })
+/// Unlike the `zeroconf` backend, `mdns-sd-discovery` exposes the native
+/// DNS-SD service-type enumeration meta-query, so a single browser discovers
+/// every service type on the network — there is no need to sweep a curated
+/// list of types in parallel. The probe futures are not `Send` on every
+/// platform (Windows holds raw pointers across awaits), so the loop runs on a
+/// current-thread runtime and drives them itself.
+pub(super) fn start(config: &DiscoveryConfig) -> DiscoveryWorker {
+    DiscoveryWorker::spawn(config, RuntimeFlavor::CurrentThread, browse_loop)
 }
 
 async fn browse_loop(
@@ -326,7 +271,7 @@ fn emit_event(event: BrowseEvent, tx: &mpsc::Sender<DiscoveryEvent>) -> bool {
 /// all carried on the single logical-service entry — consumers pick among them
 /// when a specific endpoint is needed.
 fn record_from_service(service: &DiscoveredService) -> Entry {
-    upsert_record(
+    Entry::resolved(
         &service.name,
         &service.service_type,
         &service.domain,
@@ -357,31 +302,10 @@ fn txt_map(records: &[TxtRecord]) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Builds a resolved [`Entry`] from the individual fields reported by a browse
-/// event. Kept separate from the `mdns-sd-discovery` types so it can be unit
-/// tested without standing up the mDNS stack.
-fn upsert_record(
-    name: &str,
-    service_type: &str,
-    domain: &str,
-    hostname: Option<&str>,
-    addresses: Vec<IpAddr>,
-    port: Option<u16>,
-    txt: BTreeMap<String, String>,
-) -> Entry {
-    let mut record = Entry::new(name, service_type, domain);
-    record.hostname = hostname
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
-    record.addresses = addresses;
-    record.port = port.filter(|port| *port != 0);
-    record.txt = txt;
-    record.with_instance_id()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::*;
 
     fn txt_record(key: &str, value: Option<&str>) -> TxtRecord {
@@ -402,50 +326,6 @@ mod tests {
             txt_records: vec![txt_record("path", Some("/admin"))],
             interface_index: None,
         }
-    }
-
-    #[test]
-    fn builds_resolved_record_from_browse_fields() {
-        let mut txt = BTreeMap::new();
-        txt.insert("path".to_string(), "/admin".to_string());
-
-        let record = upsert_record(
-            "nas",
-            "_http._tcp",
-            "local",
-            Some("nas.local"),
-            vec!["192.168.1.30".parse().unwrap()],
-            Some(8080),
-            txt,
-        );
-
-        assert_eq!(record.name, "nas");
-        assert_eq!(record.hostname.as_deref(), Some("nas.local"));
-        assert_eq!(
-            record.primary_address(),
-            Some("192.168.1.30".parse().unwrap())
-        );
-        assert_eq!(record.port, Some(8080));
-        assert_eq!(record.txt.get("path").map(String::as_str), Some("/admin"));
-        assert!(record.has_instance_data());
-    }
-
-    #[test]
-    fn blank_host_and_zero_port_become_unresolved() {
-        let record = upsert_record(
-            "pending",
-            "_ipp._tcp",
-            "local",
-            Some(""),
-            Vec::new(),
-            Some(0),
-            BTreeMap::new(),
-        );
-
-        assert_eq!(record.hostname, None);
-        assert!(record.addresses.is_empty());
-        assert_eq!(record.port, None);
-        assert!(!record.has_instance_data());
     }
 
     #[test]

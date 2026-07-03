@@ -123,14 +123,35 @@ pub fn locate(program: &str) -> Option<PathBuf> {
     if program.is_empty() {
         return None;
     }
-    if program.contains('/') {
+    if program.chars().any(std::path::is_separator) {
         let path = PathBuf::from(program);
         return is_executable(&path).then_some(path);
     }
     let paths = std::env::var_os("PATH")?;
     std::env::split_paths(&paths)
-        .map(|dir| dir.join(program))
+        .flat_map(|dir| candidates_in(&dir, program))
         .find(|candidate| is_executable(candidate))
+}
+
+/// The paths under `dir` that could resolve `program`: the bare name, plus — on
+/// Windows — the name with each `PATHEXT` extension appended, mirroring how
+/// `CreateProcess` resolves `ping` to `ping.exe`.
+#[cfg(windows)]
+fn candidates_in(dir: &Path, program: &str) -> Vec<PathBuf> {
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let mut candidates = vec![dir.join(program)];
+    candidates.extend(
+        pathext
+            .split(';')
+            .filter(|ext| !ext.is_empty())
+            .map(|ext| dir.join(format!("{program}{ext}"))),
+    );
+    candidates
+}
+
+#[cfg(not(windows))]
+fn candidates_in(dir: &Path, program: &str) -> Vec<PathBuf> {
+    vec![dir.join(program)]
 }
 
 #[cfg(unix)]
@@ -475,6 +496,14 @@ mod tests {
         assert!(locate("avahi-tui-no-such-binary-xyz").is_none());
         assert!(locate("/no/such/absolute/path/xyz").is_none());
         assert!(locate("").is_none());
+    }
+
+    /// Windows resolves bare names through `PATHEXT`; a requirement written as
+    /// `cmd` (no extension) must still be found.
+    #[cfg(windows)]
+    #[test]
+    fn locate_resolves_bare_names_via_pathext() {
+        assert!(locate("cmd").is_some());
     }
 
     #[test]

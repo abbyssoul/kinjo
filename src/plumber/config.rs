@@ -246,7 +246,9 @@ fn collect_predicates(
                 let predicate = match key.as_str() {
                     "equals" => Predicate::Equals(value.clone()),
                     "contains" => Predicate::Contains(value.clone()),
-                    "regex" => Predicate::Regex(Regex::new(value)?),
+                    "regex" => Predicate::Regex(Regex::new(value).map_err(|err| {
+                        eyre!("{source_name}: invalid regex for `{path}`: {err}")
+                    })?),
                     _ => return Err(eyre!("{source_name}: unsupported predicate `{path}`")),
                 };
                 predicates.push(FieldPredicate {

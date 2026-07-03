@@ -56,7 +56,15 @@ pub struct App {
     pub pending_action: Option<MatchResult>,
     pub instance_index: usize,
     pub status: String,
-    pub group_match_counts: Vec<usize>,
+    /// Set by the quit keybindings; the event loop exits when it is true.
+    pub should_quit: bool,
+    /// Per-group action matches, parallel to `visible_groups`. Computed once
+    /// per recompute so rendering and invocation share one result instead of
+    /// re-running the matcher (regexes included) every frame.
+    pub group_matches: Vec<Vec<MatchResult>>,
+    /// Sorted service types across all discovered records, recomputed with
+    /// the visible groups (rendering reads it several times per frame).
+    pub service_types: Vec<String>,
     pub ticks: u64,
     /// Rows of the "group by command" view; populated only in that grouping mode.
     pub command_groups: Vec<CommandGroup>,
@@ -103,7 +111,9 @@ impl App {
             pending_action: None,
             instance_index: 0,
             status,
-            group_match_counts: Vec::new(),
+            should_quit: false,
+            group_matches: Vec::new(),
+            service_types: Vec::new(),
             ticks: 0,
             command_groups: Vec::new(),
             service_picker_index: 0,
@@ -133,7 +143,7 @@ impl App {
                         if let Some(command) = self.handle_key(key)? {
                             return Ok(Some(command));
                         }
-                        if matches!(self.mode, AppMode::Browse) && self.status == "quit" {
+                        if self.should_quit {
                             return Ok(None);
                         }
                     }
@@ -174,6 +184,7 @@ impl App {
 
     fn recompute_visible(&mut self) {
         let records = self.records.values().cloned().collect::<Vec<_>>();
+        self.service_types = FilterState::discovered_types(&records);
         self.filter.sync_service_types(&records);
         let filtered = self.filter.apply(&records);
 
@@ -188,10 +199,10 @@ impl App {
             .get(self.selected)
             .map(|group| group.id.clone());
         self.visible_groups = group_entries(&filtered, self.filter.grouping);
-        self.group_match_counts = self
+        self.group_matches = self
             .visible_groups
             .iter()
-            .map(|group| self.matcher.matches_group(group).len())
+            .map(|group| self.matcher.matches_group(group))
             .collect();
         match find_selection(&self.visible_groups, previous, |group| group.id.clone()) {
             Some(index) => self.selected = index,
@@ -232,7 +243,7 @@ impl App {
 
         self.command_groups = command_groups;
         self.visible_groups = Vec::new();
-        self.group_match_counts = Vec::new();
+        self.group_matches = Vec::new();
         match find_selection(&self.command_groups, previous, |group| {
             group.command.name.clone()
         }) {
@@ -269,7 +280,7 @@ impl App {
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<Option<PreparedCommand>> {
         if self.keybindings.is("common", "quit", key) {
-            self.status = "quit".to_string();
+            self.should_quit = true;
             return Ok(None);
         }
 
@@ -297,7 +308,7 @@ impl App {
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> Result<Option<PreparedCommand>> {
         match key.code {
-            _ if self.keybindings.is("browse", "quit", key) => self.status = "quit".to_string(),
+            _ if self.keybindings.is("browse", "quit", key) => self.should_quit = true,
             _ if self.keybindings.is("browse", "down", key) => self.move_selection(1),
             _ if self.keybindings.is("browse", "up", key) => self.move_selection(-1),
             _ if self.keybindings.is("browse", "invoke", key) => return self.invoke_selected(),
@@ -348,18 +359,19 @@ impl App {
     }
 
     fn handle_type_filter_key(&mut self, key: KeyEvent) {
-        let types = self.service_types();
+        let count = self.service_types.len();
         match key.code {
             _ if self.keybindings.is("type_filter", "close", key) => self.return_to_browse(),
             _ if self.keybindings.is("type_filter", "down", key) => {
-                self.type_filter_index = move_index(self.type_filter_index, types.len(), 1);
+                self.type_filter_index = move_index(self.type_filter_index, count, 1);
             }
             _ if self.keybindings.is("type_filter", "up", key) => {
-                self.type_filter_index = move_index(self.type_filter_index, types.len(), -1);
+                self.type_filter_index = move_index(self.type_filter_index, count, -1);
             }
             _ if self.keybindings.is("type_filter", "toggle", key) => {
-                if let Some(service_type) = types.get(self.type_filter_index) {
-                    self.filter.toggle_service_type(service_type);
+                if let Some(service_type) = self.service_types.get(self.type_filter_index).cloned()
+                {
+                    self.filter.toggle_service_type(&service_type);
                     self.recompute_visible();
                 }
             }
@@ -522,7 +534,11 @@ impl App {
             self.status = "no service selected".to_string();
             return Ok(None);
         };
-        let matches = self.matcher.matches_group(group);
+        let matches = self
+            .group_matches
+            .get(self.selected)
+            .cloned()
+            .unwrap_or_default();
         match matches.len() {
             0 => {
                 self.status = format!("no configured actions match `{}`", group.label);
@@ -693,10 +709,6 @@ impl App {
             }
             None => self.status = "selected service has no resolved host yet".to_string(),
         }
-    }
-
-    pub fn service_types(&self) -> Vec<String> {
-        FilterState::discovered_types(&self.records.values().cloned().collect::<Vec<_>>())
     }
 }
 
@@ -1300,7 +1312,7 @@ mode = "execute"
     }
 
     #[test]
-    fn quit_keys_set_status_to_quit() {
+    fn quit_keys_request_quit() {
         let mut common = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
         assert!(
             common
@@ -1308,11 +1320,26 @@ mode = "execute"
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(common.status, "quit");
+        assert!(common.should_quit);
 
         let mut browse = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
         send(&mut browse, KeyCode::Char('q'));
-        assert_eq!(browse.status, "quit");
+        assert!(browse.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_quits_immediately_from_a_modal() {
+        // Regression: the quit request used to be a `status == "quit"` sentinel
+        // honored only in Browse mode, so Ctrl-C inside a modal did nothing
+        // visible but poisoned the status, quitting on the next unrelated key.
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+        send(&mut app, KeyCode::Char('?'));
+        assert_eq!(app.mode, AppMode::Help);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert!(app.should_quit, "ctrl-c must quit while a modal is open");
     }
 
     #[test]

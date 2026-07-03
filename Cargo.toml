@@ -1,12 +1,13 @@
 [package]
 name = "avahi-tui"
-description = "Avahi TUI: lunch commands for discovered services"
+description = "Avahi TUI: launch commands for discovered services"
 version = "0.1.0"
 edition = "2024"
 readme = "README.md"
 repository = "https://github.com/abbyssoul/avahi-tui"
 license-file = "LICENSE"
-keywords = ["avahi", "tui", "zeroconf", "dns-sd", "service discovery", "plumber"]
+# crates.io allows at most 5 keywords, letters/digits/`-`/`_` only (no spaces).
+keywords = ["avahi", "tui", "zeroconf", "dns-sd", "mdns"]
 categories = ["command-line-utilities", "network-programming"]
 
 [package.metadata.deb]

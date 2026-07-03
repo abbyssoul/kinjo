@@ -119,6 +119,30 @@ impl Entry {
         }
     }
 
+    /// Build a resolved entry from the fields a discovery backend reports.
+    /// Blank hostnames and zero ports count as "not resolved yet"; the instance
+    /// id is derived from whatever instance data is present. Shared by every
+    /// backend so they agree on what an unresolved field looks like.
+    pub fn resolved(
+        name: &str,
+        service_type: &str,
+        domain: &str,
+        hostname: Option<&str>,
+        addresses: Vec<IpAddr>,
+        port: Option<u16>,
+        txt: BTreeMap<String, String>,
+    ) -> Self {
+        let mut record = Entry::new(name, service_type, domain);
+        record.hostname = hostname
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        record.addresses = addresses;
+        record.port = port.filter(|port| *port != 0);
+        record.txt = txt;
+        record.with_instance_id()
+    }
+
     pub fn with_instance_id(mut self) -> Self {
         let mut id = self.pending_id();
         if self.has_instance_data() {
@@ -364,6 +388,50 @@ pub fn decode_dns_sd_escapes(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolved_builds_record_from_browse_fields() {
+        let mut txt = BTreeMap::new();
+        txt.insert("path".to_string(), "/admin".to_string());
+
+        let record = Entry::resolved(
+            "nas",
+            "_http._tcp",
+            "local",
+            Some("nas.local"),
+            vec!["192.168.1.30".parse().unwrap()],
+            Some(8080),
+            txt,
+        );
+
+        assert_eq!(record.name, "nas");
+        assert_eq!(record.hostname.as_deref(), Some("nas.local"));
+        assert_eq!(
+            record.primary_address(),
+            Some("192.168.1.30".parse().unwrap())
+        );
+        assert_eq!(record.port, Some(8080));
+        assert_eq!(record.txt.get("path").map(String::as_str), Some("/admin"));
+        assert!(record.has_instance_data());
+    }
+
+    #[test]
+    fn resolved_treats_blank_host_and_zero_port_as_unresolved() {
+        let record = Entry::resolved(
+            "pending",
+            "_ipp._tcp",
+            "local",
+            Some(""),
+            Vec::new(),
+            Some(0),
+            BTreeMap::new(),
+        );
+
+        assert_eq!(record.hostname, None);
+        assert!(record.addresses.is_empty());
+        assert_eq!(record.port, None);
+        assert!(!record.has_instance_data());
+    }
 
     #[test]
     fn logical_service_keeps_all_its_addresses_on_one_entry() {

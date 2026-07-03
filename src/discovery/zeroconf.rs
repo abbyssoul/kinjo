@@ -1,6 +1,5 @@
-use std::{collections::BTreeMap, net::IpAddr, str::FromStr, sync::mpsc, thread};
+use std::{collections::BTreeMap, net::IpAddr, str::FromStr, sync::mpsc};
 
-use tokio::runtime::Builder;
 use tokio_util::sync::CancellationToken;
 use zeroconf_tokio::prelude::*;
 use zeroconf_tokio::{
@@ -8,7 +7,8 @@ use zeroconf_tokio::{
 };
 
 use super::fake;
-use super::{Discovery, DiscoveryConfig, DiscoveryEvent, Entry, EntryId};
+use super::worker::{DiscoveryWorker, RuntimeFlavor};
+use super::{DiscoveryConfig, DiscoveryEvent, Entry, EntryId};
 
 /// DNS-SD service types browsed when the user does not pass `--service-type`.
 ///
@@ -39,78 +39,23 @@ const DEFAULT_SERVICE_TYPES: &[&str] = &[
     "_spotify-connect._tcp",
 ];
 
-/// mDNS/Avahi discovery backend built on the `zeroconf` crate: sweeps the link
-/// for DNS-SD services and streams them as [`DiscoveryEvent`]s. Falls back to the
-/// [`fake`] backend when no browser can be started.
+/// Start the mDNS/Avahi discovery backend built on the `zeroconf` crate: it
+/// sweeps the link for DNS-SD services and streams them as [`DiscoveryEvent`]s.
+/// Falls back to the [`fake`] backend when no browser can be started.
 ///
 /// Unlike the [`mdns`](super::mdns) backend, `zeroconf` wraps the native
 /// Avahi/Bonjour APIs which browse one concrete service type at a time, so this
-/// backend sweeps [`DEFAULT_SERVICE_TYPES`] in parallel when no filter is given.
-pub struct ZeroconfDiscovery {
-    receiver: Option<mpsc::Receiver<DiscoveryEvent>>,
-    shutdown: CancellationToken,
-    worker: Option<thread::JoinHandle<()>>,
-}
-
-impl ZeroconfDiscovery {
-    pub fn start(config: &DiscoveryConfig) -> Self {
-        let (tx, rx) = mpsc::channel();
-        let shutdown = CancellationToken::new();
-        let worker = spawn_zeroconf(config, tx, shutdown.clone());
-        Self {
-            receiver: Some(rx),
-            shutdown,
-            worker: Some(worker),
-        }
-    }
-}
-
-impl Discovery for ZeroconfDiscovery {
-    fn events(&mut self) -> mpsc::Receiver<DiscoveryEvent> {
-        self.receiver
-            .take()
-            .expect("discovery receiver can only be taken once")
-    }
-}
-
-impl Drop for ZeroconfDiscovery {
-    fn drop(&mut self) {
-        self.shutdown.cancel();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-fn spawn_zeroconf(
-    config: &DiscoveryConfig,
-    tx: mpsc::Sender<DiscoveryEvent>,
-    shutdown: CancellationToken,
-) -> thread::JoinHandle<()> {
-    let domain = config.domain.clone();
-    let service_type_filter = config.service_type.clone();
-    let service_types = resolve_service_types(service_type_filter.as_deref());
-
-    thread::spawn(move || {
-        let runtime = match Builder::new_multi_thread().enable_all().build() {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                let _ = tx.send(DiscoveryEvent::Status(format!(
-                    "failed to start mDNS runtime ({err}); using sample records"
-                )));
-                fake::spawn(domain, service_type_filter, tx);
-                return;
-            }
-        };
-
-        runtime.block_on(browse_loop(
-            service_types,
-            domain,
-            service_type_filter,
-            tx,
-            shutdown,
-        ));
-    })
+/// backend sweeps [`DEFAULT_SERVICE_TYPES`] in parallel (on a multi-threaded
+/// runtime) when no filter is given.
+pub(super) fn start(config: &DiscoveryConfig) -> DiscoveryWorker {
+    let service_types = resolve_service_types(config.service_type.as_deref());
+    DiscoveryWorker::spawn(
+        config,
+        RuntimeFlavor::MultiThread,
+        move |domain, service_type_filter, tx, shutdown| {
+            browse_loop(service_types, domain, service_type_filter, tx, shutdown)
+        },
+    )
 }
 
 async fn browse_loop(
@@ -213,7 +158,7 @@ fn record_from_discovery(discovery: &ServiceDiscovery) -> Entry {
         .into_iter()
         .collect();
 
-    upsert_record(
+    Entry::resolved(
         discovery.name(),
         &format_service_type(discovery.service_type()),
         discovery.domain(),
@@ -226,29 +171,6 @@ fn record_from_discovery(discovery: &ServiceDiscovery) -> Entry {
 
 fn id_from_removal(removal: &ServiceRemoval) -> EntryId {
     EntryId::registration(removal.name(), removal.kind(), removal.domain())
-}
-
-/// Builds a resolved [`Entry`] from the individual fields reported by a
-/// browse event. Kept separate from the `zeroconf` types so it can be unit
-/// tested without standing up the mDNS stack.
-fn upsert_record(
-    name: &str,
-    service_type: &str,
-    domain: &str,
-    hostname: Option<&str>,
-    addresses: Vec<IpAddr>,
-    port: Option<u16>,
-    txt: BTreeMap<String, String>,
-) -> Entry {
-    let mut record = Entry::new(name, service_type, domain);
-    record.hostname = hostname
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
-    record.addresses = addresses;
-    record.port = port.filter(|port| *port != 0);
-    record.txt = txt;
-    record.with_instance_id()
 }
 
 fn format_service_type(service_type: &ServiceType) -> String {
@@ -271,50 +193,6 @@ fn resolve_service_types(filter: Option<&str>) -> Vec<ServiceType> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn builds_resolved_record_from_browse_fields() {
-        let mut txt = BTreeMap::new();
-        txt.insert("path".to_string(), "/admin".to_string());
-
-        let record = upsert_record(
-            "nas",
-            "_http._tcp",
-            "local",
-            Some("nas.local"),
-            vec!["192.168.1.30".parse().unwrap()],
-            Some(8080),
-            txt,
-        );
-
-        assert_eq!(record.name, "nas");
-        assert_eq!(record.hostname.as_deref(), Some("nas.local"));
-        assert_eq!(
-            record.primary_address(),
-            Some("192.168.1.30".parse().unwrap())
-        );
-        assert_eq!(record.port, Some(8080));
-        assert_eq!(record.txt.get("path").map(String::as_str), Some("/admin"));
-        assert!(record.has_instance_data());
-    }
-
-    #[test]
-    fn blank_host_and_zero_port_become_unresolved() {
-        let record = upsert_record(
-            "pending",
-            "_ipp._tcp",
-            "local",
-            Some(""),
-            Vec::new(),
-            Some(0),
-            BTreeMap::new(),
-        );
-
-        assert_eq!(record.hostname, None);
-        assert!(record.addresses.is_empty());
-        assert_eq!(record.port, None);
-        assert!(!record.has_instance_data());
-    }
 
     #[test]
     fn explicit_filter_browses_single_type() {

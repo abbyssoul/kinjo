@@ -8,6 +8,7 @@
 mod entry;
 mod fake;
 mod mdns;
+mod worker;
 mod zeroconf;
 
 use std::sync::mpsc;
@@ -63,7 +64,7 @@ pub fn start(config: &DiscoveryConfig) -> Box<dyn Discovery> {
         return Box::new(fake::FakeDiscovery::start(config));
     }
     match config.backend {
-        DiscoveryBackend::MdnsSd => Box::new(mdns::MdnsDiscovery::start(config)),
-        DiscoveryBackend::Zeroconf => Box::new(zeroconf::ZeroconfDiscovery::start(config)),
+        DiscoveryBackend::MdnsSd => Box::new(mdns::start(config)),
+        DiscoveryBackend::Zeroconf => Box::new(zeroconf::start(config)),
     }
 }
