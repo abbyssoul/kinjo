@@ -22,6 +22,13 @@ assets = [
 ]
 
 
+[features]
+default = []
+# Alternative discovery backend wrapping the system Avahi/Bonjour stack via
+# `zeroconf-tokio` (`--backend zeroconf`). Needs the Avahi client headers on
+# Linux, hence off by default.
+zeroconf = ["dep:zeroconf-tokio", "tokio/rt-multi-thread"]
+
 [dependencies]
 clap = "4.6.1"
 color-eyre = "0.6.5"
@@ -32,8 +39,8 @@ ratatui = "0.30.2"
 regex = "1.12.4"
 serde = "1.0.228"
 serde_derive = "1.0.228"
-tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tokio = { version = "1.52.3", features = ["rt", "macros", "time"] }
 tokio-util = "0.7.18"
 mdns-sd-discovery = "0.2.0"
-zeroconf-tokio = "0.3.2"
+zeroconf-tokio = { version = "0.3.2", optional = true }
 toml = "1.1.2"

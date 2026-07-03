@@ -73,7 +73,20 @@ where
         service_type: matches.get_one::<String>("service-type").cloned(),
         fake_discovery: matches.get_flag("fake-discovery"),
         backend: match matches.get_one::<String>("backend").map(String::as_str) {
+            #[cfg(feature = "zeroconf")]
             Some("zeroconf") => DiscoveryBackend::Zeroconf,
+            // `zeroconf` stays a recognized value in every build so the CLI
+            // surface is stable; without the feature it explains the fix
+            // instead of a bare "invalid value".
+            #[cfg(not(feature = "zeroconf"))]
+            Some("zeroconf") => {
+                // `self::` skips the local `command` binding above.
+                return Err(self::command().error(
+                    ErrorKind::InvalidValue,
+                    "the `zeroconf` backend is not compiled into this build; \
+                     reinstall with `cargo install avahi-tui --features zeroconf`",
+                ));
+            }
             // `mdns-sd` and the default both map to the mdns-sd backend.
             _ => DiscoveryBackend::MdnsSd,
         },
@@ -117,7 +130,12 @@ fn command() -> Command {
         .arg(
             Arg::new("backend")
                 .long("backend")
-                .help("mDNS/DNS-SD discovery backend to use")
+                .help(if cfg!(feature = "zeroconf") {
+                    "mDNS/DNS-SD discovery backend to use"
+                } else {
+                    "mDNS/DNS-SD discovery backend to use \
+                     (zeroconf requires a build with the `zeroconf` feature)"
+                })
                 .value_parser(["mdns-sd", "zeroconf"])
                 .default_value("mdns-sd")
                 .value_name("BACKEND"),
@@ -160,10 +178,23 @@ mod tests {
         assert_eq!(cli.command, CliCommand::Run);
     }
 
+    #[cfg(feature = "zeroconf")]
     #[test]
     fn parses_zeroconf_backend_selection() {
         let cli = parse_from(["avahi-tui", "--backend", "zeroconf"]).unwrap();
         assert_eq!(cli.backend, DiscoveryBackend::Zeroconf);
+    }
+
+    /// Without the `zeroconf` feature, asking for that backend is a usage
+    /// error that names the cargo feature — not a silent fallback, and not a
+    /// bare "invalid value".
+    #[cfg(not(feature = "zeroconf"))]
+    #[test]
+    fn zeroconf_backend_without_the_feature_explains_the_fix() {
+        let err = parse_from(["avahi-tui", "--backend", "zeroconf"]).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+        assert!(err.to_string().contains("--features zeroconf"));
     }
 
     #[test]

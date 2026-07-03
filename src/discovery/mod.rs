@@ -9,6 +9,7 @@ mod entry;
 mod fake;
 mod mdns;
 mod worker;
+#[cfg(feature = "zeroconf")]
 mod zeroconf;
 
 use std::sync::mpsc;
@@ -23,7 +24,9 @@ pub enum DiscoveryBackend {
     #[default]
     MdnsSd,
     /// `zeroconf`: wraps the system Avahi/Bonjour stack, sweeping a curated set
-    /// of common service types in parallel.
+    /// of common service types in parallel. Only available when the crate is
+    /// built with the `zeroconf` feature.
+    #[cfg(feature = "zeroconf")]
     Zeroconf,
 }
 
@@ -65,6 +68,7 @@ pub fn start(config: &DiscoveryConfig) -> Box<dyn Discovery> {
     }
     match config.backend {
         DiscoveryBackend::MdnsSd => Box::new(mdns::start(config)),
+        #[cfg(feature = "zeroconf")]
         DiscoveryBackend::Zeroconf => Box::new(zeroconf::start(config)),
     }
 }

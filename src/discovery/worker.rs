@@ -11,6 +11,9 @@ pub(super) enum RuntimeFlavor {
     /// Single-threaded; enough when the loop drives all its futures itself.
     CurrentThread,
     /// Multi-threaded; needed when the loop `tokio::spawn`s parallel workers.
+    /// Only the `zeroconf` backend does, so tokio's `rt-multi-thread` feature
+    /// is pulled in by the `zeroconf` cargo feature.
+    #[cfg(feature = "zeroconf")]
     MultiThread,
 }
 
@@ -18,6 +21,7 @@ impl RuntimeFlavor {
     fn build(&self) -> std::io::Result<tokio::runtime::Runtime> {
         let mut builder = match self {
             RuntimeFlavor::CurrentThread => tokio::runtime::Builder::new_current_thread(),
+            #[cfg(feature = "zeroconf")]
             RuntimeFlavor::MultiThread => tokio::runtime::Builder::new_multi_thread(),
         };
         builder.enable_all().build()

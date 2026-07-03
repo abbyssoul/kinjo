@@ -49,9 +49,12 @@ required. Two discovery backends are available, selectable with `--backend`:
   enumerates every service type on the link via the native DNS-SD meta-query.
 - `zeroconf`: the `zeroconf-tokio` crate, which talks to the system Avahi daemon
   on Linux. It browses one service type at a time, so a curated set of common
-  types is swept in parallel when no `--service-type` is given.
+  types is swept in parallel when no `--service-type` is given. This backend is
+  behind the off-by-default `zeroconf` cargo feature (it needs the Avahi client
+  headers to build, e.g. `libavahi-client-dev` on Debian/Ubuntu):
 
 ```sh
+cargo install avahi-tui --features zeroconf
 avahi-tui --backend zeroconf
 ```
 
