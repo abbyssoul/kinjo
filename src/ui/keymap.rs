@@ -32,6 +32,7 @@ impl Default for KeyBindings {
         bindings.set("browse", "tab_next", &["tab", "right"]);
         bindings.set("browse", "tab_prev", &["backtab", "left"]);
         bindings.set("browse", "same_host", &["s"]);
+        bindings.set("browse", "refresh", &["r", "f5"]);
         bindings.set("browse", "details_down", &["d", "pagedown", "ctrl-d"]);
         bindings.set("browse", "details_up", &["u", "pageup", "ctrl-u"]);
         bindings.set("browse", "help", &["?"]);
@@ -147,8 +148,7 @@ impl KeySpec {
             "tab" => KeyCode::Tab,
             "backtab" => KeyCode::BackTab,
             "backspace" => KeyCode::Backspace,
-            value if value.chars().count() == 1 => KeyCode::Char(value.chars().next().unwrap()),
-            _ => return Err(eyre!("unsupported key `{value}`")),
+            value => char_or_function_key(value)?,
         };
         Ok(Self { code, ctrl })
     }
@@ -160,6 +160,25 @@ impl KeySpec {
         self.code == event.code
             && event.modifiers.contains(KeyModifiers::CONTROL) == self.ctrl
             && !event.modifiers.contains(KeyModifiers::ALT)
+    }
+}
+
+/// A single-character key (`x`) or a function key (`f1`–`f12`). A bare `f` is
+/// the character key, not a function key.
+fn char_or_function_key(value: &str) -> Result<KeyCode> {
+    if let Some(digits) = value.strip_prefix('f')
+        && !digits.is_empty()
+        && digits.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return match digits.parse::<u8>() {
+            Ok(number @ 1..=12) => Ok(KeyCode::F(number)),
+            _ => Err(eyre!("function key `{value}` is outside f1-f12")),
+        };
+    }
+    let mut chars = value.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) => Ok(KeyCode::Char(ch)),
+        _ => Err(eyre!("unsupported key `{value}`")),
     }
 }
 
@@ -213,6 +232,27 @@ mod tests {
     fn defaults_include_vim_navigation() {
         let bindings = KeyBindings::default();
         assert!(bindings.is("browse", "down", key(KeyCode::Char('j'))));
+    }
+
+    #[test]
+    fn refresh_is_bound_to_r_and_f5_by_default() {
+        let bindings = KeyBindings::default();
+        assert!(bindings.is("browse", "refresh", key(KeyCode::Char('r'))));
+        assert!(bindings.is("browse", "refresh", key(KeyCode::F(5))));
+    }
+
+    #[test]
+    fn function_keys_parse_within_f1_to_f12() {
+        assert_eq!(KeySpec::parse("f1").unwrap().code, KeyCode::F(1));
+        assert_eq!(KeySpec::parse("F5").unwrap().code, KeyCode::F(5));
+        assert_eq!(KeySpec::parse("f12").unwrap().code, KeyCode::F(12));
+        assert_eq!(KeySpec::parse("ctrl-f5").unwrap().code, KeyCode::F(5));
+
+        // A bare `f` is the character key, not a truncated function key.
+        assert_eq!(KeySpec::parse("f").unwrap().code, KeyCode::Char('f'));
+
+        assert!(KeySpec::parse("f0").is_err());
+        assert!(KeySpec::parse("f13").is_err());
     }
 
     #[test]

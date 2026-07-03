@@ -196,6 +196,7 @@ Default keys follow Vim-style conventions:
 - `/`: fuzzy text filter
 - `t`: service type checklist filter
 - `tab` / `shift+tab` (or `←` / `→`): switch view tab
+- `r` / `F5`: refresh — restart service discovery from scratch
 - `?`: help
 - `q`: quit
 
@@ -240,6 +241,13 @@ To validate and list only the commands from a specific directory:
 
 ```sh
 avahi-tui list-commands --config-dir ./commands
+```
+
+A running instance reloads its command files on `SIGHUP` (the conventional
+reload signal), so edits apply without restarting the TUI:
+
+```sh
+pkill -HUP avahi-tui
 ```
 
 Keybindings can be overridden at:

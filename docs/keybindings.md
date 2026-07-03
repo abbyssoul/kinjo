@@ -67,6 +67,7 @@ Supported special keys:
 - `tab`
 - `backtab` (Shift+Tab)
 - `backspace`
+- `f1` … `f12` (function keys)
 
 Single-character keys are written as the character itself:
 
@@ -106,6 +107,7 @@ type_filter = ["t"]
 tab_next = ["tab", "right"]
 tab_prev = ["backtab", "left"]
 same_host = ["s"]
+refresh = ["r", "f5"]
 details_down = ["d", "pagedown", "ctrl-d"]
 details_up = ["u", "pageup", "ctrl-u"]
 help = ["?"]
@@ -113,6 +115,10 @@ help = ["?"]
 
 `tab_next` and `tab_prev` switch the active top-panel view tab
 (services / hosts / types / commands), wrapping around the ends.
+
+`refresh` restarts service discovery from scratch: the list empties and
+repopulates as the fresh browse reports services, exactly like app startup.
+Filters and the active view are kept.
 
 ### Search Mode
 

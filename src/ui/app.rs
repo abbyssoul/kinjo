@@ -1,7 +1,11 @@
 use std::{
     cell::Cell,
     collections::{BTreeMap, HashMap},
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 
@@ -15,11 +19,21 @@ use ratatui::{
 };
 
 use crate::{
-    discovery::{DiscoveryEvent, Entry, EntryGroup, EntryId, GroupingMode, group_entries},
+    discovery::{
+        Discovery, DiscoveryConfig, DiscoveryEvent, Entry, EntryGroup, EntryId, GroupingMode,
+        group_entries,
+    },
     plumber::{self, ActionMode, CommandConfig, MatchResult, PreparedCommand, RuleEngine},
 };
 
 use super::{cli::Cli, filter::FilterState, keymap::KeyBindings, render};
+
+/// Loads a fresh rule set for a config reload (SIGHUP). Injected by the
+/// composition root so the app stays decoupled from config-file I/O.
+pub type ConfigLoader = Box<dyn Fn(&Cli) -> Result<(Box<dyn RuleEngine>, Vec<String>)>>;
+
+/// Starts a replacement discovery backend for a service-list refresh.
+pub type DiscoveryFactory = Box<dyn Fn(&DiscoveryConfig) -> Box<dyn Discovery>>;
 
 /// One row of the "group by command" view: a configured command together with
 /// the distinct logical services it matches.
@@ -58,6 +72,16 @@ pub struct App {
     pub status: String,
     /// Set by the quit keybindings; the event loop exits when it is true.
     pub should_quit: bool,
+    /// Set from the SIGHUP handler; the event loop polls it and reloads the
+    /// command configs when it flips to true.
+    pub reload_requested: Arc<AtomicBool>,
+    /// Reloads command configs on request; reload is unavailable when unset.
+    pub config_loader: Option<ConfigLoader>,
+    /// The running discovery backend. Owned by the app so the refresh command
+    /// can stop it and start a replacement; dropping it stops the browse.
+    pub discovery: Option<Box<dyn Discovery>>,
+    /// Starts a replacement discovery backend; refresh is unavailable when unset.
+    pub discovery_factory: Option<DiscoveryFactory>,
     /// Per-group action matches, parallel to `visible_groups`. Computed once
     /// per recompute so rendering and invocation share one result instead of
     /// re-running the matcher (regexes included) every frame.
@@ -112,6 +136,10 @@ impl App {
             instance_index: 0,
             status,
             should_quit: false,
+            reload_requested: Arc::new(AtomicBool::new(false)),
+            config_loader: None,
+            discovery: None,
+            discovery_factory: None,
             group_matches: Vec::new(),
             service_types: Vec::new(),
             ticks: 0,
@@ -125,12 +153,31 @@ impl App {
         }
     }
 
+    /// Attach the running discovery backend and a factory for replacements,
+    /// enabling the refresh command.
+    pub fn with_discovery(
+        mut self,
+        backend: Box<dyn Discovery>,
+        factory: DiscoveryFactory,
+    ) -> Self {
+        self.discovery = Some(backend);
+        self.discovery_factory = Some(factory);
+        self
+    }
+
+    /// Attach a command-config loader, enabling reload-on-SIGHUP.
+    pub fn with_config_loader(mut self, loader: ConfigLoader) -> Self {
+        self.config_loader = Some(loader);
+        self
+    }
+
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<Option<PreparedCommand>> {
         let _mouse_capture = MouseCaptureGuard::enable();
         self.recompute_visible();
 
         loop {
             self.ticks = self.ticks.wrapping_add(1);
+            self.poll_reload();
             self.drain_discovery();
             terminal.draw(|frame| render::render(frame, self))?;
 
@@ -322,6 +369,7 @@ impl App {
             _ if self.keybindings.is("browse", "same_host", key) => {
                 self.toggle_same_host_filter();
             }
+            _ if self.keybindings.is("browse", "refresh", key) => self.refresh_services(),
             _ if self.keybindings.is("browse", "details_down", key) => self.scroll_details(1),
             _ if self.keybindings.is("browse", "details_up", key) => self.scroll_details(-1),
             _ if self.keybindings.is("browse", "help", key) => self.mode = AppMode::Help,
@@ -674,6 +722,74 @@ impl App {
             // The execute hand-off happens after the TUI is torn down, so the
             // caller takes ownership of the prepared command from here.
             ActionMode::Execute => Ok(Some(prepared)),
+        }
+    }
+
+    /// Perform the config reload when one was requested (SIGHUP).
+    fn poll_reload(&mut self) {
+        if self.reload_requested.swap(false, Ordering::Relaxed) {
+            self.reload_config();
+        }
+    }
+
+    /// Reload command configs through the injected loader, keeping the current
+    /// rule set when the reload fails. A reload failure must not tear down the
+    /// TUI — it is reported on the status line like action failures.
+    fn reload_config(&mut self) {
+        let Some(loader) = &self.config_loader else {
+            self.status = "config reload is not available".to_string();
+            return;
+        };
+        match loader(&self.cli) {
+            Ok((matcher, warnings)) => {
+                self.matcher = matcher;
+                self.close_pickers();
+                self.recompute_visible();
+                self.status = match warnings.len() {
+                    0 => format!("reloaded {} command(s)", self.matcher.command_count()),
+                    skipped => format!(
+                        "reloaded {} command(s); skipped {skipped} config file(s)",
+                        self.matcher.command_count()
+                    ),
+                };
+            }
+            Err(err) => self.status = format!("config reload failed: {err}"),
+        }
+    }
+
+    /// Restart discovery from scratch: the list empties and repopulates as the
+    /// fresh browse reports services, exactly like app startup. Filters and
+    /// the active view are kept; they describe what the user wants to see,
+    /// not what has been seen.
+    fn refresh_services(&mut self) {
+        let Some(factory) = &self.discovery_factory else {
+            self.status = "refresh is not available".to_string();
+            return;
+        };
+        // Stop the old backend (cancel + join its worker) before starting the
+        // replacement, so two browsers never feed the list at once.
+        self.discovery = None;
+        let mut backend = factory(&self.cli.discovery_config());
+        self.discovery_rx = backend.events();
+        self.discovery = Some(backend);
+
+        self.records.clear();
+        self.close_pickers();
+        self.selected = 0;
+        self.details_scroll = 0;
+        self.recompute_visible();
+        self.status = "refreshing: service discovery restarted".to_string();
+    }
+
+    /// Close any open picker: its entries were computed from the pre-reload
+    /// rule set or the pre-refresh service list. Search and help stay open —
+    /// they do not cache matcher or record data.
+    fn close_pickers(&mut self) {
+        if matches!(
+            self.mode,
+            AppMode::ActionPicker | AppMode::InstancePicker | AppMode::ServicePicker
+        ) {
+            self.return_to_browse();
         }
     }
 
@@ -1309,6 +1425,240 @@ mode = "execute"
         send(&mut many, KeyCode::Down);
         let command = send(&mut many, KeyCode::Enter).expect("picked service runs");
         assert_eq!(command.argv, vec!["ssh", "beta.local"]);
+    }
+
+    // ── refresh & config reload ─────────────────────────────────────────────
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+
+    use color_eyre::eyre::eyre;
+
+    /// A [`Discovery`] double: events come from a plain channel, and dropping
+    /// it (as refresh does to the old backend) is observable via a flag.
+    struct ChannelDiscovery {
+        receiver: Option<mpsc::Receiver<DiscoveryEvent>>,
+        dropped: Option<Arc<AtomicBool>>,
+    }
+
+    impl Discovery for ChannelDiscovery {
+        fn events(&mut self) -> mpsc::Receiver<DiscoveryEvent> {
+            self.receiver
+                .take()
+                .expect("discovery receiver can only be taken once")
+        }
+    }
+
+    impl Drop for ChannelDiscovery {
+        fn drop(&mut self) {
+            if let Some(flag) = &self.dropped {
+                flag.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// A factory whose spawned backends' senders are captured, so a test can
+    /// feed events through whichever backend a refresh started.
+    fn channel_factory() -> (
+        DiscoveryFactory,
+        Arc<Mutex<Vec<mpsc::Sender<DiscoveryEvent>>>>,
+    ) {
+        let spawned: Arc<Mutex<Vec<mpsc::Sender<DiscoveryEvent>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let factory = {
+            let spawned = spawned.clone();
+            Box::new(move |_config: &DiscoveryConfig| {
+                let (tx, rx) = mpsc::channel();
+                spawned.lock().unwrap().push(tx);
+                Box::new(ChannelDiscovery {
+                    receiver: Some(rx),
+                    dropped: None,
+                }) as Box<dyn Discovery>
+            })
+        };
+        (factory, spawned)
+    }
+
+    #[test]
+    fn refresh_restarts_discovery_and_repopulates_like_startup() {
+        let old_backend_dropped = Arc::new(AtomicBool::new(false));
+        let (factory, spawned) = channel_factory();
+        let mut app = app_with(
+            Matcher::default(),
+            vec![ssh("alpha", "10.0.0.1"), ssh("beta", "10.0.0.2")],
+        )
+        .with_discovery(
+            Box::new(ChannelDiscovery {
+                receiver: None,
+                dropped: Some(old_backend_dropped.clone()),
+            }),
+            factory,
+        );
+        assert_eq!(app.visible_groups.len(), 2);
+
+        send(&mut app, KeyCode::Char('r'));
+
+        // The old browse is stopped, the list is empty, and a new backend runs.
+        assert!(old_backend_dropped.load(Ordering::Relaxed));
+        assert!(app.records.is_empty());
+        assert!(app.visible_groups.is_empty());
+        assert!(app.status.contains("refresh"));
+        assert_eq!(spawned.lock().unwrap().len(), 1);
+
+        // Events from the replacement backend repopulate the list.
+        spawned.lock().unwrap()[0]
+            .send(DiscoveryEvent::Upsert(
+                ssh("gamma", "10.0.0.3").with_instance_id(),
+            ))
+            .unwrap();
+        app.drain_discovery();
+        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.visible_groups[0].label, "gamma");
+    }
+
+    #[test]
+    fn refresh_resets_cursor_and_scroll_but_keeps_filters() {
+        let (factory, _spawned) = channel_factory();
+        let mut app = app_with(
+            Matcher::default(),
+            vec![ssh("alpha", "10.0.0.1"), ssh("beta", "10.0.0.2")],
+        )
+        .with_discovery(
+            Box::new(ChannelDiscovery {
+                receiver: None,
+                dropped: None,
+            }),
+            factory,
+        );
+        send(&mut app, KeyCode::Down);
+        app.details_scroll = 3;
+        app.filter.text_query = "bet".to_string();
+
+        app.refresh_services();
+
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.details_scroll, 0);
+        assert_eq!(
+            app.filter.text_query, "bet",
+            "refresh restarts discovery; it does not discard what the user asked to see"
+        );
+    }
+
+    #[test]
+    fn refresh_without_discovery_control_reports_status_and_keeps_records() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+
+        send(&mut app, KeyCode::Char('r'));
+
+        assert!(app.status.contains("refresh is not available"));
+        assert_eq!(app.records.len(), 1, "records must not be lost");
+    }
+
+    #[test]
+    fn requested_reload_swaps_commands_and_recomputes_matches() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader(Box::new(|_cli| {
+                Ok((
+                    Box::new(matcher_from(&[SSH])) as Box<dyn RuleEngine>,
+                    Vec::new(),
+                ))
+            }));
+        assert_eq!(app.matcher.command_count(), 0);
+        assert_eq!(app.group_matches[0].len(), 0);
+
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+
+        assert_eq!(app.matcher.command_count(), 1);
+        assert_eq!(
+            app.group_matches[0].len(),
+            1,
+            "matches are recomputed against the reloaded rules"
+        );
+        assert!(app.status.contains("reloaded 1 command"));
+        assert!(
+            !app.reload_requested.load(Ordering::Relaxed),
+            "the request is consumed"
+        );
+    }
+
+    #[test]
+    fn poll_without_a_reload_request_does_nothing() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader({
+                let calls = calls.clone();
+                Box::new(move |_cli| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    Ok((
+                        Box::new(Matcher::default()) as Box<dyn RuleEngine>,
+                        Vec::new(),
+                    ))
+                })
+            });
+        let status = app.status.clone();
+
+        app.poll_reload();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(app.status, status);
+    }
+
+    #[test]
+    fn failed_reload_keeps_the_current_commands() {
+        let mut app = app_with(matcher_from(&[SSH]), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader(Box::new(|_cli| Err(eyre!("boom"))));
+
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+
+        assert_eq!(app.matcher.command_count(), 1, "old rules stay in force");
+        assert!(app.status.contains("config reload failed"));
+        assert!(app.status.contains("boom"));
+    }
+
+    #[test]
+    fn reload_reports_skipped_config_files() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader(Box::new(|_cli| {
+                Ok((
+                    Box::new(matcher_from(&[SSH])) as Box<dyn RuleEngine>,
+                    vec!["bad.toml: not toml".to_string()],
+                ))
+            }));
+
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+
+        assert!(app.status.contains("skipped 1 config file"));
+    }
+
+    #[test]
+    fn reload_closes_a_picker_built_from_the_old_rules() {
+        let mut app = app_with(matcher_from(&[SSH, PING]), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader(Box::new(|_cli| {
+                Ok((
+                    Box::new(Matcher::default()) as Box<dyn RuleEngine>,
+                    Vec::new(),
+                ))
+            }));
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::ActionPicker);
+
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.action_matches.is_empty());
+    }
+
+    #[test]
+    fn reload_without_a_loader_reports_status() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+
+        assert!(app.status.contains("config reload is not available"));
     }
 
     #[test]
