@@ -1,0 +1,102 @@
+name: Prepare Release
+
+# Triggered by pushing a tag like `v0.1.2` (`git tag v0.1.2 && git push origin
+# v0.1.2`, or via the GitHub UI). The tag itself is only a request: it is
+# deleted immediately below and re-created once `main` actually contains that
+# version, so the published crate/deb always match the commit their tag points
+# to. If this workflow fails partway, just push the same tag again to retry.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write # required for `gh workflow run` below
+
+env:
+  CARGO_TERM_COLOR: always
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Reclaim the tag as a release request
+        id: ver
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          git push origin --delete "$GITHUB_REF_NAME"
+
+      - name: Skip if this release already exists
+        id: check
+        run: |
+          if gh release view "v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.check.outputs.exists == 'false'
+
+      - name: Bump Cargo.toml to the requested version
+        if: steps.check.outputs.exists == 'false'
+        id: bump
+        run: |
+          git checkout -B "release/v${{ steps.ver.outputs.version }}" "origin/main"
+
+          current="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "$current" = "${{ steps.ver.outputs.version }}" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          cargo install cargo-edit --locked
+          cargo set-version "${{ steps.ver.outputs.version }}"
+          cargo check
+
+          git config user.name "github-actions-release[bot]"
+          git config user.email "github-actions-release[bot]@users.noreply.github.com"
+          git commit -am "Bump version to ${{ steps.ver.outputs.version }}"
+          git push origin "release/v${{ steps.ver.outputs.version }}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open and merge the version-bump PR
+        if: steps.check.outputs.exists == 'false' && steps.bump.outputs.changed == 'true'
+        id: merge
+        run: |
+          gh pr create \
+            --base main \
+            --head "release/v${{ steps.ver.outputs.version }}" \
+            --title "Release v${{ steps.ver.outputs.version }}" \
+            --body "Automated version bump for v${{ steps.ver.outputs.version }}."
+          gh pr merge "release/v${{ steps.ver.outputs.version }}" \
+            --squash --delete-branch --admin
+          git fetch origin main
+          echo "sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release commit when no bump was needed
+        if: steps.check.outputs.exists == 'false' && steps.bump.outputs.changed == 'false'
+        id: nobump
+        run: echo "sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
+
+      - name: Create the release and dispatch publish jobs
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          sha="${{ steps.merge.outputs.sha || steps.nobump.outputs.sha }}"
+          gh release create "v${{ steps.ver.outputs.version }}" \
+            --target "$sha" \
+            --title "v${{ steps.ver.outputs.version }}" \
+            --generate-notes
+
+          # A release created via GITHUB_TOKEN does not auto-trigger other
+          # workflows' `release: created` listeners, so dispatch them directly.
+          gh workflow run publish-crate.yml --ref "v${{ steps.ver.outputs.version }}"
+          gh workflow run release-deb.yml --ref "v${{ steps.ver.outputs.version }}"
