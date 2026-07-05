@@ -35,5 +35,5 @@ body:
     id: output
     attributes:
       label: Validation output
-      description: Output from `avahi-tui list-commands` if it fails.
+      description: Output from `kinjo list-commands` if it fails.
       render: text

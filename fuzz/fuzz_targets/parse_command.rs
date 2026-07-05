@@ -4,7 +4,7 @@
 //! command definition must only ever parse successfully or return an `Err` —
 //! never panic.
 
-use avahi_tui::plumber::MatcherBuilder;
+use kinjo::plumber::MatcherBuilder;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

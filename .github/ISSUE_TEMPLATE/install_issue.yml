@@ -28,7 +28,7 @@ body:
       placeholder: |
         OS:
         Architecture:
-        avahi-tui version:
+        kinjo version:
         Avahi package/version:
     validations:
       required: true

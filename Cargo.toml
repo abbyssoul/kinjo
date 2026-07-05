@@ -1,10 +1,10 @@
 [package]
-name = "avahi-tui"
-description = "Avahi TUI: launch commands for discovered services"
+name = "kinjo"
+description = "Kinjo: mDNS TUI and commands launch for local network services"
 version = "0.1.0"
 edition = "2024"
 readme = "README.md"
-repository = "https://github.com/abbyssoul/avahi-tui"
+repository = "https://github.com/abbyssoul/kinjo"
 license-file = "LICENSE"
 # crates.io allows at most 5 keywords, letters/digits/`-`/`_` only (no spaces).
 keywords = ["avahi", "tui", "zeroconf", "dns-sd", "mdns"]
@@ -15,10 +15,10 @@ maintainer = "Ivan Ryabov <abbyssoul@gmail.com>"
 copyright = "2026, Ivan Ryabov <abbyssoul@gmail.com>"
 depends = "$auto"
 assets = [
-    ["target/release/avahi-tui", "usr/bin/", "755"],
-    ["README.md", "usr/share/doc/avahi-tui/README.md", "644"],
-    ["LICENSE", "usr/share/doc/avahi-tui/LICENSE", "644"],
-    ["actions/*.toml", "etc/avahi-tui/commands/", "644"],
+    ["target/release/kinjo", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/kinjo/README.md", "644"],
+    ["LICENSE", "usr/share/doc/kinjo/LICENSE", "644"],
+    ["actions/*.toml", "etc/kinjo/commands/", "644"],
 ]
 
 

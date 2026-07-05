@@ -197,16 +197,12 @@ fn config_paths(
     home: Option<std::ffi::OsString>,
 ) -> Vec<PathBuf> {
     if let Some(xdg) = xdg_config_home {
-        vec![
-            PathBuf::from(xdg)
-                .join("avahi-tui")
-                .join("keybindings.toml"),
-        ]
+        vec![PathBuf::from(xdg).join("kinjo").join("keybindings.toml")]
     } else if let Some(home) = home {
         vec![
             PathBuf::from(home)
                 .join(".config")
-                .join("avahi-tui")
+                .join("kinjo")
                 .join("keybindings.toml"),
         ]
     } else {
@@ -450,10 +446,7 @@ quit = []
             Some(OsString::from("/home/user")),
         );
 
-        assert_eq!(
-            paths,
-            vec![PathBuf::from("/xdg/avahi-tui/keybindings.toml")]
-        );
+        assert_eq!(paths, vec![PathBuf::from("/xdg/kinjo/keybindings.toml")]);
     }
 
     #[test]
@@ -462,9 +455,7 @@ quit = []
 
         assert_eq!(
             paths,
-            vec![PathBuf::from(
-                "/home/user/.config/avahi-tui/keybindings.toml"
-            )]
+            vec![PathBuf::from("/home/user/.config/kinjo/keybindings.toml")]
         );
     }
 

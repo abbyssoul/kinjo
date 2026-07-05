@@ -1,18 +1,18 @@
 
-# Avahi-TUI
+# Kinjo
 
 <div align="center">
 
 **Browse local DNS-SD services, filter them, and run custom actions from a terminal UI.**
 
-![GitHub Release](https://img.shields.io/github/v/release/abbyssoul/avahi-tui?display_name=tag&color=%23a6a)
-[![Crates.io](https://img.shields.io/crates/v/avahi-tui.svg)](https://crates.io/crates/avahi-tui)
-[![docs.rs](https://img.shields.io/docsrs/avahi-tui)](https://docs.rs/avahi-tui)
-[![GitHub branch check runs](https://img.shields.io/github/check-runs/abbyssoul/avahi-tui/main)](https://github.com/abbyssoul/avahi-tui/actions/workflows/ci-test.yml)
-[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=abbyssoul_avahi-tui&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=abbyssoul_avahi-tui)
-[![License: MIT](https://img.shields.io/github/license/abbyssoul/avahi-tui)](LICENSE)
+![GitHub Release](https://img.shields.io/github/v/release/abbyssoul/kinjo?display_name=tag&color=%23a6a)
+[![Crates.io](https://img.shields.io/crates/v/kinjo.svg)](https://crates.io/crates/kinjo)
+[![docs.rs](https://img.shields.io/docsrs/kinjo)](https://docs.rs/kinjo)
+[![GitHub branch check runs](https://img.shields.io/github/check-runs/abbyssoul/kinjo/main)](https://github.com/abbyssoul/kinjo/actions/workflows/ci-test.yml)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=abbyssoul_kinjo&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=abbyssoul_kinjo)
+[![License: MIT](https://img.shields.io/github/license/abbyssoul/kinjo)](LICENSE)
 
-<img width="1430" height="609" alt="avahi-tui-screenshot" src="https://github.com/user-attachments/assets/319acde6-a3d0-4cb1-aefc-12088bc67328" />
+<img width="1430" height="609" alt="kinjo-screenshot" src="https://github.com/user-attachments/assets/319acde6-a3d0-4cb1-aefc-12088bc67328" />
 
 
 </div>
@@ -27,19 +27,19 @@ selected service.
 Launch the TUI without arguments to browse the default `local` domain:
 
 ```sh
-avahi-tui
+kinjo
 ```
 
 Browse another DNS-SD domain with the `--domain` (`-d`) flag:
 
 ```sh
-avahi-tui --domain example.local
+kinjo --domain example.local
 ```
 
 For development without a running Avahi setup:
 
 ```sh
-avahi-tui --fake-discovery
+kinjo --fake-discovery
 ```
 
 The app discovers services over mDNS/DNS-SD so no external CLI tools are
@@ -54,8 +54,8 @@ required. Two discovery backends are available, selectable with `--backend`:
   headers to build, e.g. `libavahi-client-dev` on Debian/Ubuntu):
 
 ```sh
-cargo install avahi-tui --features zeroconf
-avahi-tui --backend zeroconf
+cargo install kinjo --features zeroconf
+kinjo --backend zeroconf
 ```
 
 When a `--service-type` is given, only that type is browsed. If mDNS discovery is
@@ -66,15 +66,15 @@ unavailable, it falls back to sample records so the UI remains usable.
 ### Debian / Ubuntu
 
 Download the latest `.deb` package from the project's
-[GitHub Releases](https://github.com/abbyssoul/avahi-tui/releases) page, then
+[GitHub Releases](https://github.com/abbyssoul/kinjo/releases) page, then
 install it with `apt`:
 
 ```sh
-sudo apt install ./avahi-tui_*_amd64.deb
+sudo apt install ./kinjo_*_amd64.deb
 ```
 
-The package installs `avahi-tui` and the bundled system command files under
-`/etc/avahi-tui/commands`.
+The package installs `kinjo` and the bundled system command files under
+`/etc/kinjo/commands`.
 
 For real local-network discovery, make sure Avahi is installed and running:
 
@@ -89,7 +89,7 @@ sudo systemctl enable --now avahi-daemon
 Install from crates.io with Cargo:
 
 ```sh
-cargo install avahi-tui
+cargo install kinjo
 ```
 
 On Debian or Ubuntu, install native build dependencies first:
@@ -104,8 +104,8 @@ sudo apt-get install -y clang libavahi-client-dev libxcb-shape0-dev libxcb-xfixe
 Clone the repository and build locally:
 
 ```sh
-git clone https://github.com/abbyssoul/avahi-tui.git
-cd avahi-tui
+git clone https://github.com/abbyssoul/kinjo.git
+cd kinjo
 cargo build --locked
 ```
 
@@ -126,18 +126,18 @@ cargo install --path .
 You can verify the UI without a running Avahi daemon:
 
 ```sh
-avahi-tui --fake-discovery
+kinjo --fake-discovery
 ```
 
 To browse real services on the default `local` domain:
 
 ```sh
-avahi-tui
+kinjo
 ```
 
 ## How It Works
 
-`avahi-tui` has five moving parts:
+`kinjo` has five moving parts:
 
 1. Discovery finds DNS-SD service records on the network. Each record can carry
    fields such as service name, service type, domain, hostname, address, port,
@@ -216,44 +216,44 @@ Command files follow the XDG Base Directory Specification. User command files ar
 loaded from:
 
 ```sh
-$XDG_CONFIG_HOME/avahi-tui/commands/*.toml
+$XDG_CONFIG_HOME/kinjo/commands/*.toml
 ```
 
 If `XDG_CONFIG_HOME` is not set, the fallback path is:
 
 ```sh
-~/.config/avahi-tui/commands/*.toml
+~/.config/kinjo/commands/*.toml
 ```
 
 Additional command directories can be provided with:
 
 ```sh
-avahi-tui --config-dir ./commands
+kinjo --config-dir ./commands
 ```
 
 Validate and list the registered commands with:
 
 ```sh
-avahi-tui list-commands
+kinjo list-commands
 ```
 
 To validate and list only the commands from a specific directory:
 
 ```sh
-avahi-tui list-commands --config-dir ./commands
+kinjo list-commands --config-dir ./commands
 ```
 
 A running instance reloads its command files on `SIGHUP` (the conventional
 reload signal), so edits apply without restarting the TUI:
 
 ```sh
-pkill -HUP avahi-tui
+pkill -HUP kinjo
 ```
 
 Keybindings can be overridden at:
 
 ```sh
-$XDG_CONFIG_HOME/avahi-tui/keybindings.toml
+$XDG_CONFIG_HOME/kinjo/keybindings.toml
 ```
 
 See [docs/keybindings.md](docs/keybindings.md) for examples and the complete

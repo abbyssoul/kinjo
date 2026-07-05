@@ -16,7 +16,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 fn unique_path(tag: &str, suffix: &str) -> PathBuf {
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "avahi-tui-test-{tag}-{}-{seq}{suffix}",
+        "kinjo-test-{tag}-{}-{seq}{suffix}",
         std::process::id()
     ))
 }

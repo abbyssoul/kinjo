@@ -287,7 +287,7 @@ mode = "execute"
 
     #[test]
     fn config_dirs_layer_system_then_user_then_extras() {
-        let extra = PathBuf::from("/tmp/avahi-extra");
+        let extra = PathBuf::from("/tmp/kinjo-extra");
         let dirs = config_dirs(std::slice::from_ref(&extra));
         assert_eq!(dirs.first(), Some(&PathBuf::from(SYSTEM_CONFIG_DIR)));
         assert_eq!(dirs.last(), Some(&extra));
@@ -1006,7 +1006,7 @@ mode = "execute"
         let mut builder = MatcherBuilder::new();
         load_from_dirs(
             &mut builder,
-            &[PathBuf::from("/tmp/avahi-tui-definitely-missing-xyz")],
+            &[PathBuf::from("/tmp/kinjo-definitely-missing-xyz")],
         )
         .unwrap();
 
@@ -1026,7 +1026,7 @@ mode = "execute"
             dirs,
             vec![
                 PathBuf::from(SYSTEM_CONFIG_DIR),
-                PathBuf::from("/xdg/avahi-tui/commands"),
+                PathBuf::from("/xdg/kinjo/commands"),
                 extra,
             ]
         );
@@ -1040,7 +1040,7 @@ mode = "execute"
             dirs,
             vec![
                 PathBuf::from(SYSTEM_CONFIG_DIR),
-                PathBuf::from("/home/user/.config/avahi-tui/commands"),
+                PathBuf::from("/home/user/.config/kinjo/commands"),
             ]
         );
     }

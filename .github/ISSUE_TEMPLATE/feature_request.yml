@@ -14,7 +14,7 @@ body:
     id: proposal
     attributes:
       label: Proposed solution
-      description: What would you like `avahi-tui` to do?
+      description: What would you like `kinjo` to do?
     validations:
       required: true
   - type: textarea

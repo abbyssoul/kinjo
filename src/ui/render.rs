@@ -95,7 +95,7 @@ fn render_top_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut spans = vec![
         Span::styled(format!(" {spinner} "), Style::default().fg(GOOD)),
         Span::styled(
-            "avahi-tui  ",
+            "kinjo  ",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
     ];

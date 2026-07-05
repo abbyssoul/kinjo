@@ -4,7 +4,7 @@
 //! names (e.g. `HP\032OfficeJet` -> `HP OfficeJet`). It must handle any input
 //! without panicking and always return valid UTF-8.
 
-use avahi_tui::discovery::decode_dns_sd_escapes;
+use kinjo::discovery::decode_dns_sd_escapes;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

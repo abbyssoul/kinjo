@@ -1,4 +1,4 @@
-//! avahi-tui is built from three deliberately decoupled parts:
+//! kinjo is built from three deliberately decoupled parts:
 //!
 //! - [`discovery`] produces *entries* (mDNS today, swappable behind the
 //!   [`discovery::Discovery`] trait),
@@ -6,7 +6,7 @@
 //!   (behind the [`plumber::RuleEngine`] trait),
 //! - [`ui`] ties them together for a person at the terminal.
 //!
-//! [`run`] is the composition root that wires the parts together; the `avahi-tui`
+//! [`run`] is the composition root that wires the parts together; the `kinjo`
 //! binary is a thin wrapper around it. Exposing these modules as a library also
 //! lets the `fuzz/` targets exercise the discovery and parser code directly.
 

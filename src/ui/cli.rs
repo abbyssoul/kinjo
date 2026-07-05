@@ -84,7 +84,7 @@ where
                 return Err(self::command().error(
                     ErrorKind::InvalidValue,
                     "the `zeroconf` backend is not compiled into this build; \
-                     reinstall with `cargo install avahi-tui --features zeroconf`",
+                     reinstall with `cargo install kinjo --features zeroconf`",
                 ));
             }
             // `mdns-sd` and the default both map to the mdns-sd backend.
@@ -95,11 +95,11 @@ where
 }
 
 fn command() -> Command {
-    Command::new("avahi-tui")
+    Command::new("kinjo")
         .about("TUI browser and launcher for DNS-SD services")
         .arg(
             // A flag rather than a positional so it never competes with the
-            // subcommand slot — `avahi-tui <unknown>` now errors instead of
+            // subcommand slot — `kinjo <unknown>` now errors instead of
             // being silently treated as a domain name.
             Arg::new("domain")
                 .long("domain")
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn parses_default_run_command() {
-        let cli = parse_from(["avahi-tui"]).unwrap();
+        let cli = parse_from(["kinjo"]).unwrap();
 
         assert_eq!(cli.domain, "local");
         assert!(cli.config_dirs.is_empty());
@@ -181,7 +181,7 @@ mod tests {
     #[cfg(feature = "zeroconf")]
     #[test]
     fn parses_zeroconf_backend_selection() {
-        let cli = parse_from(["avahi-tui", "--backend", "zeroconf"]).unwrap();
+        let cli = parse_from(["kinjo", "--backend", "zeroconf"]).unwrap();
         assert_eq!(cli.backend, DiscoveryBackend::Zeroconf);
     }
 
@@ -191,7 +191,7 @@ mod tests {
     #[cfg(not(feature = "zeroconf"))]
     #[test]
     fn zeroconf_backend_without_the_feature_explains_the_fix() {
-        let err = parse_from(["avahi-tui", "--backend", "zeroconf"]).unwrap_err();
+        let err = parse_from(["kinjo", "--backend", "zeroconf"]).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidValue);
         assert!(err.to_string().contains("--features zeroconf"));
@@ -199,13 +199,13 @@ mod tests {
 
     #[test]
     fn rejects_unknown_backend() {
-        assert!(parse_from(["avahi-tui", "--backend", "bonjour"]).is_err());
+        assert!(parse_from(["kinjo", "--backend", "bonjour"]).is_err());
     }
 
     #[test]
     fn parses_run_options_and_repeatable_config_dirs() {
         let cli = parse_from([
-            "avahi-tui",
+            "kinjo",
             "--domain",
             "corp",
             "--service-type",
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn parses_list_commands_config_dirs_from_subcommand_context() {
         let cli = parse_from([
-            "avahi-tui",
+            "kinjo",
             "--config-dir",
             "run-only",
             "list-commands",
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_subcommand_instead_of_treating_it_as_domain() {
-        let err = parse_from(["avahi-tui", "browse"]).unwrap_err();
+        let err = parse_from(["kinjo", "browse"]).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
     }

@@ -403,14 +403,14 @@ mod tests {
     #[test]
     fn fork_reports_a_missing_binary() {
         let command = PreparedCommand {
-            argv: vec!["avahi-tui-no-such-binary-xyz".to_string()],
+            argv: vec!["kinjo-no-such-binary-xyz".to_string()],
             mode: ActionMode::Fork,
         };
 
         let err = fork(&command).unwrap_err();
         assert!(
             err.to_string()
-                .contains("command `avahi-tui-no-such-binary-xyz` not found")
+                .contains("command `kinjo-no-such-binary-xyz` not found")
         );
     }
 
@@ -493,7 +493,7 @@ mod tests {
         // A shell interpreter is present on every supported platform.
         assert!(locate(PRESENT_COMMAND).is_some());
 
-        assert!(locate("avahi-tui-no-such-binary-xyz").is_none());
+        assert!(locate("kinjo-no-such-binary-xyz").is_none());
         assert!(locate("/no/such/absolute/path/xyz").is_none());
         assert!(locate("").is_none());
     }

@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve `avahi-tui`. This project is a Rust terminal UI for
+Thanks for helping improve `kinjo`. This project is a Rust terminal UI for
 browsing DNS-SD services and launching configured actions.
 
 ## Development Setup
@@ -127,7 +127,7 @@ cargo test --locked
 When reporting bugs, include:
 
 - operating system and version
-- how `avahi-tui` was installed
+- how `kinjo` was installed
 - command used to run it
 - whether `--fake-discovery` works
 - relevant command or keybinding config snippets

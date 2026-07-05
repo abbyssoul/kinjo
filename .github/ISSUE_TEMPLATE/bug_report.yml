@@ -16,7 +16,7 @@ body:
       label: Steps to reproduce
       description: Include the exact command you ran.
       placeholder: |
-        1. Run `avahi-tui ...`
+        1. Run `kinjo ...`
         2. Press ...
         3. Observe ...
     validations:
@@ -35,7 +35,7 @@ body:
       description: Include OS, install method, package version, and whether Avahi is running.
       placeholder: |
         OS:
-        avahi-tui version:
+        kinjo version:
         Install method:
         Avahi daemon status:
     validations:

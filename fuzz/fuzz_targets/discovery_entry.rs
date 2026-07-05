@@ -5,7 +5,7 @@
 //! fields, render display names, and group without panicking.
 
 use arbitrary::Arbitrary;
-use avahi_tui::discovery::{Entry, GroupingMode, group_entries};
+use kinjo::discovery::{Entry, GroupingMode, group_entries};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]

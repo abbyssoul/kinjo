@@ -76,7 +76,7 @@ mode = "execute"
 
     #[test]
     fn run_command_expands_default_dirs_before_extra_config_dirs() {
-        let extra = PathBuf::from("/tmp/avahi-tui-extra-commands");
+        let extra = PathBuf::from("/tmp/kinjo-extra-commands");
         let dirs = matcher_config_dirs(&test_cli(CliCommand::Run, vec![extra.clone()]));
 
         assert_eq!(
@@ -89,8 +89,8 @@ mode = "execute"
     #[test]
     fn list_commands_with_explicit_dirs_does_not_expand_defaults() {
         let explicit = vec![
-            PathBuf::from("/tmp/avahi-tui-list-a"),
-            PathBuf::from("/tmp/avahi-tui-list-b"),
+            PathBuf::from("/tmp/kinjo-list-a"),
+            PathBuf::from("/tmp/kinjo-list-b"),
         ];
         let dirs = matcher_config_dirs(&test_cli(CliCommand::ListCommands, explicit.clone()));
 
@@ -123,8 +123,7 @@ mode = "execute"
 
     #[test]
     fn load_keybindings_falls_back_to_defaults_when_no_files_exist() {
-        let bindings =
-            KeyBindings::load(&[PathBuf::from("/tmp/avahi-tui-no-such-keymap")]).unwrap();
+        let bindings = KeyBindings::load(&[PathBuf::from("/tmp/kinjo-no-such-keymap")]).unwrap();
 
         assert!(bindings.is(
             "browse",

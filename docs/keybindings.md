@@ -4,13 +4,13 @@ All built-in UI commands can be rebound from a keybindings file. The file is
 loaded from:
 
 ```sh
-$XDG_CONFIG_HOME/avahi-tui/keybindings.toml
+$XDG_CONFIG_HOME/kinjo/keybindings.toml
 ```
 
 If `XDG_CONFIG_HOME` is not set, the fallback path is:
 
 ```sh
-~/.config/avahi-tui/keybindings.toml
+~/.config/kinjo/keybindings.toml
 ```
 
 The file overlays the default bindings. You only need to include commands you

@@ -1,6 +1,6 @@
 # Custom Commands
 
-Custom commands let `avahi-tui` turn a discovered service into an action, such as
+Custom commands let `kinjo` turn a discovered service into an action, such as
 opening a URL or starting an SSH session. Each command lives in one `.toml` file.
 
 ## Locations
@@ -8,31 +8,31 @@ opening a URL or starting an SSH session. Each command lives in one `.toml` file
 User commands are loaded from:
 
 ```sh
-$XDG_CONFIG_HOME/avahi-tui/commands/*.toml
+$XDG_CONFIG_HOME/kinjo/commands/*.toml
 ```
 
 If `XDG_CONFIG_HOME` is not set, the fallback path is:
 
 ```sh
-~/.config/avahi-tui/commands/*.toml
+~/.config/kinjo/commands/*.toml
 ```
 
 System-wide commands are loaded from:
 
 ```sh
-/etc/avahi-tui/commands/*.toml
+/etc/kinjo/commands/*.toml
 ```
 
 Extra directories can be added with `--config-dir`. The flag is repeatable:
 
 ```sh
-avahi-tui --config-dir ./team-commands --config-dir ./local-commands
+kinjo --config-dir ./team-commands --config-dir ./local-commands
 ```
 
 Directories are loaded as overlay layers in this order:
 
-1. `/etc/avahi-tui/commands`
-2. `$XDG_CONFIG_HOME/avahi-tui/commands` or `~/.config/avahi-tui/commands`
+1. `/etc/kinjo/commands`
+2. `$XDG_CONFIG_HOME/kinjo/commands` or `~/.config/kinjo/commands`
 3. each `--config-dir` in the order given
 
 If a later layer defines a command with the same `metadata.name`, it overrides
@@ -43,13 +43,13 @@ the earlier command. Duplicate names within the same directory layer are errors.
 Use `list-commands` to validate and list the registered commands:
 
 ```sh
-avahi-tui list-commands
+kinjo list-commands
 ```
 
 To validate only specific directories:
 
 ```sh
-avahi-tui list-commands --config-dir ./commands
+kinjo list-commands --config-dir ./commands
 ```
 
 ## File Format
@@ -144,10 +144,10 @@ Common placeholders:
 - `{txt.<key>}`
 
 If a command uses instance-specific fields such as `{address}` or `{port}`, and
-the selected row contains multiple service instances, `avahi-tui` asks which
+the selected row contains multiple service instances, `kinjo` asks which
 instance to use before running the command.
 
-Commands are split into an argument vector by `avahi-tui`; they are not passed
+Commands are split into an argument vector by `kinjo`; they are not passed
 through a shell. Quote arguments that may contain spaces:
 
 ```toml
@@ -216,5 +216,5 @@ error naming the offending file.
 
 When the TUI starts normally, a malformed command file is skipped with a
 warning (shown on the status line and printed on exit) so one bad file cannot
-prevent the app from starting. `avahi-tui list-commands` loads strictly and
+prevent the app from starting. `kinjo list-commands` loads strictly and
 fails on the first invalid file — use it to validate your configuration.

@@ -1731,7 +1731,7 @@ mode = "execute"
     const NEEDS_TOOL: &str = r#"
 [metadata]
 name = "needs-tool"
-requirements = ["avahi-tui-absent-tool-xyz"]
+requirements = ["kinjo-absent-tool-xyz"]
 [match.service_type]
 equals = "_ssh._tcp"
 [action]
@@ -1755,14 +1755,14 @@ name = "ghost"
 [match.service_type]
 equals = "_ssh._tcp"
 [action]
-command = "avahi-tui-absent-binary-xyz --flag"
+command = "kinjo-absent-binary-xyz --flag"
 mode = "fork"
 "#;
 
     const OPTIONAL_REQ: &str = r#"
 [metadata]
 name = "with-optional"
-requirements = ["avahi-tui-absent-tool-xyz, optional"]
+requirements = ["kinjo-absent-tool-xyz, optional"]
 [match.service_type]
 equals = "_ssh._tcp"
 [action]
@@ -1778,7 +1778,7 @@ mode = "execute"
             send(&mut app, KeyCode::Enter).is_none(),
             "a missing requirement must not execute"
         );
-        assert!(app.status.contains("avahi-tui-absent-tool-xyz"));
+        assert!(app.status.contains("kinjo-absent-tool-xyz"));
         assert_eq!(app.mode, AppMode::Browse);
     }
 
@@ -1819,7 +1819,7 @@ mode = "execute"
         assert!(app.status.contains("cannot run `ghost`"));
         assert!(
             app.status
-                .contains("command `avahi-tui-absent-binary-xyz` not found")
+                .contains("command `kinjo-absent-binary-xyz` not found")
         );
         assert_eq!(app.mode, AppMode::Browse);
     }

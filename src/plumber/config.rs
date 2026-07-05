@@ -70,13 +70,13 @@ impl MatcherBuilder {
 }
 
 /// System-wide command directory, loaded as the base layer for every run.
-pub const SYSTEM_CONFIG_DIR: &str = "/etc/avahi-tui/commands";
+pub const SYSTEM_CONFIG_DIR: &str = "/etc/kinjo/commands";
 
 /// Ordered list of command directories, lowest precedence first. Commands in a
 /// later directory override same-named commands from an earlier one:
 ///
-///   1. system-wide  (`/etc/avahi-tui/commands`)
-///   2. user-local   (`$XDG_CONFIG_HOME/avahi-tui/commands` or `~/.config/...`)
+///   1. system-wide  (`/etc/kinjo/commands`)
+///   2. user-local   (`$XDG_CONFIG_HOME/kinjo/commands` or `~/.config/...`)
 ///   3. command-line `--config-dir` entries, in the order given
 pub fn config_dirs(extra: &[PathBuf]) -> Vec<PathBuf> {
     config_dirs_from(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"), extra)
@@ -92,12 +92,12 @@ pub(crate) fn config_dirs_from(
 ) -> Vec<PathBuf> {
     let mut dirs = vec![PathBuf::from(SYSTEM_CONFIG_DIR)];
     if let Some(home) = xdg_config_home {
-        dirs.push(PathBuf::from(home).join("avahi-tui").join("commands"));
+        dirs.push(PathBuf::from(home).join("kinjo").join("commands"));
     } else if let Some(home) = home {
         dirs.push(
             PathBuf::from(home)
                 .join(".config")
-                .join("avahi-tui")
+                .join("kinjo")
                 .join("commands"),
         );
     }
