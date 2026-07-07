@@ -100,3 +100,4 @@ jobs:
           # workflows' `release: created` listeners, so dispatch them directly.
           gh workflow run publish-crate.yml --ref "v${{ steps.ver.outputs.version }}"
           gh workflow run release-deb.yml --ref "v${{ steps.ver.outputs.version }}"
+          gh workflow run release-macos.yml --ref "v${{ steps.ver.outputs.version }}"

@@ -1,0 +1,53 @@
+name: Publish macOS binaries
+
+# Builds native tarballs for both Apple Silicon and Intel Macs, for a Homebrew
+# formula to point at. Cross-compiling x86_64-apple-darwin from the arm64
+# runner works out of the box: Apple's SDK/linker support both targets from
+# either host, so a single macOS runner covers both without extra toolchains.
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    runs-on: macos-latest
+
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --verbose --target ${{ matrix.target }}
+
+      - name: Package
+        id: pkg
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          name="kinjo-${version}-${{ matrix.target }}"
+          mkdir -p "$name/commands"
+          cp "target/${{ matrix.target }}/release/kinjo" "$name/"
+          cp README.md LICENSE "$name/"
+          cp actions/*.toml "$name/commands/"
+          tar -czf "${name}.tar.gz" "$name"
+          echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload package to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # github.event.release is only set for the `release` trigger; fall back
+        # to the checked-out ref when dispatched manually (see prepare-release.yml).
+        run: gh release upload "${{ github.event.release.tag_name || github.ref_name }}" "${{ steps.pkg.outputs.archive }}" --clobber
