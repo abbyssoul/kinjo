@@ -13,7 +13,13 @@ env:
 
 jobs:
   deb:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Native runners for each architecture avoid cross-compiling the C
+        # dependencies (libavahi-client, libxcb, etc).
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v6
