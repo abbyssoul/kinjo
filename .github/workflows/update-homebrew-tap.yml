@@ -1,0 +1,76 @@
+name: Update Homebrew tap
+
+# Keeps abbyssoul/homebrew-abyss's Formula/kinjo.rb in sync with releases.
+# Chained off "Publish macOS binaries" (rather than the `release` event
+# directly) so it only ever runs once the macOS tarballs it needs to hash
+# are actually uploaded, regardless of whether that workflow was triggered
+# by `release: created` or dispatched manually by prepare-release.yml.
+
+on:
+  workflow_run:
+    workflows: ["Publish macOS binaries"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  TAP_REPO: abbyssoul/homebrew-abyss
+
+jobs:
+  update-tap:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve released version
+        id: ver
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.workflow_run.head_branch }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute artifact checksums
+        id: sha
+        run: |
+          set -euo pipefail
+          version="${{ steps.ver.outputs.version }}"
+          tag="${{ steps.ver.outputs.tag }}"
+          base="https://github.com/abbyssoul/kinjo/releases/download/$tag"
+
+          curl -fsSL -o arm64.tar.gz "$base/kinjo-${version}-aarch64-apple-darwin.tar.gz"
+          curl -fsSL -o intel.tar.gz "$base/kinjo-${version}-x86_64-apple-darwin.tar.gz"
+          curl -fsSL -o source.tar.gz "https://github.com/abbyssoul/kinjo/archive/refs/tags/${tag}.tar.gz"
+
+          echo "arm64=$(sha256sum arm64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "intel=$(sha256sum intel.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "source=$(sha256sum source.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Update formula in the tap repo
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          ARM64_SHA: ${{ steps.sha.outputs.arm64 }}
+          INTEL_SHA: ${{ steps.sha.outputs.intel }}
+          SOURCE_SHA: ${{ steps.sha.outputs.source }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+          cd tap
+
+          formula="Formula/kinjo.rb"
+          sed -i "s/^  version \".*\"/  version \"${VERSION}\"/" "$formula"
+          sed -i "s/sha256 \"[a-f0-9]*\" # kinjo-macos-arm64-sha256/sha256 \"${ARM64_SHA}\" # kinjo-macos-arm64-sha256/" "$formula"
+          sed -i "s/sha256 \"[a-f0-9]*\" # kinjo-macos-intel-sha256/sha256 \"${INTEL_SHA}\" # kinjo-macos-intel-sha256/" "$formula"
+          sed -i "s/sha256 \"[a-f0-9]*\" # kinjo-source-sha256/sha256 \"${SOURCE_SHA}\" # kinjo-source-sha256/" "$formula"
+
+          if git diff --quiet; then
+            echo "Formula already up to date; nothing to push."
+            exit 0
+          fi
+
+          git config user.name "github-actions-release[bot]"
+          git config user.email "github-actions-release[bot]@users.noreply.github.com"
+          git commit -am "kinjo ${VERSION}"
+          git push origin main
