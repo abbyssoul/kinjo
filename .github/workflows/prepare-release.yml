@@ -50,7 +50,8 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         id: bump
         run: |
-          git checkout -B "release/v${{ steps.ver.outputs.version }}" "origin/main"
+          branch="release/v${{ steps.ver.outputs.version }}"
+          git checkout -B "$branch" "origin/main"
 
           current="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
           if [ "$current" = "${{ steps.ver.outputs.version }}" ]; then
@@ -65,7 +66,14 @@ jobs:
           git config user.name "github-actions-release[bot]"
           git config user.email "github-actions-release[bot]@users.noreply.github.com"
           git commit -am "Bump version to ${{ steps.ver.outputs.version }}"
-          git push origin "release/v${{ steps.ver.outputs.version }}"
+
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch origin "$branch:refs/remotes/origin/$branch"
+            git rebase "origin/$branch"
+          fi
+
+          git push origin "HEAD:$branch"
+
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Open and merge the version-bump PR
