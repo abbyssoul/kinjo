@@ -55,7 +55,7 @@ jobs:
 
       - name: Install cargo-edit
         if: steps.check.outputs.exists == 'false'
-        uses: taiki-e/cache-cargo-install-action@v2
+        uses: taiki-e/cache-cargo-install-action@v3
         with:
           tool: cargo-edit
 
