@@ -181,11 +181,12 @@ impl Entry {
             "hostname" => self.hostname.clone(),
             "address" => self.primary_address().map(|value| value.to_string()),
             "port" => self.port.map(|value| value.to_string()),
-            field if field.starts_with("txt.") => {
-                let key = field.trim_start_matches("txt.");
-                self.txt.get(key).cloned()
-            }
-            _ => None,
+            // `strip_prefix`, not `trim_start_matches`: the latter strips the
+            // prefix repeatedly, so `txt.txt.path` would look up `path`
+            // instead of the TXT key literally named `txt.path`.
+            field => field
+                .strip_prefix("txt.")
+                .and_then(|key| self.txt.get(key).cloned()),
         }
     }
 
@@ -318,23 +319,34 @@ fn group_key(record: &Entry, mode: GroupingMode) -> String {
         // a multi-homed host's per-interface instances — same service, names
         // differing only in Avahi's ` [MAC]` decoration — collapse into one
         // logical service whose instances carry the per-interface addresses.
-        GroupingMode::LogicalService | GroupingMode::Command => format!(
-            "{}|{}|{}|{}|{}",
-            record.base_display_name(),
-            record.service_type,
-            record.domain,
+        GroupingMode::LogicalService | GroupingMode::Command => join_key(&[
+            &record.base_display_name(),
+            &record.service_type,
+            &record.domain,
             record.hostname.as_deref().unwrap_or("<unresolved-host>"),
-            record
+            &record
                 .port
                 .map(|p| p.to_string())
-                .unwrap_or_else(|| "<unknown-port>".to_string())
-        ),
+                .unwrap_or_else(|| "<unknown-port>".to_string()),
+        ]),
         GroupingMode::Host => record
             .hostname
             .clone()
             .unwrap_or_else(|| "<unresolved host>".to_string()),
         GroupingMode::ServiceType => record.service_type.clone(),
     }
+}
+
+/// Joins key parts into one string unambiguously: each part is prefixed with
+/// its length, so a separator character occurring *inside* a part cannot shift
+/// a boundary and make two different keys compare equal — the same reasoning
+/// that gave [`EntryId`] a structured key instead of a joined string.
+fn join_key(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .map(|part| format!("{}:{part}", part.len()))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn group_label(record: &Entry, mode: GroupingMode) -> String {
@@ -610,6 +622,31 @@ mod tests {
 
         assert_ne!(first.id, second.id);
         assert_ne!(first.id.registration_key(), second.id.registration_key());
+    }
+
+    #[test]
+    fn separator_characters_in_names_cannot_collide_group_keys() {
+        // With a `|`-joined group key, `a|b` + `c` and `a` + `b|c` bucketed
+        // into the same group and were shown as one service.
+        let first = Entry::new("a|b", "c", "local");
+        let second = Entry::new("a", "b|c", "local");
+
+        let groups = group_entries(&[first, second], GroupingMode::LogicalService);
+
+        assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn txt_field_lookup_strips_the_prefix_exactly_once() {
+        let mut record = Entry::new("nas", "_http._tcp", "local");
+        record
+            .txt
+            .insert("txt.path".to_string(), "nested".to_string());
+        record.txt.insert("path".to_string(), "plain".to_string());
+
+        assert_eq!(record.field("txt.path").as_deref(), Some("plain"));
+        // A TXT key literally named `txt.path` is reachable as `txt.txt.path`.
+        assert_eq!(record.field("txt.txt.path").as_deref(), Some("nested"));
     }
 
     #[test]

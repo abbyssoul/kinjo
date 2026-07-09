@@ -84,11 +84,22 @@ scripts/fuzz.sh 300        # 5 minutes per target
 scripts/fuzz.sh 120 parse_command   # one target
 ```
 
-Targets:
+Targets. Besides panic-safety, each target asserts semantic properties
+(round-trips, id/grouping invariants, the argument-injection barrier) — a
+plain "doesn't crash" oracle cannot see the wrong-output bugs that spaces or
+separator characters in service names and command values tend to cause:
 
-- `parse_command`: the command/action file parser (`MatcherBuilder::add_str`).
-- `discovery_entry`: building, id-resolving, and grouping arbitrary entries.
-- `decode_dns_sd`: the DNS-SD decimal-escape name decoder.
+- `parse_command`: the command/action file parser (`MatcherBuilder::add_str`)
+  must parse or error on arbitrary bytes, never panic.
+- `command_roundtrip`: arbitrary field values serialized into a well-formed
+  command file must load back unchanged.
+- `prepare_command`: tokenizing and interpolating action templates; untrusted
+  field values must never add, remove, or reshape argv entries.
+- `discovery_entry`: building, id-resolving, and grouping arbitrary entries;
+  id equality must match field-tuple equality and grouping must preserve
+  entries and per-group field agreement.
+- `decode_dns_sd`: the DNS-SD decimal-escape name decoder; escape-free input
+  is identity and reference-encoded bytes round-trip.
 
 CI runs a short soak on every push/PR and a longer one on a weekly schedule
 (`.github/workflows/fuzz.yml`); any crash inputs are uploaded as artifacts.

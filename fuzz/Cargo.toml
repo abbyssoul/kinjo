@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+toml = "1.1.2"
 
 [dependencies.kinjo]
 path = ".."
@@ -37,6 +38,20 @@ bench = false
 [[bin]]
 name = "decode_dns_sd"
 path = "fuzz_targets/decode_dns_sd.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "prepare_command"
+path = "fuzz_targets/prepare_command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "command_roundtrip"
+path = "fuzz_targets/command_roundtrip.rs"
 test = false
 doc = false
 bench = false
