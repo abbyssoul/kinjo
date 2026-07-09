@@ -47,7 +47,7 @@ jobs:
       # additions under a fresh key, so coverage accumulates across runs
       # instead of restarting from the seed inputs every time.
       - name: Restore accumulated corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fuzz/corpus
           key: fuzz-corpus-${{ github.run_id }}
