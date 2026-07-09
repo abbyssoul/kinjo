@@ -8,12 +8,18 @@ name: Prepare Release
 
 on:
   push:
-    tags: ['v*']
+    # Only semver-shaped tags: the first step deletes the pushed tag, so a
+    # loose `v*` glob would eat any tag that merely starts with a `v`.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
 
 permissions:
   contents: write
   pull-requests: write
   actions: write # required for `gh workflow run` below
+
+# Serialize releases; never cancel one that is underway.
+concurrency:
+  group: prepare-release
 
 env:
   CARGO_TERM_COLOR: always
@@ -43,8 +49,15 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Set up build environment
         if: steps.check.outputs.exists == 'false'
+        uses: ./.github/actions/setup
+
+      - name: Install cargo-edit
+        if: steps.check.outputs.exists == 'false'
+        uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-edit
 
       - name: Bump Cargo.toml to the requested version
         if: steps.check.outputs.exists == 'false'
@@ -59,9 +72,12 @@ jobs:
             exit 0
           fi
 
-          cargo install cargo-edit --locked
           cargo set-version "${{ steps.ver.outputs.version }}"
-          cargo check
+
+          # Pushes and PRs made with GITHUB_TOKEN trigger no other workflows,
+          # so regular CI never sees this commit: run the tests here before
+          # the PR is merged below.
+          cargo test --locked
 
           git config user.name "github-actions-release[bot]"
           git config user.email "github-actions-release[bot]@users.noreply.github.com"
@@ -85,6 +101,8 @@ jobs:
             --head "release/v${{ steps.ver.outputs.version }}" \
             --title "Release v${{ steps.ver.outputs.version }}" \
             --body "Automated version bump for v${{ steps.ver.outputs.version }}."
+          # `--admin` because a GITHUB_TOKEN-created PR gets no CI checks to
+          # wait for (see above); the tests already ran in the bump step.
           gh pr merge "release/v${{ steps.ver.outputs.version }}" \
             --squash --delete-branch --admin
           git fetch origin main

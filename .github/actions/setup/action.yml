@@ -1,0 +1,25 @@
+name: Set up build environment
+description: >
+  System packages for the crate's native dependencies (Linux only) plus the
+  Rust build cache. Shared by every workflow that compiles the crate, so the
+  dependency list lives in one place.
+
+inputs:
+  cache-workspaces:
+    description: Workspaces passed through to rust-cache (one `path -> target` per line).
+    required: false
+    default: "."
+
+runs:
+  using: composite
+  steps:
+    - name: Install system dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xorg-dev libxcb-shape0-dev libxcb-xfixes0-dev clang avahi-daemon libavahi-client-dev
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: ${{ inputs.cache-workspaces }}

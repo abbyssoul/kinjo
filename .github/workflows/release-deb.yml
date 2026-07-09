@@ -24,13 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y clang libavahi-client-dev libxcb-shape0-dev libxcb-xfixes0-dev xorg-dev
+      - name: Set up build environment
+        uses: ./.github/actions/setup
 
       - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
+        uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-deb
 
       - name: Build Debian package
         run: cargo deb --locked --verbose

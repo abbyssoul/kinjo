@@ -6,41 +6,40 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
+# Cancel superseded runs when a branch is pushed again.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   format:
-
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v6
     - name: Check formatting
       run: cargo fmt -- --check
 
   clippy:
-
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v6
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        # sudo apt-get install -y avahi-daemon avahi-utils
-        sudo apt-get install -y xorg-dev libxcb-shape0-dev libxcb-xfixes0-dev clang avahi-daemon libavahi-client-dev
-    - uses: Swatinem/rust-cache@v2
+    - name: Set up build environment
+      uses: ./.github/actions/setup
     - name: Run clippy
       run: cargo clippy --locked --all-targets -- -D warnings
     - name: Run clippy (all features)
       run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   build:
-
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    
+
     strategy:
       matrix:
         # Defines the target operating systems
@@ -49,22 +48,16 @@ jobs:
     steps:
     - uses: actions/checkout@v6
 
-    - name: Install dependencies 
-      if: matrix.os == 'ubuntu-latest'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y xorg-dev libxcb-shape0-dev libxcb-xfixes0-dev clang avahi-daemon libavahi-client-dev
-    
-    - uses: Swatinem/rust-cache@v2
-    
-    - name: Build
-      run: cargo build --locked --verbose
+    - name: Set up build environment
+      uses: ./.github/actions/setup
 
+    # `cargo test` builds every target it needs, so a separate build step
+    # would only duplicate work.
     - name: Run tests
-      run: cargo test --locked --verbose
+      run: cargo test --locked
 
     # The zeroconf backend is feature-gated and needs the Avahi client
     # headers, which only the Linux runner installs.
     - name: Run tests (all features)
       if: matrix.os == 'ubuntu-latest'
-      run: cargo test --locked --verbose --all-features
+      run: cargo test --locked --all-features

@@ -6,13 +6,20 @@ on:
   pull_request:
     branches: [ "main" ]
   schedule:
-    # Mondays 03:00 UTC — longer soak run.
-    - cron: '0 3 * * 1/3'
+    # Monday 03:00 UTC — longer soak run.
+    - cron: '0 3 * * 1'
   workflow_dispatch:
     inputs:
       seconds:
         description: "Seconds to run each fuzz target"
         default: "300"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,16 +30,28 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xorg-dev libxcb-shape0-dev libxcb-xfixes0-dev clang avahi-daemon libavahi-client-dev
-
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly
 
+      - name: Set up build environment
+        uses: ./.github/actions/setup
+        with:
+          cache-workspaces: fuzz
+
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        uses: taiki-e/cache-cargo-install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      # Restore the newest corpus from earlier runs and save this run's
+      # additions under a fresh key, so coverage accumulates across runs
+      # instead of restarting from the seed inputs every time.
+      - name: Restore accumulated corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
 
       - name: Pick duration
         id: dur

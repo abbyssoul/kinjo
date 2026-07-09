@@ -20,7 +20,9 @@ env:
 
 jobs:
   update-tap:
-    if: github.event.workflow_run.conclusion == 'success'
+    # Only successful runs on a release tag: a macOS build dispatched from a
+    # branch has no release to download the tarballs from.
+    if: github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v')
     runs-on: ubuntu-latest
     steps:
       - name: Resolve released version
@@ -43,9 +45,11 @@ jobs:
           curl -fsSL -o intel.tar.gz "$base/kinjo-${version}-x86_64-apple-darwin.tar.gz"
           curl -fsSL -o source.tar.gz "https://github.com/abbyssoul/kinjo/archive/refs/tags/${tag}.tar.gz"
 
-          echo "arm64=$(sha256sum arm64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "intel=$(sha256sum intel.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "source=$(sha256sum source.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          {
+            echo "arm64=$(sha256sum arm64.tar.gz | cut -d' ' -f1)"
+            echo "intel=$(sha256sum intel.tar.gz | cut -d' ' -f1)"
+            echo "source=$(sha256sum source.tar.gz | cut -d' ' -f1)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Update formula in the tap repo
         env:

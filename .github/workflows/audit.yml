@@ -1,0 +1,39 @@
+name: Security audit
+
+# Checks both lockfiles against the RustSec advisory database. The weekly run
+# catches advisories published against dependencies that have not changed.
+
+on:
+  push:
+    branches: [ "main" ]
+    paths: [ "Cargo.lock", "fuzz/Cargo.lock", ".github/workflows/audit.yml" ]
+  pull_request:
+    branches: [ "main" ]
+    paths: [ "Cargo.lock", "fuzz/Cargo.lock", ".github/workflows/audit.yml" ]
+  schedule:
+    # Monday 04:00 UTC.
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit dependencies
+        run: |
+          cargo audit
+          cargo audit --file fuzz/Cargo.lock
