@@ -28,7 +28,7 @@ jobs:
         uses: ./.github/actions/setup
 
       - name: Install cargo-deb
-        uses: taiki-e/cache-cargo-install-action@v2
+        uses: taiki-e/cache-cargo-install-action@v3
         with:
           tool: cargo-deb
 
