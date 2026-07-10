@@ -1,15 +1,18 @@
 name: Update Homebrew tap
 
 # Keeps abbyssoul/homebrew-abyss's Formula/kinjo.rb in sync with releases.
-# Chained off "Publish macOS binaries" (rather than the `release` event
-# directly) so it only ever runs once the macOS tarballs it needs to hash
-# are actually uploaded, regardless of whether that workflow was triggered
-# by `release: created` or dispatched manually by prepare-release.yml.
+# Dispatched by "Publish macOS binaries" once the tarballs the formula needs
+# to hash are actually uploaded. It cannot chain off that workflow's
+# completion with `workflow_run` instead: the publish workflows are
+# themselves dispatched with GITHUB_TOKEN (see prepare-release.yml), and
+# activity created with that token emits no workflow-triggering events.
 
 on:
-  workflow_run:
-    workflows: ["Publish macOS binaries"]
-    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sync the formula to (e.g. v0.1.4)"
+        required: true
 
 permissions:
   contents: read
@@ -20,16 +23,13 @@ env:
 
 jobs:
   update-tap:
-    # Only successful runs on a release tag: a macOS build dispatched from a
-    # branch has no release to download the tarballs from.
-    if: github.event.workflow_run.conclusion == 'success' && startsWith(github.event.workflow_run.head_branch, 'v')
     runs-on: ubuntu-latest
     steps:
       - name: Resolve released version
         id: ver
         run: |
           set -euo pipefail
-          tag="${{ github.event.workflow_run.head_branch }}"
+          tag="${{ inputs.tag }}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 

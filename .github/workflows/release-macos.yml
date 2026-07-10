@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: write
+  actions: write # required for the `gh workflow run` dispatch below
 
 env:
   CARGO_TERM_COLOR: always
@@ -47,3 +48,18 @@ jobs:
         # github.event.release is only set for the `release` trigger; fall back
         # to the checked-out ref when dispatched manually (see prepare-release.yml).
         run: gh release upload "${{ github.event.release.tag_name || github.ref_name }}" kinjo-*.tar.gz --clobber
+
+      - name: Update the Homebrew tap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The tap workflow cannot listen for this run's completion itself:
+        # this workflow is dispatched with GITHUB_TOKEN, whose activity emits
+        # no workflow-triggering events, so dispatch the update explicitly now
+        # that the tarballs the formula hashes are uploaded. A run from a
+        # branch rather than a release tag has nothing to sync.
+        run: |
+          tag="${{ github.event.release.tag_name || github.ref_name }}"
+          case "$tag" in
+            v*) gh workflow run update-homebrew-tap.yml --ref main -f tag="$tag" ;;
+            *)  echo "Not a release tag ($tag); skipping the tap update." ;;
+          esac
