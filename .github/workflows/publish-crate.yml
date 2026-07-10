@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659
 
       - name: Check Cargo.toml version matches release tag
         run: test "v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')" = "${{ github.ref_name }}"
