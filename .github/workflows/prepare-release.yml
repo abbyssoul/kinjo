@@ -2,7 +2,7 @@ name: Prepare Release
 
 # Triggered by pushing a tag like `v0.1.2` (`git tag v0.1.2 && git push origin
 # v0.1.2`, or via the GitHub UI). The tag itself is only a request: it is
-# deleted immediately below and re-created once `main` actually contains that
+# reclaimed (deleted) below and re-created once `main` actually contains that
 # version, so the published crate/deb always match the commit their tag points
 # to. If this workflow fails partway, just push the same tag again to retry.
 
@@ -33,21 +33,37 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Reclaim the tag as a release request
+      - name: Parse the requested version
         id: ver
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          git push origin --delete "$GITHUB_REF_NAME"
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # This must run BEFORE the tag is touched: a duplicate push of the same
+      # tag lands here after the first run has already published the release,
+      # and deleting the tag at that point would strip it off the release and
+      # turn the release back into a draft (breaking the publish jobs the
+      # first run dispatched at that tag).
       - name: Skip if this release already exists
         id: check
         run: |
-          if gh release view "v${{ steps.ver.outputs.version }}" >/dev/null 2>&1; then
+          state="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null || echo absent)"
+          # A draft with this name is debris from a failed or clobbered
+          # earlier attempt (its tag is gone, so it will never publish):
+          # remove it and run the release from scratch.
+          if [ "$state" = "true" ]; then
+            gh release delete "$GITHUB_REF_NAME" --yes
+            state=absent
+          fi
+          if [ "$state" = "false" ]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Reclaim the tag as a release request
+        if: steps.check.outputs.exists == 'false'
+        # `|| true`: when a failed run is retried by pushing the tag again,
+        # the failed run may have already deleted it.
+        run: git push origin --delete "$GITHUB_REF_NAME" || true
 
       - name: Set up build environment
         if: steps.check.outputs.exists == 'false'
