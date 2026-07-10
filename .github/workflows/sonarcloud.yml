@@ -23,6 +23,10 @@ env:
 
 jobs:
   analysis:
+    # Dependabot PRs run without access to repo secrets, so the scanner would
+    # fail with an empty SONAR_TOKEN; main-branch analysis after merge still
+    # covers those changes.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
 
     steps:

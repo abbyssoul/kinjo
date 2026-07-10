@@ -38,11 +38,6 @@ fn identity(entry: &Entry) -> (&str, &str, &str, Option<(&str, Option<u16>)>) {
     (&entry.name, &entry.service_type, &entry.domain, instance)
 }
 
-/// The hostname string a group displays and keys on when it is absent.
-fn host_key(hostname: Option<&str>) -> &str {
-    hostname.unwrap_or("<unresolved-host>")
-}
-
 fuzz_target!(|raw: Vec<RawEntry>| {
     let records: Vec<Entry> = raw
         .into_iter()
@@ -98,16 +93,10 @@ fuzz_target!(|raw: Vec<RawEntry>| {
                         assert_eq!(instance.base_display_name(), group.label);
                         assert_eq!(instance.service_type, group.service_type);
                         assert_eq!(instance.domain, group.domain);
-                        assert_eq!(
-                            host_key(instance.hostname.as_deref()),
-                            host_key(group.hostname.as_deref())
-                        );
+                        assert_eq!(instance.hostname, group.hostname);
                         assert_eq!(instance.port, group.port);
                     }
-                    GroupingMode::Host => assert_eq!(
-                        host_key(instance.hostname.as_deref()),
-                        host_key(group.hostname.as_deref())
-                    ),
+                    GroupingMode::Host => assert_eq!(instance.hostname, group.hostname),
                     GroupingMode::ServiceType => {
                         assert_eq!(instance.service_type, group.service_type);
                     }

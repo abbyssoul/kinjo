@@ -323,17 +323,25 @@ fn group_key(record: &Entry, mode: GroupingMode) -> String {
             &record.base_display_name(),
             &record.service_type,
             &record.domain,
-            record.hostname.as_deref().unwrap_or("<unresolved-host>"),
+            &hostname_key(record.hostname.as_deref()),
             &record
                 .port
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "<unknown-port>".to_string()),
         ]),
-        GroupingMode::Host => record
-            .hostname
-            .clone()
-            .unwrap_or_else(|| "<unresolved host>".to_string()),
+        GroupingMode::Host => hostname_key(record.hostname.as_deref()),
         GroupingMode::ServiceType => record.service_type.clone(),
+    }
+}
+
+/// Keys an optional hostname with a presence tag, so a record whose hostname
+/// is literally a sentinel string (e.g. `"<unresolved host>"`) can never land
+/// in the same group as records with no hostname at all. A port needs no such
+/// tag: its rendered form is always digits, which no sentinel matches.
+fn hostname_key(hostname: Option<&str>) -> String {
+    match hostname {
+        Some(host) => format!("host:{host}"),
+        None => "unresolved".to_string(),
     }
 }
 
@@ -686,6 +694,17 @@ mod tests {
         assert!(labels.contains(&"alpha.local"));
         assert!(labels.contains(&"beta.local"));
         assert!(labels.contains(&"<unresolved host>"));
+    }
+
+    #[test]
+    fn hostname_equal_to_the_sentinel_does_not_join_the_unresolved_group() {
+        let mut impostor = Entry::new("impostor", "_ssh._tcp", "local");
+        impostor.hostname = Some("<unresolved host>".to_string());
+        let pending = Entry::new("ghost", "_ipp._tcp", "local");
+
+        let groups = group_entries(&[impostor, pending], GroupingMode::Host);
+
+        assert_eq!(groups.len(), 2);
     }
 
     #[test]
