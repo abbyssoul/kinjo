@@ -61,6 +61,36 @@ kinjo --backend zeroconf
 When a `--service-type` is given, only that type is browsed. If mDNS discovery is
 unavailable, it falls back to sample records so the UI remains usable.
 
+## Privacy
+
+`kinjo` browses your local network, so it's worth being explicit about what it
+does and does not do with that access:
+
+- **No telemetry.** `kinjo` does not phone home, collect analytics, or send
+  usage data anywhere. There is no update checker and no crash reporter.
+- **No proactive scanning.** `kinjo` never port-scans or probes hosts on its
+  own initiative. All discovery is delegated to a pluggable backend behind the
+  `Discovery` trait (see [Architecture](#architecture)), and every backend
+  speaks only the standard mDNS/DNS-SD protocol — it surfaces services that
+  are already being announced on the link, nothing more.
+- **Discovered data stays local.** Services found on the network are shown in
+  the terminal and used only to fill in the commands you configure. Nothing is
+  uploaded or shared with anyone but you.
+
+The two discovery backends differ in how they reach the network:
+
+- `mdns-sd` (default) implements mDNS/DNS-SD itself: it sends standard
+  multicast queries on the local link and listens for responses. It makes no
+  other network calls and talks to nothing off-link.
+- `zeroconf` (opt-in, behind the `zeroconf` cargo feature) delegates all
+  network I/O to the system `avahi-daemon` over D-Bus. `kinjo` itself opens no
+  sockets in this mode — it only reads the records the daemon already
+  maintains.
+
+Either way, the traffic involved is the same kind of local multicast query
+your OS already performs for Bonjour/AirPlay/network-printer discovery — not
+a general network scan.
+
 ## Installation
 
 ### Debian / Ubuntu
