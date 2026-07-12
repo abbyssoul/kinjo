@@ -38,7 +38,7 @@ jobs:
         uses: ./.github/actions/setup
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145
         with:
           tool: cargo-llvm-cov
 

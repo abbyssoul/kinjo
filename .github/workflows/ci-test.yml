@@ -26,14 +26,25 @@ jobs:
       run: cargo fmt -- --check
 
   clippy:
-    runs-on: ubuntu-latest
+    name: Clippy on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        # Lint on every target OS so cfg-gated code paths (e.g. the
+        # windows/unix branches in plumber::exec) are not lint-blind.
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
     steps:
     - uses: actions/checkout@v7
     - name: Set up build environment
       uses: ./.github/actions/setup
     - name: Run clippy
       run: cargo clippy --locked --all-targets -- -D warnings
+    # The zeroconf backend is feature-gated and needs the Avahi client
+    # headers, which only the Linux runner installs.
     - name: Run clippy (all features)
+      if: matrix.os == 'ubuntu-latest'
       run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   build:

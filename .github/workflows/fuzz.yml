@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae
 
       - name: Set up build environment
         uses: ./.github/actions/setup
@@ -39,7 +39,7 @@ jobs:
           cache-workspaces: fuzz
 
       - name: Install cargo-fuzz
-        uses: taiki-e/cache-cargo-install-action@v3
+        uses: taiki-e/cache-cargo-install-action@417450f3c33ee20393705369577571770643d4c7
         with:
           tool: cargo-fuzz
 
