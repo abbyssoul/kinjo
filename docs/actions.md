@@ -23,6 +23,14 @@ System-wide commands are loaded from:
 /etc/kinjo/commands/*.toml
 ```
 
+Commands bundled with a relocatable install (a release tarball run in place,
+or a prefix install such as Homebrew) are loaded relative to the binary:
+
+```sh
+<exe_dir>/commands/*.toml
+<prefix>/share/kinjo/commands/*.toml   # binary at <prefix>/bin/kinjo
+```
+
 Extra directories can be added with `--config-dir`. The flag is repeatable:
 
 ```sh
@@ -31,9 +39,10 @@ kinjo --config-dir ./team-commands --config-dir ./local-commands
 
 Directories are loaded as overlay layers in this order:
 
-1. `/etc/kinjo/commands`
-2. `$XDG_CONFIG_HOME/kinjo/commands` or `~/.config/kinjo/commands`
-3. each `--config-dir` in the order given
+1. `<exe_dir>/commands`, then `<prefix>/share/kinjo/commands`
+2. `/etc/kinjo/commands`
+3. `$XDG_CONFIG_HOME/kinjo/commands` or `~/.config/kinjo/commands`
+4. each `--config-dir` in the order given
 
 If a later layer defines a command with the same `metadata.name`, it overrides
 the earlier command. Duplicate names within the same directory layer are errors.

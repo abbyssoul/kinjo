@@ -289,7 +289,7 @@ mode = "execute"
     fn config_dirs_layer_system_then_user_then_extras() {
         let extra = PathBuf::from("/tmp/kinjo-extra");
         let dirs = config_dirs(std::slice::from_ref(&extra));
-        assert_eq!(dirs.first(), Some(&PathBuf::from(SYSTEM_CONFIG_DIR)));
+        assert!(dirs.contains(&PathBuf::from(SYSTEM_CONFIG_DIR)));
         assert_eq!(dirs.last(), Some(&extra));
     }
 
@@ -1017,6 +1017,7 @@ mode = "execute"
     fn config_dirs_from_orders_system_user_then_extras() {
         let extra = PathBuf::from("/tmp/extra");
         let dirs = config_dirs_from(
+            None,
             Some(OsString::from("/xdg")),
             Some(OsString::from("/home/user")),
             std::slice::from_ref(&extra),
@@ -1034,7 +1035,7 @@ mode = "execute"
 
     #[test]
     fn config_dirs_from_uses_home_when_xdg_is_absent() {
-        let dirs = config_dirs_from(None, Some(OsString::from("/home/user")), &[]);
+        let dirs = config_dirs_from(None, None, Some(OsString::from("/home/user")), &[]);
 
         assert_eq!(
             dirs,
@@ -1047,8 +1048,28 @@ mode = "execute"
 
     #[test]
     fn config_dirs_from_omits_user_dir_without_env() {
-        let dirs = config_dirs_from(None, None, &[]);
+        let dirs = config_dirs_from(None, None, None, &[]);
 
         assert_eq!(dirs, vec![PathBuf::from(SYSTEM_CONFIG_DIR)]);
+    }
+
+    #[test]
+    fn config_dirs_from_puts_install_dirs_below_system_and_user() {
+        let dirs = config_dirs_from(
+            Some(PathBuf::from("/opt/homebrew/bin/kinjo")),
+            Some(OsString::from("/xdg")),
+            None,
+            &[],
+        );
+
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("/opt/homebrew/bin/commands"),
+                PathBuf::from("/opt/homebrew/share/kinjo/commands"),
+                PathBuf::from(SYSTEM_CONFIG_DIR),
+                PathBuf::from("/xdg/kinjo/commands"),
+            ]
+        );
     }
 }

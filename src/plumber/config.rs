@@ -75,22 +75,31 @@ pub const SYSTEM_CONFIG_DIR: &str = "/etc/kinjo/commands";
 /// Ordered list of command directories, lowest precedence first. Commands in a
 /// later directory override same-named commands from an earlier one:
 ///
-///   1. system-wide  (`/etc/kinjo/commands`)
-///   2. user-local   (`$XDG_CONFIG_HOME/kinjo/commands` or `~/.config/...`)
-///   3. command-line `--config-dir` entries, in the order given
+///   1. install-relative (`<exe_dir>/commands`, `<prefix>/share/kinjo/commands`)
+///   2. system-wide      (`/etc/kinjo/commands`)
+///   3. user-local       (`$XDG_CONFIG_HOME/kinjo/commands` or `~/.config/...`)
+///   4. command-line `--config-dir` entries, in the order given
 pub fn config_dirs(extra: &[PathBuf]) -> Vec<PathBuf> {
-    config_dirs_from(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"), extra)
+    config_dirs_from(
+        env::current_exe().ok(),
+        env::var_os("XDG_CONFIG_HOME"),
+        env::var_os("HOME"),
+        extra,
+    )
 }
 
-/// Build the ordered command-directory list from the relevant environment
-/// variables. Split out from [`config_dirs`] so the precedence rules can be
-/// unit tested without mutating process-global environment state.
+/// Build the ordered command-directory list from the executable location and
+/// the relevant environment variables. Split out from [`config_dirs`] so the
+/// precedence rules can be unit tested without mutating process-global
+/// environment state.
 pub(crate) fn config_dirs_from(
+    exe: Option<PathBuf>,
     xdg_config_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
     extra: &[PathBuf],
 ) -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from(SYSTEM_CONFIG_DIR)];
+    let mut dirs = install_dirs_from(exe.as_deref());
+    dirs.push(PathBuf::from(SYSTEM_CONFIG_DIR));
     if let Some(home) = xdg_config_home {
         dirs.push(PathBuf::from(home).join("kinjo").join("commands"));
     } else if let Some(home) = home {
@@ -102,6 +111,24 @@ pub(crate) fn config_dirs_from(
         );
     }
     dirs.extend(extra.iter().cloned());
+    dirs
+}
+
+/// Command directories shipped alongside a relocatable install, resolved from
+/// where the running binary lives. These carry the packaged default commands
+/// on systems where nothing installs into `/etc/kinjo/commands`:
+///
+///   - `<exe_dir>/commands` — a release tarball extracted and run in place
+///   - `<prefix>/share/kinjo/commands` — a prefix install such as Homebrew,
+///     where the binary is at `<prefix>/bin/kinjo`
+fn install_dirs_from(exe: Option<&Path>) -> Vec<PathBuf> {
+    let Some(exe_dir) = exe.and_then(Path::parent) else {
+        return Vec::new();
+    };
+    let mut dirs = vec![exe_dir.join("commands")];
+    if let Some(prefix) = exe_dir.parent() {
+        dirs.push(prefix.join("share").join("kinjo").join("commands"));
+    }
     dirs
 }
 

@@ -79,10 +79,7 @@ mode = "execute"
         let extra = PathBuf::from("/tmp/kinjo-extra-commands");
         let dirs = matcher_config_dirs(&test_cli(CliCommand::Run, vec![extra.clone()]));
 
-        assert_eq!(
-            dirs.first(),
-            Some(&PathBuf::from(plumber::SYSTEM_CONFIG_DIR))
-        );
+        assert!(dirs.contains(&PathBuf::from(plumber::SYSTEM_CONFIG_DIR)));
         assert_eq!(dirs.last(), Some(&extra));
     }
 
