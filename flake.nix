@@ -30,7 +30,7 @@
       # An overlay is a single function (final: prev: { ... }) — NOT per-system —
       # so it lives at the top level, a sibling of packages/apps/devShells.
       overlays.default = final: prev: {
-        kinjo = self.packages.${final.system}.kinjo;
+        kinjo = self.packages.${final.stdenv.hostPlatform.system}.kinjo;
       };
 
       apps = forAllSystems (pkgs: {
