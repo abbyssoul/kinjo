@@ -67,10 +67,24 @@ jobs:
           cd tap
 
           formula="Formula/kinjo.rb"
-          sed -i "s/^  version \".*\"/  version \"${VERSION}\"/" "$formula"
+          # The formula has no `version` line (brew style forbids it when it
+          # is inferable from the URLs), so the version lives in the URLs and
+          # must be rewritten there.
+          sed -i -E "s|(/archive/refs/tags/)v[0-9]+\.[0-9]+\.[0-9]+(\.tar\.gz)|\1v${VERSION}\2|" "$formula"
+          sed -i -E "s|(/releases/download/)v[0-9]+\.[0-9]+\.[0-9]+/kinjo-[0-9]+\.[0-9]+\.[0-9]+-|\1v${VERSION}/kinjo-${VERSION}-|" "$formula"
           sed -i "s/sha256 \"[a-f0-9]*\" # kinjo-macos-arm64-sha256/sha256 \"${ARM64_SHA}\" # kinjo-macos-arm64-sha256/" "$formula"
           sed -i "s/sha256 \"[a-f0-9]*\" # kinjo-macos-intel-sha256/sha256 \"${INTEL_SHA}\" # kinjo-macos-intel-sha256/" "$formula"
           sed -i "s/sha256 \"[a-f0-9]*\" # kinjo-source-sha256/sha256 \"${SOURCE_SHA}\" # kinjo-source-sha256/" "$formula"
+
+          # A sed that silently matches nothing leaves URLs and checksums out
+          # of sync (a broken formula), so prove every URL now carries the
+          # released version before committing anything.
+          for want in \
+            "/archive/refs/tags/v${VERSION}.tar.gz" \
+            "/releases/download/v${VERSION}/kinjo-${VERSION}-aarch64-apple-darwin.tar.gz" \
+            "/releases/download/v${VERSION}/kinjo-${VERSION}-x86_64-apple-darwin.tar.gz"; do
+            grep -qF "$want" "$formula" || { echo "::error::formula update failed: $want not found in $formula"; exit 1; }
+          done
 
           if git diff --quiet; then
             echo "Formula already up to date; nothing to push."

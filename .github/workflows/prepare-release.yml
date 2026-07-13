@@ -59,6 +59,21 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Guards against a stale tag arriving via `git push --tags`: releasing
+      # an older version would try to downgrade main, and even a failed
+      # attempt would first delete the pushed tag below. Failing here leaves
+      # the tag untouched.
+      - name: Refuse to release a version older than main
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          current="$(git show origin/main:Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)"
+          requested="${{ steps.ver.outputs.version }}"
+          newest="$(printf '%s\n%s\n' "$current" "$requested" | sort -V | tail -1)"
+          if [ "$requested" != "$newest" ]; then
+            echo "::error::v${requested} is older than main's ${current}; refusing (stale tag pushed by mistake?)."
+            exit 1
+          fi
+
       - name: Reclaim the tag as a release request
         if: steps.check.outputs.exists == 'false'
         # `|| true`: when a failed run is retried by pushing the tag again,
@@ -97,7 +112,11 @@ jobs:
 
           git config user.name "github-actions-release[bot]"
           git config user.email "github-actions-release[bot]@users.noreply.github.com"
-          git commit -am "Bump version to ${{ steps.ver.outputs.version }}"
+          # `[skip ci]` stops the pull_request workflows from spawning for the
+          # bump PR: the tests just ran above, the PR is merged with `--admin`
+          # without waiting for checks, and on this repo those bot-authored
+          # runs only sit in "waiting for approval" as noise.
+          git commit -am "Bump version to ${{ steps.ver.outputs.version }} [skip ci]"
 
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
             git fetch origin "$branch:refs/remotes/origin/$branch"
