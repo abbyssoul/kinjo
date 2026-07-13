@@ -129,6 +129,36 @@ sudo apt-get update
 sudo apt-get install -y clang libavahi-client-dev libxcb-shape0-dev libxcb-xfixes0-dev xorg-dev
 ```
 
+### Nix / NixOS
+
+This repository is a Nix flake (outputs for `x86_64-linux` and `aarch64-linux`).
+Run kinjo without installing it:
+
+```sh
+nix run github:abbyssoul/kinjo
+```
+
+To install it declaratively, add the flake as an input and apply
+`overlays.default` to get `pkgs.kinjo`:
+
+```nix
+# flake inputs:
+kinjo.url = "github:abbyssoul/kinjo";
+
+# in your NixOS module:
+nixpkgs.overlays = [ inputs.kinjo.overlays.default ];
+environment.systemPackages = [ pkgs.kinjo ];
+```
+
+The default `mdns-sd` backend discovers services through the system **Avahi**
+daemon over D-Bus, so enable it for real local-network discovery:
+
+```nix
+services.avahi.enable = true;
+```
+
+Use `--fake-discovery` to try the UI without a running daemon.
+
 ### Build From Source
 
 Clone the repository and build locally:
