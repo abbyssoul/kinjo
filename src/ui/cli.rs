@@ -97,6 +97,17 @@ where
 fn command() -> Command {
     Command::new("kinjo")
         .about("TUI browser and launcher for DNS-SD services")
+        .version(env!("CARGO_PKG_VERSION"))
+        // Replace clap's default `-V` short with `-v`: nothing else claims the
+        // letter, and `-v` is what people type first.
+        .disable_version_flag(true)
+        .arg(
+            Arg::new("version")
+                .long("version")
+                .short('v')
+                .help("Print version")
+                .action(ArgAction::Version),
+        )
         .arg(
             // A flag rather than a positional so it never competes with the
             // subcommand slot — `kinjo <unknown>` now errors instead of
@@ -247,6 +258,18 @@ mod tests {
             cli.config_dirs,
             vec![PathBuf::from("commands"), PathBuf::from("overrides")]
         );
+    }
+
+    /// `--version` and `-v` surface as a `DisplayVersion` "error" that the
+    /// binary turns into print-and-exit; the text must carry the crate version.
+    #[test]
+    fn version_flag_reports_the_crate_version() {
+        for args in [["kinjo", "--version"], ["kinjo", "-v"]] {
+            let err = parse_from(args).unwrap_err();
+
+            assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+            assert!(err.to_string().contains(env!("CARGO_PKG_VERSION")));
+        }
     }
 
     #[test]
