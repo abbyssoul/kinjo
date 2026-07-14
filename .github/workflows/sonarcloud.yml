@@ -23,10 +23,15 @@ env:
 
 jobs:
   analysis:
-    # Dependabot PRs run without access to repo secrets, so the scanner would
-    # fail with an empty SONAR_TOKEN; main-branch analysis after merge still
-    # covers those changes.
-    if: github.actor != 'dependabot[bot]'
+    # Dependabot and fork PRs run without access to repo secrets, so the scanner
+    # would fail with an empty SONAR_TOKEN; main-branch analysis after merge
+    # still covers those changes. `pull_request_target` would supply the token
+    # but runs `cargo llvm-cov` — i.e. the PR's own build scripts and tests —
+    # with the secret in scope, so it is deliberately not used here.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
 
     steps:
