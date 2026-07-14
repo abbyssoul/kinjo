@@ -27,7 +27,8 @@ fn string(value: &str) -> toml::Value {
 /// (`ValueMetrics::calculate` in its `string.rs`), so serializing a string
 /// with a run of 256+ `"` or `'` overflows and panics under debug assertions.
 /// Only the serializer is affected — kinjo itself just parses TOML — so skip
-/// such inputs here until the upstream fix lands.
+/// such inputs until the fix for <https://github.com/toml-rs/toml/issues/1188>
+/// lands.
 fn overflows_toml_writer(value: &str) -> bool {
     [b'"', b'\''].iter().any(|quote| {
         let mut run = 0usize;
