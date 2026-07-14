@@ -23,7 +23,37 @@ fn string(value: &str) -> toml::Value {
     toml::Value::String(value.to_string())
 }
 
+/// `toml_writer` 1.1.1 tallies consecutive quotes in a `u8`
+/// (`ValueMetrics::calculate` in its `string.rs`), so serializing a string
+/// with a run of 256+ `"` or `'` overflows and panics under debug assertions.
+/// Only the serializer is affected — kinjo itself just parses TOML — so skip
+/// such inputs here until the upstream fix lands.
+fn overflows_toml_writer(value: &str) -> bool {
+    [b'"', b'\''].iter().any(|quote| {
+        let mut run = 0usize;
+        value.bytes().any(|byte| {
+            run = if byte == *quote { run + 1 } else { 0 };
+            run > u8::MAX as usize
+        })
+    })
+}
+
 fuzz_target!(|input: Input| {
+    let fields = [
+        Some(&input.name),
+        input.description.as_ref(),
+        input.requirement.as_ref(),
+        Some(&input.match_value),
+        Some(&input.command),
+    ];
+    if fields
+        .into_iter()
+        .flatten()
+        .any(|value| overflows_toml_writer(value))
+    {
+        return;
+    }
+
     let mut metadata = toml::Table::new();
     metadata.insert("name".to_string(), string(&input.name));
     if let Some(description) = &input.description {

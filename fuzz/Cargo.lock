@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "kinjo"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "clap",
  "color-eyre",
@@ -1192,9 +1192,9 @@ dependencies = [
 
 [[package]]
 name = "mdns-sd-discovery"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "300f46b9a2c2d4f4c6b544d0fc87ff9f01b19b65b161a5726250f3f738556abf"
+checksum = "41707b95ae9cf0bcccf3b2fc8a3bd5659ace34217db8b686e5dd6e17fa5d2c1f"
 dependencies = [
  "futures-util",
  "libc",
