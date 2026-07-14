@@ -1,0 +1,42 @@
+name: Lint workflows
+
+# Static checks for the workflow files themselves. The release workflows only
+# ever execute during a release, so nothing else in CI exercises them: a typo or
+# an unquoted variable there surfaces while a release is being cut. actionlint
+# validates workflow syntax and `${{ }}` expressions, and runs shellcheck over
+# the `run:` blocks (~160 lines of shell, mostly in prepare-release.yml and
+# update-homebrew-tap.yml).
+#
+# Note actionlint types `github.event` as an untyped object, so it cannot catch
+# typos in paths like `github.event.pull_request.head.repo.full_name`.
+
+on:
+  push:
+    branches: [ "main" ]
+    paths: [ ".github/workflows/**", ".github/actions/**" ]
+  pull_request:
+    branches: [ "main" ]
+    paths: [ ".github/workflows/**", ".github/actions/**" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      # actionlint locates the project root by looking for `.git`, so the
+      # checkout has to be in place before the linter runs.
+      - uses: actions/checkout@v7
+
+      # Upstream's own image, pinned by digest (v1.7.12); it bundles the
+      # shellcheck binary that actionlint shells out to.
+      - name: Run actionlint
+        uses: docker://rhysd/actionlint@sha256:9d36088643581e728c969f35141f88139fec77280b2be23c1f66f8e40e1025e7
+        with:
+          args: -color
