@@ -7,7 +7,7 @@ use zeroconf_tokio::{
 };
 
 use super::worker::{DiscoveryWorker, RuntimeFlavor};
-use super::{DiscoveryConfig, DiscoveryEvent, Entry, EntryId};
+use super::{DiscoveryConfig, DiscoveryEvent, Entry, Registration};
 
 /// DNS-SD service types browsed when the user does not pass `--service-type`.
 ///
@@ -138,7 +138,9 @@ async fn browse_one(
 fn to_discovery_event(event: BrowserEvent) -> DiscoveryEvent {
     match event {
         BrowserEvent::Add(discovery) => DiscoveryEvent::Upsert(record_from_discovery(&discovery)),
-        BrowserEvent::Remove(removal) => DiscoveryEvent::Remove(id_from_removal(&removal)),
+        BrowserEvent::Remove(removal) => {
+            DiscoveryEvent::RemoveRegistration(registration_from_removal(&removal))
+        }
     }
 }
 
@@ -169,8 +171,11 @@ fn record_from_discovery(discovery: &ServiceDiscovery) -> Entry {
     )
 }
 
-fn id_from_removal(removal: &ServiceRemoval) -> EntryId {
-    EntryId::registration(removal.name(), removal.kind(), removal.domain())
+/// `zeroconf` reports a removal as a bare name/type/domain: it exposes nothing
+/// that would tell two occurrences of one registration apart, so the adapter
+/// cannot narrow this to a single occurrence and says the registration is gone.
+fn registration_from_removal(removal: &ServiceRemoval) -> Registration {
+    Registration::new(removal.name(), removal.kind(), removal.domain())
 }
 
 fn format_service_type(service_type: &ServiceType) -> String {
@@ -211,6 +216,29 @@ mod tests {
     fn unparseable_filter_falls_back_to_default_sweep() {
         let types = resolve_service_types(Some("not a service type"));
         assert_eq!(types.len(), DEFAULT_SERVICE_TYPES.len());
+    }
+
+    /// `zeroconf` reports a removal with nothing that distinguishes one
+    /// occurrence of a registration from another, so the adapter must say the
+    /// whole registration is gone rather than guess at a single occurrence.
+    #[test]
+    fn removal_is_an_explicit_registration_wide_removal() {
+        let removal = ServiceRemoval::builder()
+            .name("nas".to_string())
+            .kind("_http._tcp".to_string())
+            .domain("local".to_string())
+            .build()
+            .expect("service removal");
+
+        match to_discovery_event(BrowserEvent::Remove(removal)) {
+            DiscoveryEvent::RemoveRegistration(registration) => {
+                assert_eq!(
+                    registration,
+                    Registration::new("nas", "_http._tcp", "local")
+                );
+            }
+            other => panic!("expected RemoveRegistration, got {other:?}"),
+        }
     }
 
     /// No configured service type can start a browser (simulated here with an

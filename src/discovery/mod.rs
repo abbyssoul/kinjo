@@ -14,7 +14,10 @@ mod zeroconf;
 
 use std::sync::mpsc;
 
-pub use entry::{Entry, EntryGroup, EntryId, GroupingMode, decode_dns_sd_escapes, group_entries};
+pub use entry::{
+    Entry, EntryGroup, EntryId, GroupingMode, OccurrenceId, Registration, decode_dns_sd_escapes,
+    group_entries,
+};
 
 /// The mDNS/DNS-SD library used to discover services.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,10 +36,19 @@ pub enum DiscoveryBackend {
 /// An event emitted by a discovery backend.
 #[derive(Debug, Clone)]
 pub enum DiscoveryEvent {
-    /// An entry appeared or its attributes changed.
+    /// An occurrence appeared or its attributes changed.
     Upsert(Entry),
-    /// An entry went away.
+    /// Exactly one occurrence went away. Other occurrences of the same
+    /// registration are unaffected and stay live.
     Remove(EntryId),
+    /// Every occurrence of a registration went away.
+    ///
+    /// This is the honest event for an adapter that cannot tell which
+    /// occurrence it lost: the zeroconf backend, whose removals carry no
+    /// discriminator at all, and an mdns-sd removal that arrives without an
+    /// interface index. Such an adapter must say "all of them" rather than
+    /// guess at one and silently drop a live sibling.
+    RemoveRegistration(Registration),
     /// A human-readable status update about the discovery process.
     Status(String),
 }

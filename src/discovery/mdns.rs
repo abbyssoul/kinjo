@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    num::NonZeroU32,
     sync::mpsc,
     time::Duration,
 };
@@ -12,7 +13,7 @@ use mdns_sd_discovery::{
 use tokio_util::sync::CancellationToken;
 
 use super::worker::{DiscoveryWorker, RuntimeFlavor};
-use super::{DiscoveryConfig, DiscoveryEvent, Entry, EntryId};
+use super::{DiscoveryConfig, DiscoveryEvent, Entry, EntryId, OccurrenceId, Registration};
 
 /// How often known services are re-confirmed with a one-shot resolve.
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
@@ -21,8 +22,36 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Consecutive failed probes after which a service is reported as removed.
 const PROBE_FAILURE_THRESHOLD: u32 = 3;
 
-/// The identity triple (name, service type, domain) a browse event reports.
-type ServiceKey = (String, String, String);
+/// The occurrence a browse event reported: the registration it announced, plus
+/// the network interface the announcement arrived on when the browser named
+/// one. Two interfaces carrying the same registration are two occurrences and
+/// are tracked, probed, and removed independently.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ServiceKey {
+    registration: Registration,
+    interface_index: Option<NonZeroU32>,
+}
+
+impl ServiceKey {
+    /// The adapter's occurrence name for this key: the interface index, when
+    /// the browser reported one.
+    fn occurrence(&self) -> Option<OccurrenceId> {
+        self.interface_index.map(OccurrenceId)
+    }
+
+    /// How this occurrence goes away. An interface index names exactly one
+    /// occurrence; without one the adapter cannot tell its occurrences apart
+    /// and must remove the whole registration (see
+    /// [`DiscoveryEvent::RemoveRegistration`]).
+    fn removal_event(&self) -> DiscoveryEvent {
+        match self.occurrence() {
+            Some(occurrence) => {
+                DiscoveryEvent::Remove(EntryId::named(self.registration.clone(), occurrence))
+            }
+            None => DiscoveryEvent::RemoveRegistration(self.registration.clone()),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct TrackedService {
@@ -50,15 +79,22 @@ struct LivenessTracker {
 }
 
 impl LivenessTracker {
-    /// A browse event (re-)announced the service: it is alive.
+    /// A browse event (re-)announced the occurrence: it is alive.
     fn note_found(&mut self, key: ServiceKey) {
         self.services.insert(key, TrackedService::default());
     }
 
-    /// Avahi reported the service removed: it is authoritatively gone, and a
+    /// Avahi reported the occurrence removed: it is authoritatively gone, and a
     /// reappearance will produce a fresh `Found` event.
     fn note_removed(&mut self, key: &ServiceKey) {
         self.services.remove(key);
+    }
+
+    /// Avahi reported a removal it could not attribute to an interface: every
+    /// occurrence of the registration is gone, so stop probing all of them.
+    fn note_registration_removed(&mut self, registration: &Registration) {
+        self.services
+            .retain(|key, _| key.registration != *registration);
     }
 
     /// The services the next probe cycle should re-confirm.
@@ -188,39 +224,50 @@ async fn browse_loop(
 /// Keeps the liveness tracker in sync with what the browser reports.
 fn track_event(event: &BrowseEvent, tracker: &mut LivenessTracker) {
     match event {
-        BrowseEvent::Found(service) => tracker.note_found((
-            service.name.clone(),
-            service.service_type.clone(),
-            service.domain.clone(),
-        )),
-        BrowseEvent::Removed(removal) => tracker.note_removed(&(
-            removal.name.clone(),
-            removal.service_type.clone(),
-            removal.domain.clone(),
-        )),
+        BrowseEvent::Found(service) => tracker.note_found(key_from_service(service)),
+        BrowseEvent::Removed(removal) => {
+            let key = key_from_removal(removal);
+            // An unattributed removal is registration-wide (see
+            // `ServiceKey::removal_event`); forget every occurrence with it, not
+            // just the one keyed by "no interface".
+            match key.interface_index {
+                Some(_) => tracker.note_removed(&key),
+                None => tracker.note_registration_removed(&key.registration),
+            }
+        }
     }
 }
 
-/// Probes each service with a bounded one-shot resolve, concurrently. Returns
-/// each key with the resolved data on success or `None` when the service did
-/// not answer in time.
+/// Probes each occurrence with a bounded one-shot resolve, concurrently.
+/// Returns each key with the resolved data on success or `None` when it did not
+/// answer in time.
 async fn probe_services(keys: Vec<ServiceKey>) -> Vec<(ServiceKey, Option<DiscoveredService>)> {
     // Joined in-task rather than spawned: the resolve future is not `Send` on
     // Windows (it holds raw PWSTR pointers across an await), and the browse
     // loop runs on a current-thread runtime anyway.
     let probes = keys.into_iter().map(|key| async move {
-        let result = ServiceResolverBuilder::new(&key.0, &key.1, &key.2)
-            .timeout(PROBE_TIMEOUT)
-            .resolve()
-            .await;
+        let mut builder = ServiceResolverBuilder::new(
+            &key.registration.name,
+            &key.registration.service_type,
+            &key.registration.domain,
+        );
+        builder.timeout(PROBE_TIMEOUT);
+        // Confine the probe to the interface this occurrence was announced on.
+        // An unconfined resolve answers from any interface still carrying the
+        // registration, which would report a dead occurrence as alive for as
+        // long as one sibling survives.
+        if let Some(index) = key.interface_index {
+            builder.interface_index(index);
+        }
+        let result = builder.resolve().await;
         (key, result.ok())
     });
     join_all(probes).await
 }
 
-/// Feeds probe outcomes into the tracker and emits the resulting events:
-/// `Remove` for services that crossed the failure threshold and `Upsert` for
-/// previously-removed services that answered again. Returns `false` once the
+/// Feeds probe outcomes into the tracker and emits the resulting events: a
+/// removal for occurrences that crossed the failure threshold and `Upsert` for
+/// previously-removed occurrences that answered again. Returns `false` once the
 /// receiver has been dropped so the caller can stop.
 fn apply_probe_results(
     results: Vec<(ServiceKey, Option<DiscoveredService>)>,
@@ -230,19 +277,17 @@ fn apply_probe_results(
     for (key, outcome) in results {
         let sent = match outcome {
             Some(service) => {
+                // The tracked key's occurrence, not the resolve's own: it is
+                // what the browse event named this occurrence, so the upsert
+                // lands on the record being probed rather than forking a new one.
                 !tracker.record_success(&key)
                     || tx
-                        .send(DiscoveryEvent::Upsert(record_from_service(&service)))
+                        .send(DiscoveryEvent::Upsert(
+                            record_from_service(&service).with_occurrence(key.occurrence()),
+                        ))
                         .is_ok()
             }
-            None => {
-                !tracker.record_failure(&key)
-                    || tx
-                        .send(DiscoveryEvent::Remove(EntryId::registration(
-                            key.0, key.1, key.2,
-                        )))
-                        .is_ok()
-            }
+            None => !tracker.record_failure(&key) || tx.send(key.removal_event()).is_ok(),
         };
         if !sent {
             return false;
@@ -254,20 +299,21 @@ fn apply_probe_results(
 /// Translates a [`BrowseEvent`] into [`DiscoveryEvent`]s and sends them.
 /// Returns `false` once the receiver has been dropped so the caller can stop.
 fn emit_event(event: BrowseEvent, tx: &mpsc::Sender<DiscoveryEvent>) -> bool {
-    match event {
-        BrowseEvent::Found(service) => tx
-            .send(DiscoveryEvent::Upsert(record_from_service(&service)))
-            .is_ok(),
-        BrowseEvent::Removed(service) => tx
-            .send(DiscoveryEvent::Remove(id_from_removal(&service)))
-            .is_ok(),
-    }
+    let event = match event {
+        BrowseEvent::Found(service) => DiscoveryEvent::Upsert(record_from_service(&service)),
+        BrowseEvent::Removed(removal) => key_from_removal(&removal).removal_event(),
+    };
+    tx.send(event).is_ok()
 }
 
 /// Builds the resolved [`Entry`] for a discovered service. A service may resolve
 /// to several IP addresses (IPv4/IPv6, or DNS load-balanced records); they are
 /// all carried on the single logical-service entry — consumers pick among them
 /// when a specific endpoint is needed.
+///
+/// The interface the announcement arrived on names the occurrence, so the same
+/// registration seen on two interfaces yields two entries that neither
+/// overwrite nor remove each other.
 fn record_from_service(service: &DiscoveredService) -> Entry {
     Entry::resolved(
         &service.name,
@@ -278,10 +324,21 @@ fn record_from_service(service: &DiscoveredService) -> Entry {
         Some(service.port),
         txt_map(&service.txt_records),
     )
+    .with_occurrence(service.interface_index.map(OccurrenceId))
 }
 
-fn id_from_removal(removal: &RemovedService) -> EntryId {
-    EntryId::registration(&removal.name, &removal.service_type, &removal.domain)
+fn key_from_service(service: &DiscoveredService) -> ServiceKey {
+    ServiceKey {
+        registration: Registration::new(&service.name, &service.service_type, &service.domain),
+        interface_index: service.interface_index,
+    }
+}
+
+fn key_from_removal(removal: &RemovedService) -> ServiceKey {
+    ServiceKey {
+        registration: Registration::new(&removal.name, &removal.service_type, &removal.domain),
+        interface_index: removal.interface_index,
+    }
 }
 
 /// Collapses DNS-SD TXT records into the string map [`Entry`] carries. Binary
@@ -364,11 +421,22 @@ mod tests {
     }
 
     fn key(name: &str) -> ServiceKey {
-        (
-            name.to_string(),
-            "_http._tcp".to_string(),
-            "local".to_string(),
-        )
+        ServiceKey {
+            registration: Registration::new(name, "_http._tcp", "local"),
+            interface_index: None,
+        }
+    }
+
+    /// The same registration as [`key`], but announced on one named interface.
+    fn key_on(name: &str, index: u32) -> ServiceKey {
+        ServiceKey {
+            registration: Registration::new(name, "_http._tcp", "local"),
+            interface_index: NonZeroU32::new(index),
+        }
+    }
+
+    fn interface(index: u32) -> Option<NonZeroU32> {
+        NonZeroU32::new(index)
     }
 
     #[test]
@@ -444,11 +512,16 @@ mod tests {
                 &tx
             ));
         }
+        // This occurrence has no interface index, so the adapter cannot name
+        // what it lost and removes the registration.
         match rx.try_recv() {
-            Ok(DiscoveryEvent::Remove(id)) => {
-                assert_eq!(id.registration_key(), ("nas", "_http._tcp", "local"));
+            Ok(DiscoveryEvent::RemoveRegistration(registration)) => {
+                assert_eq!(
+                    registration,
+                    Registration::new("nas", "_http._tcp", "local")
+                );
             }
-            other => panic!("expected Remove, got {other:?}"),
+            other => panic!("expected RemoveRegistration, got {other:?}"),
         }
         assert!(rx.try_recv().is_err());
 
@@ -468,16 +541,174 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    #[test]
-    fn removal_id_matches_pending_entry() {
-        let removal = RemovedService {
-            name: "nas".to_string(),
+    fn removal(name: &str, interface_index: Option<NonZeroU32>) -> RemovedService {
+        RemovedService {
+            name: name.to_string(),
             service_type: "_http._tcp".to_string(),
             domain: "local".to_string(),
-            interface_index: None,
-        };
+            interface_index,
+        }
+    }
 
-        let expected = Entry::new("nas", "_http._tcp", "local").pending_id();
-        assert_eq!(id_from_removal(&removal), expected);
+    #[test]
+    fn found_on_two_interfaces_yields_two_occurrences() {
+        let mut wired = service("nas", "_http._tcp", vec!["192.168.1.30".parse().unwrap()]);
+        wired.interface_index = interface(2);
+        let mut wireless = service("nas", "_http._tcp", vec!["192.168.1.31".parse().unwrap()]);
+        wireless.interface_index = interface(3);
+
+        let wired = record_from_service(&wired);
+        let wireless = record_from_service(&wireless);
+
+        // Identical registration, host, and port: only the interface differs.
+        assert_eq!(wired.registration(), wireless.registration());
+        assert_eq!(wired.hostname, wireless.hostname);
+        assert_eq!(wired.port, wireless.port);
+        // …so they are distinct occurrences and cannot overwrite each other.
+        assert_ne!(wired.id(), wireless.id());
+        assert_eq!(
+            wired.occurrence(),
+            Some(OccurrenceId(interface(2).unwrap()))
+        );
+    }
+
+    #[test]
+    fn interface_specific_removal_names_exactly_that_occurrence() {
+        let mut found = service("nas", "_http._tcp", vec!["192.168.1.30".parse().unwrap()]);
+        found.interface_index = interface(2);
+        let entry = record_from_service(&found);
+
+        match key_from_removal(&removal("nas", interface(2))).removal_event() {
+            // The removal must address the very record the Found event created.
+            DiscoveryEvent::Remove(id) => assert_eq!(id, entry.id()),
+            other => panic!("expected Remove, got {other:?}"),
+        }
+
+        // A sibling on another interface is a different occurrence, so this
+        // removal leaves it alone.
+        match key_from_removal(&removal("nas", interface(3))).removal_event() {
+            DiscoveryEvent::Remove(id) => assert_ne!(id, entry.id()),
+            other => panic!("expected Remove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn removal_without_an_interface_falls_back_to_the_registration() {
+        match key_from_removal(&removal("nas", None)).removal_event() {
+            DiscoveryEvent::RemoveRegistration(registration) => {
+                assert_eq!(
+                    registration,
+                    Registration::new("nas", "_http._tcp", "local")
+                );
+            }
+            other => panic!("expected RemoveRegistration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn liveness_transitions_track_each_interface_separately() {
+        let mut tracker = LivenessTracker::default();
+        tracker.note_found(key_on("nas", 2));
+        tracker.note_found(key_on("nas", 3));
+
+        // Interface 2 goes quiet; interface 3 keeps answering.
+        for _ in 1..PROBE_FAILURE_THRESHOLD {
+            assert!(!tracker.record_failure(&key_on("nas", 2)));
+        }
+        assert!(tracker.record_failure(&key_on("nas", 2)));
+
+        // The sibling's liveness is untouched: it is still probed, and its own
+        // failure streak starts from zero.
+        assert!(tracker.probe_keys().contains(&key_on("nas", 3)));
+        assert!(!tracker.record_failure(&key_on("nas", 3)));
+    }
+
+    #[test]
+    fn probe_failure_on_a_named_occurrence_removes_only_that_occurrence() {
+        let mut tracker = LivenessTracker::default();
+        let (tx, rx) = mpsc::channel();
+        tracker.note_found(key_on("nas", 2));
+        tracker.note_found(key_on("nas", 3));
+
+        for _ in 0..PROBE_FAILURE_THRESHOLD {
+            assert!(apply_probe_results(
+                vec![(key_on("nas", 2), None)],
+                &mut tracker,
+                &tx
+            ));
+        }
+
+        match rx.try_recv() {
+            Ok(DiscoveryEvent::Remove(id)) => {
+                assert_eq!(
+                    id,
+                    EntryId::named(
+                        Registration::new("nas", "_http._tcp", "local"),
+                        OccurrenceId(interface(2).unwrap()),
+                    )
+                );
+            }
+            other => panic!("expected Remove, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn recovered_probe_upserts_the_occurrence_that_was_probed() {
+        let mut tracker = LivenessTracker::default();
+        let (tx, rx) = mpsc::channel();
+        tracker.note_found(key_on("nas", 2));
+        for _ in 0..PROBE_FAILURE_THRESHOLD {
+            tracker.record_failure(&key_on("nas", 2));
+        }
+        let _ = rx.try_recv();
+
+        // The resolve answers without naming an interface; the upsert must
+        // still carry the tracked occurrence, or it would land on a new record
+        // and leave the removed one listed forever.
+        let nas = service("nas", "_http._tcp", vec!["192.168.1.30".parse().unwrap()]);
+        assert!(apply_probe_results(
+            vec![(key_on("nas", 2), Some(nas))],
+            &mut tracker,
+            &tx
+        ));
+
+        match rx.try_recv() {
+            Ok(DiscoveryEvent::Upsert(entry)) => {
+                assert_eq!(
+                    entry.occurrence(),
+                    Some(OccurrenceId(interface(2).unwrap()))
+                );
+                assert_eq!(entry.hostname.as_deref(), Some("nas.local"));
+            }
+            other => panic!("expected Upsert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn registration_wide_removal_forgets_every_tracked_occurrence() {
+        let mut tracker = LivenessTracker::default();
+        tracker.note_found(key_on("nas", 2));
+        tracker.note_found(key_on("nas", 3));
+        tracker.note_found(key_on("printer", 2));
+
+        track_event(&BrowseEvent::Removed(removal("nas", None)), &mut tracker);
+
+        // Both `nas` occurrences are gone; the unrelated registration stays.
+        assert_eq!(tracker.probe_keys(), vec![key_on("printer", 2)]);
+    }
+
+    #[test]
+    fn interface_specific_removal_keeps_probing_the_sibling() {
+        let mut tracker = LivenessTracker::default();
+        tracker.note_found(key_on("nas", 2));
+        tracker.note_found(key_on("nas", 3));
+
+        track_event(
+            &BrowseEvent::Removed(removal("nas", interface(2))),
+            &mut tracker,
+        );
+
+        assert_eq!(tracker.probe_keys(), vec![key_on("nas", 3)]);
     }
 }

@@ -4,7 +4,7 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `ready` |
+| Status | `done` |
 | Priority | `P0` |
 | Workstream | Discovery |
 | Depends on | — |
@@ -92,15 +92,15 @@ Do not encode interface identity in display labels or command fields.
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] Two same-registration, same-host/port occurrences from different interfaces
+- [x] Two same-registration, same-host/port occurrences from different interfaces
       coexist and retain their own addresses.
-- [ ] Removing one occurrence preserves the other in records and grouped views.
-- [ ] Liveness failure/recovery affects only the tracked occurrence.
-- [ ] Registration-wide removal remains testable for adapters lacking a discriminator.
-- [ ] Entry construction cannot produce stale duplicated identity state through
+- [x] Removing one occurrence preserves the other in records and grouped views.
+- [x] Liveness failure/recovery affects only the tracked occurrence.
+- [x] Registration-wide removal remains testable for adapters lacking a discriminator.
+- [x] Entry construction cannot produce stale duplicated identity state through
       normal public mutation.
-- [ ] Identity/grouping documentation and fuzz properties are updated as needed.
-- [ ] Full validation passes.
+- [x] Identity/grouping documentation and fuzz properties are updated as needed.
+- [x] Full validation passes.
 
 ## Required Tests
 
@@ -128,7 +128,80 @@ cargo test --locked --all-targets --all-features
 ## Completion Record
 
 - **Implemented:**
-- **Tests added/updated:**
-- **Documentation updated:**
+  - `discovery::entry` now models identity as `EntryId { registration, occurrence }`.
+    `Registration` is the structured `(name, service type, domain)` triple;
+    `OccurrenceId` is an adapter's opaque, stable name for one occurrence.
+    The private `Occurrence` enum makes the three cases explicit rather than
+    implied: `Named` (adapter named it), `Endpoint` (no name — the resolved
+    host/port discriminates, as before), and `Pending` (a registration
+    placeholder, not an occurrence). `EntryId`'s fields are private; callers use
+    `registration()`, `is_pending()`, and the `named`/`pending` constructors.
+  - `Entry::id` changed from a stored field to a method derived from the entry's
+    current fields, so the stale-identity class of bug is gone by construction
+    rather than by remembering to call a sync method. `with_instance_id` and
+    `pending_id` are deleted along with it. The only identity-defining state that
+    is not already a public field — the occurrence name — is private and settable
+    only via `with_occurrence` at construction.
+  - A `Named` occurrence's id is stable across endpoint/address/TXT changes, so
+    re-resolving one occurrence updates it in place. Addresses remain out of
+    identity for both cases.
+  - `DiscoveryEvent::Remove(EntryId)` now means *exactly this occurrence*; the new
+    `DiscoveryEvent::RemoveRegistration(Registration)` is the explicit
+    registration-wide operation for adapters that genuinely cannot name what they
+    lost. `App::drain_discovery` removes by exact id and retains siblings.
+  - The mdns-sd adapter carries `interface_index` as the discriminator through
+    Found, tracking, probing, upsert, and remove. `ServiceKey` became a struct of
+    `(Registration, Option<NonZeroU32>)`. Removals with an interface index name one
+    occurrence; without one they use the documented registration-wide fallback,
+    which also forgets every tracked occurrence of that registration.
+  - Liveness probes are now confined to the tracked interface via
+    `ServiceResolverBuilder::interface_index`. This was a latent correctness bug:
+    an unconfined resolve answers from *any* interface still carrying the
+    registration, so a dead occurrence would have been reported alive for as long
+    as one sibling survived. Probe recovery upserts with the *tracked* key's
+    occurrence, so it lands on the record being probed.
+  - The zeroconf adapter's removal is now an explicit `RemoveRegistration`, which
+    is what it always meant; `id_from_removal` became `registration_from_removal`.
+- **Tests added/updated:** +16 default / +18 all-features (163→179, 166→184).
+  - `discovery::entry`: occurrences differing only by adapter name are unequal; a
+    named occurrence keeps its id across endpoint/address/TXT changes; endpoint
+    identity still separates unnamed occurrences while addresses do not; two
+    occurrences still merge into one logical service. Rewrote the id tests that
+    asserted the old `instance`/`registration_key` shape.
+  - `discovery::mdns`: two-interface Found yields two occurrences;
+    interface-specific removal names exactly that occurrence; unknown-interface
+    removal falls back registration-wide; per-interface liveness transitions;
+    probe failure removes only the failing occurrence; recovery upserts the probed
+    occurrence; registration-wide removal forgets all tracked occurrences while an
+    interface-specific one keeps probing the sibling.
+  - `discovery::zeroconf`: removal is an explicit registration-wide removal.
+  - `ui::app`: occurrences coexist with their own addresses and group as one
+    service; removing one preserves its sibling's address; registration removal
+    clears all siblings but not other registrations; removing an unknown
+    occurrence does not widen into a registration removal; upsert replaces the
+    same occurrence across endpoint/TXT changes.
+  - Fuzz: `identity()` mirrors the new invariant (occurrence name when present,
+    otherwise endpoint), and `RawEntry` gained an arbitrary occurrence.
+- **Documentation updated:** none required. The identity/grouping contract is
+  documented on the types themselves and was rewritten there. `README.md`,
+  `docs/actions.md`, and `docs/keybindings.md` describe no user-visible behavior
+  this changes: no display label, command field, or configuration surface moved —
+  removals simply stop deleting live siblings.
 - **Validation evidence:**
+  - `cargo fmt -- --check`: pass.
+  - `cargo clippy --locked --all-targets --all-features -- -D warnings`: pass.
+  - `cargo test --locked --all-targets`: 179 passed, 0 failed.
+  - `cargo test --locked --all-targets --all-features`: 184 passed, 0 failed.
+  - `cargo +nightly fuzz run discovery_entry -- -max_total_time=60`: 101,513 runs,
+    no crashes — the identity property holds over the new occurrence dimension.
+  - Ran `kinjo --fake-discovery` on a sized pty: all four sample records render,
+    including the unresolved placeholder, with no panic.
 - **Follow-ups:**
+  - The zeroconf backend still cannot separate same-name occurrences across
+    interfaces, because its dependency exposes no discriminator at all. Its
+    endpoint fallback is unchanged and its removals stay registration-wide. This
+    is a dependency limitation, not a gap in this change; the seam is ready if
+    `zeroconf` ever reports an interface.
+  - `OccurrenceId` wraps `NonZeroU32` because that is what mdns-sd reports and
+    because index 0 ("unspecified") correctly maps to "no name". If a future
+    adapter needs a non-numeric discriminator, the newtype is the place to widen.

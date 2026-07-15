@@ -12,10 +12,10 @@
 //!     and every instance agrees with its group on the fields the mode
 //!     groups by.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, num::NonZeroU32};
 
 use arbitrary::Arbitrary;
-use kinjo::discovery::{Entry, GroupingMode, group_entries};
+use kinjo::discovery::{Entry, GroupingMode, OccurrenceId, group_entries};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
@@ -26,17 +26,27 @@ struct RawEntry {
     hostname: Option<String>,
     port: Option<u16>,
     txt: Vec<(String, String)>,
+    /// The adapter's occurrence name, as an interface-aware backend supplies.
+    occurrence: Option<NonZeroU32>,
 }
 
 /// The fields that are supposed to identify an entry, as a structured tuple.
-/// Mirrors the documented `EntryId` semantics: the registration triple plus,
-/// once instance data exists, the (hostname, port) pair.
-fn identity(entry: &Entry) -> (&str, &str, &str, Option<(&str, Option<u16>)>) {
-    let instance = entry
-        .has_instance_data()
+/// Mirrors the documented `EntryId` semantics: the registration triple plus the
+/// occurrence — the adapter's own name for it when it gave one, and otherwise
+/// the resolved (hostname, port) endpoint once instance data exists.
+fn identity(entry: &Entry) -> (&str, &str, &str, Option<OccurrenceId>, Endpoint<'_>) {
+    let endpoint = (entry.occurrence().is_none() && entry.has_instance_data())
         .then(|| (entry.hostname.as_deref().unwrap_or(""), entry.port));
-    (&entry.name, &entry.service_type, &entry.domain, instance)
+    (
+        &entry.name,
+        &entry.service_type,
+        &entry.domain,
+        entry.occurrence(),
+        endpoint,
+    )
 }
+
+type Endpoint<'a> = Option<(&'a str, Option<u16>)>;
 
 fuzz_target!(|raw: Vec<RawEntry>| {
     let records: Vec<Entry> = raw
@@ -48,7 +58,7 @@ fuzz_target!(|raw: Vec<RawEntry>| {
             for (key, value) in r.txt {
                 entry.txt.insert(key, value);
             }
-            entry.with_instance_id()
+            entry.with_occurrence(r.occurrence.map(OccurrenceId))
         })
         .collect();
 
@@ -65,7 +75,7 @@ fuzz_target!(|raw: Vec<RawEntry>| {
     for a in &records {
         for b in &records {
             assert_eq!(
-                a.id == b.id,
+                a.id() == b.id(),
                 identity(a) == identity(b),
                 "id/field equality diverged for {a:?} vs {b:?}"
             );

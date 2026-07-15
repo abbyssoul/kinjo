@@ -1,26 +1,23 @@
 use std::{
     collections::{BTreeMap, HashMap},
     net::IpAddr,
+    num::NonZeroU32,
     time::Instant,
 };
 
-/// Identity of an [`Entry`]. The registration triple (name, service type,
-/// domain) identifies a DNS-SD registration; `instance` carries the resolved
-/// SRV host/port identity once known, keeping concurrent instances of the same
-/// registration distinct. A structured key (rather than a joined string) so
-/// that separator characters appearing in a service name cannot make two
-/// different identities compare equal.
+/// The DNS-SD `(name, service type, domain)` identity a device advertises. A
+/// structured key (rather than a joined string) so that separator characters
+/// appearing in a service name cannot make two different registrations compare
+/// equal.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntryId {
+pub struct Registration {
     pub name: String,
     pub service_type: String,
     pub domain: String,
-    pub instance: Option<(String, Option<u16>)>,
 }
 
-impl EntryId {
-    /// The id of a (not yet resolved) registration.
-    pub fn registration(
+impl Registration {
+    pub fn new(
         name: impl Into<String>,
         service_type: impl Into<String>,
         domain: impl Into<String>,
@@ -29,13 +26,75 @@ impl EntryId {
             name: name.into(),
             service_type: service_type.into(),
             domain: domain.into(),
-            instance: None,
+        }
+    }
+}
+
+/// A discovery adapter's own name for one occurrence of a registration. Its
+/// meaning belongs to the adapter that issued it — the mdns-sd adapter uses the
+/// network interface an announcement arrived on — and discovery asks only that
+/// the same occurrence keep the same value across the events describing it.
+///
+/// Adapters that cannot name their occurrences (the zeroconf adapter) issue
+/// none. The value is an identity, not a fact about the network: it must not
+/// reach display labels or command fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OccurrenceId(pub NonZeroU32);
+
+/// What tells one occurrence of a registration apart from another.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Occurrence {
+    /// The adapter named this occurrence. The name is stable across updates, so
+    /// the occurrence keeps its identity when its endpoint, addresses, or TXT
+    /// data change.
+    Named(OccurrenceId),
+    /// No adapter name: the resolved SRV endpoint is all that keeps concurrent
+    /// occurrences of one registration apart. A service's address set can
+    /// change without it becoming a different service, so addresses stay out.
+    Endpoint { hostname: String, port: Option<u16> },
+    /// Announced, but nothing resolved yet — a placeholder for the
+    /// registration rather than an occurrence of it.
+    Pending,
+}
+
+/// Identity of an [`Entry`]: which registration it belongs to, and which
+/// occurrence of that registration it is. Two occurrences of one registration
+/// (the same service announced on two interfaces, say) have different ids and
+/// coexist in a record store; the UI may still group them for display.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntryId {
+    registration: Registration,
+    occurrence: Occurrence,
+}
+
+impl EntryId {
+    /// The id of the occurrence an adapter named `occurrence`.
+    pub fn named(registration: Registration, occurrence: OccurrenceId) -> Self {
+        Self {
+            registration,
+            occurrence: Occurrence::Named(occurrence),
         }
     }
 
-    /// The registration triple shared by every instance id of one registration.
-    pub fn registration_key(&self) -> (&str, &str, &str) {
-        (&self.name, &self.service_type, &self.domain)
+    /// The id of the unresolved placeholder for `registration`: what an adapter
+    /// emits once it has seen the announcement but resolved no occurrence of it.
+    /// Superseded as soon as any real occurrence arrives.
+    pub fn pending(registration: Registration) -> Self {
+        Self {
+            registration,
+            occurrence: Occurrence::Pending,
+        }
+    }
+
+    /// The registration every occurrence id of one registration shares.
+    pub fn registration(&self) -> &Registration {
+        &self.registration
+    }
+
+    /// Whether this id is a registration's unresolved placeholder rather than
+    /// an occurrence of it.
+    pub fn is_pending(&self) -> bool {
+        matches!(self.occurrence, Occurrence::Pending)
     }
 }
 
@@ -82,7 +141,6 @@ impl GroupingMode {
 
 #[derive(Debug, Clone)]
 pub struct Entry {
-    pub id: EntryId,
     pub name: String,
     pub service_type: String,
     pub domain: String,
@@ -94,6 +152,11 @@ pub struct Entry {
     pub port: Option<u16>,
     pub txt: BTreeMap<String, String>,
     pub last_seen: Instant,
+    /// The adapter's name for this occurrence, when it has one. Private and
+    /// only settable at construction: [`Entry::id`] is derived from it on
+    /// demand, so no caller has to keep a stored id in step with the fields
+    /// that define it.
+    occurrence: Option<OccurrenceId>,
 }
 
 impl Entry {
@@ -102,27 +165,22 @@ impl Entry {
         service_type: impl Into<String>,
         domain: impl Into<String>,
     ) -> Self {
-        let name = name.into();
-        let service_type = service_type.into();
-        let domain = domain.into();
-        let id = EntryId::registration(name.clone(), service_type.clone(), domain.clone());
         Self {
-            id,
-            name,
-            service_type,
-            domain,
+            name: name.into(),
+            service_type: service_type.into(),
+            domain: domain.into(),
             hostname: None,
             addresses: Vec::new(),
             port: None,
             txt: BTreeMap::new(),
             last_seen: Instant::now(),
+            occurrence: None,
         }
     }
 
     /// Build a resolved entry from the fields a discovery backend reports.
-    /// Blank hostnames and zero ports count as "not resolved yet"; the instance
-    /// id is derived from whatever instance data is present. Shared by every
-    /// backend so they agree on what an unresolved field looks like.
+    /// Blank hostnames and zero ports count as "not resolved yet". Shared by
+    /// every backend so they agree on what an unresolved field looks like.
     pub fn resolved(
         name: &str,
         service_type: &str,
@@ -140,23 +198,45 @@ impl Entry {
         record.addresses = addresses;
         record.port = port.filter(|port| *port != 0);
         record.txt = txt;
-        record.with_instance_id()
+        record
     }
 
-    pub fn with_instance_id(mut self) -> Self {
-        let mut id = self.pending_id();
-        if self.has_instance_data() {
-            // A logical service is identified by host and port, not by its
-            // addresses: a service's address set can change (records added/removed)
-            // without it becoming a different service, so addresses stay out of the id.
-            id.instance = Some((self.hostname.clone().unwrap_or_default(), self.port));
-        }
-        self.id = id;
+    /// Name the occurrence this entry describes. Adapters that can tell their
+    /// occurrences apart call this so that updates and removals address exactly
+    /// one of them; adapters that cannot pass `None` and fall back to endpoint
+    /// identity.
+    pub fn with_occurrence(mut self, occurrence: Option<OccurrenceId>) -> Self {
+        self.occurrence = occurrence;
         self
     }
 
-    pub fn pending_id(&self) -> EntryId {
-        EntryId::registration(
+    /// The adapter's name for this occurrence, if it gave one.
+    pub fn occurrence(&self) -> Option<OccurrenceId> {
+        self.occurrence
+    }
+
+    /// This entry's identity, derived from its current fields. An adapter's own
+    /// occurrence name wins when present: it survives the endpoint changing, so
+    /// re-resolving one occurrence updates it in place instead of forking a
+    /// duplicate. Without one, the resolved endpoint discriminates.
+    pub fn id(&self) -> EntryId {
+        let occurrence = match (self.occurrence, self.has_instance_data()) {
+            (Some(named), _) => Occurrence::Named(named),
+            (None, true) => Occurrence::Endpoint {
+                hostname: self.hostname.clone().unwrap_or_default(),
+                port: self.port,
+            },
+            (None, false) => Occurrence::Pending,
+        };
+        EntryId {
+            registration: self.registration(),
+            occurrence,
+        }
+    }
+
+    /// The registration this entry is an occurrence of.
+    pub fn registration(&self) -> Registration {
+        Registration::new(
             self.name.clone(),
             self.service_type.clone(),
             self.domain.clone(),
@@ -285,6 +365,10 @@ pub fn group_entries(records: &[Entry], mode: GroupingMode) -> Vec<EntryGroup> {
                     .then_with(|| a.hostname.cmp(&b.hostname))
                     .then_with(|| a.addresses.cmp(&b.addresses))
                     .then_with(|| a.port.cmp(&b.port))
+                    // Two occurrences of one registration can agree on every
+                    // field above and differ only in who named them; order them
+                    // anyway so the rendered list does not shuffle.
+                    .then_with(|| a.occurrence.cmp(&b.occurrence))
             });
             let first = instances[0].clone();
             let label = group_label(&first, mode);
@@ -595,41 +679,113 @@ mod tests {
     }
 
     #[test]
-    fn pending_record_has_no_instance_identity_until_resolved() {
-        let pending = Entry::new("alpha", "_ssh._tcp", "local").with_instance_id();
-        assert_eq!(pending.id, pending.pending_id());
-        assert_eq!(pending.id.instance, None);
+    fn pending_record_has_no_occurrence_identity_until_resolved() {
+        let pending = Entry::new("alpha", "_ssh._tcp", "local");
+        assert_eq!(pending.id(), EntryId::pending(pending.registration()));
+        assert!(pending.id().is_pending());
         assert!(!pending.has_instance_data());
 
-        let resolved = resolved("alpha", "_ssh._tcp").with_instance_id();
-        assert_eq!(
-            resolved.id.instance,
-            Some(("alpha.local".to_string(), Some(22)))
-        );
+        // Resolving gives the entry an endpoint, so it is an occurrence of the
+        // registration rather than a placeholder for it.
+        let resolved = resolved("alpha", "_ssh._tcp");
+        assert!(!resolved.id().is_pending());
+        assert_ne!(resolved.id(), pending.id());
         assert!(resolved.has_instance_data());
     }
 
     #[test]
-    fn registration_key_is_the_name_type_domain_triple() {
-        let resolved = resolved("alpha", "_ssh._tcp").with_instance_id();
+    fn registration_is_the_name_type_domain_triple() {
+        let resolved = resolved("alpha", "_ssh._tcp");
         assert_eq!(
-            resolved.id.registration_key(),
-            ("alpha", "_ssh._tcp", "local")
+            *resolved.id().registration(),
+            Registration::new("alpha", "_ssh._tcp", "local")
         );
+        // Every occurrence id of one registration reports the same registration.
         assert_eq!(
-            resolved.id.registration_key(),
-            resolved.pending_id().registration_key()
+            resolved.id().registration(),
+            &Entry::new("alpha", "_ssh._tcp", "local").registration()
         );
+    }
+
+    fn on_interface(name: &str, addr: &str, index: u32) -> Entry {
+        let mut record = Entry::new(name, "_ssh._tcp", "local");
+        record.hostname = Some(format!("{name}.local"));
+        record.addresses = vec![addr.parse().unwrap()];
+        record.port = Some(22);
+        record.with_occurrence(Some(OccurrenceId(NonZeroU32::new(index).unwrap())))
+    }
+
+    #[test]
+    fn occurrences_differing_only_by_adapter_name_are_not_equal() {
+        let wired = on_interface("alpha", "10.0.0.1", 1);
+        let wireless = on_interface("alpha", "10.0.0.2", 2);
+
+        // Same registration and endpoint; the adapter's name is all that
+        // separates them, and it must be enough.
+        assert_eq!(wired.registration(), wireless.registration());
+        assert_eq!(wired.hostname, wireless.hostname);
+        assert_eq!(wired.port, wireless.port);
+        assert_ne!(wired.id(), wireless.id());
+    }
+
+    #[test]
+    fn a_named_occurrence_keeps_its_id_when_its_endpoint_or_addresses_change() {
+        let before = on_interface("alpha", "10.0.0.1", 1);
+
+        let mut after = on_interface("alpha", "10.0.0.2", 1);
+        after.addresses.push("10.0.0.3".parse().unwrap());
+        after.hostname = Some("moved.local".to_string());
+        after.port = Some(2222);
+        after.txt.insert("path".to_string(), "/admin".to_string());
+
+        // Re-resolving one occurrence updates it in place rather than forking a
+        // duplicate, however much of its data moved.
+        assert_eq!(before.id(), after.id());
+    }
+
+    #[test]
+    fn without_an_adapter_name_the_endpoint_still_separates_occurrences() {
+        let mut first = Entry::new("alpha", "_ssh._tcp", "local");
+        first.hostname = Some("a.local".to_string());
+        first.port = Some(22);
+        let mut second = Entry::new("alpha", "_ssh._tcp", "local");
+        second.hostname = Some("b.local".to_string());
+        second.port = Some(22);
+
+        assert_ne!(first.id(), second.id());
+        // Addresses are not identity: a service's address set can change
+        // without it becoming a different service.
+        let mut readdressed = first.clone();
+        readdressed.addresses = vec!["10.0.0.9".parse().unwrap()];
+        assert_eq!(first.id(), readdressed.id());
+    }
+
+    #[test]
+    fn occurrences_of_one_registration_group_into_one_logical_service() {
+        let groups = group_entries(
+            &[
+                on_interface("alpha", "10.0.0.1", 1),
+                on_interface("alpha", "10.0.0.2", 2),
+            ],
+            GroupingMode::LogicalService,
+        );
+
+        // Grouping is presentation: it merges the occurrences for display
+        // without erasing the identity that keeps them independently removable.
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "alpha");
+        assert_eq!(groups[0].instances.len(), 2);
+        assert_ne!(groups[0].instances[0].id(), groups[0].instances[1].id());
     }
 
     #[test]
     fn separator_characters_in_names_cannot_collide_ids() {
         // With a joined-string id, `a|b` + `c` and `a` + `b|c` were equal.
-        let first = Entry::new("a|b", "c", "local").with_instance_id();
-        let second = Entry::new("a", "b|c", "local").with_instance_id();
+        let first = Entry::new("a|b", "c", "local");
+        let second = Entry::new("a", "b|c", "local");
 
-        assert_ne!(first.id, second.id);
-        assert_ne!(first.id.registration_key(), second.id.registration_key());
+        assert_ne!(first.id(), second.id());
+        assert_ne!(first.registration(), second.registration());
     }
 
     #[test]

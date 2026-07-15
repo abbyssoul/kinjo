@@ -206,17 +206,25 @@ impl App {
         while let Ok(event) = self.discovery_rx.try_recv() {
             match event {
                 DiscoveryEvent::Upsert(record) => {
-                    if record.has_instance_data() {
-                        self.records.remove(&record.pending_id());
+                    let id = record.id();
+                    // A real occurrence supersedes the registration's
+                    // unresolved placeholder, if one is still listed.
+                    if !id.is_pending() {
+                        self.records
+                            .remove(&EntryId::pending(record.registration()));
                     }
-                    self.records.insert(record.id.clone(), record);
+                    self.records.insert(id, record);
                     changed = true;
                 }
                 DiscoveryEvent::Remove(id) => {
-                    let registration_key = id.registration_key();
+                    // Exactly the named occurrence: siblings of the same
+                    // registration on other interfaces stay live.
+                    changed |= self.records.remove(&id).is_some();
+                }
+                DiscoveryEvent::RemoveRegistration(registration) => {
                     let before = self.records.len();
                     self.records
-                        .retain(|record_id, _| record_id.registration_key() != registration_key);
+                        .retain(|id, _| *id.registration() != registration);
                     changed |= self.records.len() != before;
                 }
                 DiscoveryEvent::Status(status) => {
@@ -867,11 +875,14 @@ fn find_selection<T, K: PartialEq>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
+    use std::{net::IpAddr, num::NonZeroU32, sync::mpsc};
 
     use super::*;
-    use crate::plumber::Matcher;
     use crate::ui::keymap::KeyBindings;
+    use crate::{
+        discovery::{OccurrenceId, Registration},
+        plumber::Matcher,
+    };
 
     fn test_cli() -> Cli {
         Cli {
@@ -889,12 +900,11 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
 
-        let pending = Entry::new("workstation", "_ssh._tcp", "local").with_instance_id();
+        let pending = Entry::new("workstation", "_ssh._tcp", "local");
         let mut resolved = Entry::new("workstation", "_ssh._tcp", "local");
         resolved.hostname = Some("workstation.local".to_string());
         resolved.addresses = vec!["192.168.1.20".parse().unwrap()];
         resolved.port = Some(22);
-        let resolved = resolved.with_instance_id();
 
         tx.send(DiscoveryEvent::Upsert(pending)).unwrap();
         tx.send(DiscoveryEvent::Upsert(resolved)).unwrap();
@@ -946,12 +956,9 @@ mode = "execute"
         beta.port = Some(22);
         let web = Entry::new("web", "_http._tcp", "local");
 
-        tx.send(DiscoveryEvent::Upsert(alpha.with_instance_id()))
-            .unwrap();
-        tx.send(DiscoveryEvent::Upsert(beta.with_instance_id()))
-            .unwrap();
-        tx.send(DiscoveryEvent::Upsert(web.with_instance_id()))
-            .unwrap();
+        tx.send(DiscoveryEvent::Upsert(alpha)).unwrap();
+        tx.send(DiscoveryEvent::Upsert(beta)).unwrap();
+        tx.send(DiscoveryEvent::Upsert(web)).unwrap();
         app.drain_discovery();
 
         app.filter.grouping = GroupingMode::Command;
@@ -976,8 +983,7 @@ mode = "execute"
         ];
         service.port = Some(22);
 
-        tx.send(DiscoveryEvent::Upsert(service.with_instance_id()))
-            .unwrap();
+        tx.send(DiscoveryEvent::Upsert(service)).unwrap();
 
         app.drain_discovery();
 
@@ -1037,8 +1043,7 @@ mode = "execute"
         let (_tx, rx) = mpsc::channel();
         let mut app = App::new(test_cli(), matcher, KeyBindings::default(), rx);
         for record in records {
-            let record = record.with_instance_id();
-            app.records.insert(record.id.clone(), record);
+            app.records.insert(record.id(), record);
         }
         app.recompute_visible();
         app
@@ -1378,26 +1383,146 @@ mode = "execute"
         assert_eq!(app.visible_groups.len(), 2);
     }
 
+    /// Two occurrences of one registration — the same service announced on two
+    /// interfaces — identical but for the occurrence name and address.
+    fn on_interface(name: &str, addr: &str, index: u32) -> Entry {
+        let mut record = ssh(name, addr);
+        record.addresses = vec![addr.parse().unwrap()];
+        record.with_occurrence(Some(OccurrenceId(NonZeroU32::new(index).unwrap())))
+    }
+
     #[test]
-    fn remove_event_drops_records_sharing_a_registration_key() {
+    fn occurrences_of_one_registration_coexist_with_their_own_addresses() {
+        let mut app = app_with(
+            Matcher::default(),
+            vec![
+                on_interface("alpha", "10.0.0.1", 1),
+                on_interface("alpha", "10.0.0.2", 2),
+            ],
+        );
+        app.recompute_visible();
+
+        // Same name/type/domain/host/port: only the interface and address
+        // differ, so neither occurrence may overwrite the other.
+        assert_eq!(app.records.len(), 2);
+        let addresses: Vec<_> = app
+            .records
+            .values()
+            .flat_map(|record| record.addresses.clone())
+            .collect();
+        assert!(addresses.contains(&"10.0.0.1".parse().unwrap()));
+        assert!(addresses.contains(&"10.0.0.2".parse().unwrap()));
+
+        // They still read as one logical service.
+        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.visible_groups[0].instances.len(), 2);
+    }
+
+    #[test]
+    fn removing_one_occurrence_preserves_its_sibling() {
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
 
-        tx.send(DiscoveryEvent::Upsert(
-            ssh("alpha", "10.0.0.1").with_instance_id(),
+        tx.send(DiscoveryEvent::Upsert(on_interface("alpha", "10.0.0.1", 1)))
+            .unwrap();
+        tx.send(DiscoveryEvent::Upsert(on_interface("alpha", "10.0.0.2", 2)))
+            .unwrap();
+        app.drain_discovery();
+        assert_eq!(app.records.len(), 2);
+
+        tx.send(DiscoveryEvent::Remove(
+            on_interface("alpha", "10.0.0.1", 1).id(),
         ))
         .unwrap();
         app.drain_discovery();
-        assert_eq!(app.records.len(), 1);
 
-        let removal = Entry::new("alpha", "_ssh._tcp", "local")
-            .with_instance_id()
-            .id;
-        tx.send(DiscoveryEvent::Remove(removal)).unwrap();
+        // The logical service survives with the live occurrence's address.
+        assert_eq!(app.records.len(), 1);
+        assert_eq!(app.visible_groups.len(), 1);
+        let survivor = app.records.values().next().expect("surviving occurrence");
+        assert_eq!(
+            survivor.addresses,
+            vec!["10.0.0.2".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn registration_removal_clears_every_occurrence() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
+
+        tx.send(DiscoveryEvent::Upsert(on_interface("alpha", "10.0.0.1", 1)))
+            .unwrap();
+        tx.send(DiscoveryEvent::Upsert(on_interface("alpha", "10.0.0.2", 2)))
+            .unwrap();
+        // An occurrence with no adapter name at all, as a zeroconf upsert has.
+        tx.send(DiscoveryEvent::Upsert(ssh("alpha", "10.0.0.3")))
+            .unwrap();
+        tx.send(DiscoveryEvent::Upsert(ssh("beta", "10.0.0.4")))
+            .unwrap();
+        app.drain_discovery();
+        // Three coexisting occurrences of `alpha`, plus `beta`.
+        assert_eq!(app.records.len(), 4);
+
+        // The fallback an adapter uses when it cannot name what it lost.
+        tx.send(DiscoveryEvent::RemoveRegistration(Registration::new(
+            "alpha",
+            "_ssh._tcp",
+            "local",
+        )))
+        .unwrap();
         app.drain_discovery();
 
-        assert!(app.records.is_empty());
-        assert!(app.visible_groups.is_empty());
+        assert_eq!(app.records.len(), 1);
+        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.visible_groups[0].label, "beta");
+    }
+
+    #[test]
+    fn removing_an_unknown_occurrence_leaves_the_registration_alone() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
+
+        tx.send(DiscoveryEvent::Upsert(on_interface("alpha", "10.0.0.1", 1)))
+            .unwrap();
+        app.drain_discovery();
+
+        // A removal naming an occurrence that was never listed must not be
+        // widened into "remove the registration".
+        tx.send(DiscoveryEvent::Remove(
+            on_interface("alpha", "10.0.0.9", 7).id(),
+        ))
+        .unwrap();
+        app.drain_discovery();
+
+        assert_eq!(app.records.len(), 1);
+    }
+
+    #[test]
+    fn upserting_an_occurrence_replaces_it_across_endpoint_and_txt_changes() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
+
+        tx.send(DiscoveryEvent::Upsert(on_interface("alpha", "10.0.0.1", 1)))
+            .unwrap();
+
+        // The same occurrence re-resolved: new address, port, and TXT data.
+        let mut moved = on_interface("alpha", "10.0.0.9", 1);
+        moved.port = Some(2222);
+        moved.txt.insert("path".to_string(), "/admin".to_string());
+        tx.send(DiscoveryEvent::Upsert(moved)).unwrap();
+        app.drain_discovery();
+
+        // An adapter-named occurrence keeps its identity when its endpoint
+        // moves, so this replaced the record instead of forking a duplicate.
+        assert_eq!(app.records.len(), 1);
+        let record = app.records.values().next().expect("record");
+        assert_eq!(
+            record.addresses,
+            vec!["10.0.0.9".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(record.port, Some(2222));
+        assert_eq!(record.txt.get("path").map(String::as_str), Some("/admin"));
     }
 
     #[test]
@@ -1506,9 +1631,7 @@ mode = "execute"
 
         // Events from the replacement backend repopulate the list.
         spawned.lock().unwrap()[0]
-            .send(DiscoveryEvent::Upsert(
-                ssh("gamma", "10.0.0.3").with_instance_id(),
-            ))
+            .send(DiscoveryEvent::Upsert(ssh("gamma", "10.0.0.3")))
             .unwrap();
         app.drain_discovery();
         assert_eq!(app.visible_groups.len(), 1);

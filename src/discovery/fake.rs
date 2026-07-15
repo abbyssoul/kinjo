@@ -69,12 +69,7 @@ fn fake_records(domain: &str) -> Vec<Entry> {
 
     let unresolved = Entry::new("pending-printer", "_ipp._tcp", domain);
 
-    vec![
-        ssh.with_instance_id(),
-        http.with_instance_id(),
-        https.with_instance_id(),
-        unresolved.with_instance_id(),
-    ]
+    vec![ssh, http, https, unresolved]
 }
 
 #[cfg(test)]
@@ -110,7 +105,7 @@ mod tests {
             match event {
                 DiscoveryEvent::Status(_) => statuses += 1,
                 DiscoveryEvent::Upsert(record) => upserts.push(record),
-                DiscoveryEvent::Remove(_) => {}
+                DiscoveryEvent::Remove(_) | DiscoveryEvent::RemoveRegistration(_) => {}
             }
         }
 
