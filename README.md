@@ -252,6 +252,18 @@ services, hosts and the services they offer, discovered service types, or
 configured commands and the services they match. The list also supports fuzzy
 text search and service type filtering.
 
+Each tab shows how many rows it lists: logical services, hosts (plus one row for
+the registrations that have not resolved a host yet), distinct service types, or
+configured commands. The aggregate tabs report only what is true of a whole row.
+A host's details name the host and list every service on it — each with its own
+type, port, and TXT data — rather than presenting one service's fields as the
+host's. A service type's details likewise list every host offering it. Actions
+always run against a concrete discovered service, whichever tab they start from.
+
+The `s` (same-host) filter needs a row with a single host, so it is offered in
+the services and hosts tabs. The types and commands tabs report it unavailable
+instead of guessing a host; an active filter can be cleared from any tab.
+
 Keybindings are fully customizable: all built-in UI commands can be rebound with
 a keybindings config file. See [docs/keybindings.md](docs/keybindings.md) for
 the full keybinding reference and examples.

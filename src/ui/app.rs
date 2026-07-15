@@ -19,8 +19,8 @@ use ratatui::{
 
 use crate::{
     discovery::{
-        DiscoveryConfig, DiscoveryEvent, DiscoverySession, Entry, EntryGroup, EntryId,
-        GroupingMode, SessionPoll, SessionState, group_entries,
+        BrowseMode, DiscoveryConfig, DiscoveryEvent, DiscoverySession, Entry, EntryGroup, EntryId,
+        GroupingMode, RowHost, SessionPoll, SessionState, browse_groups, browse_row_count,
     },
     plumber::{self, ActionMode, CommandConfig, MatchResult, PreparedCommand, RuleEngine},
 };
@@ -88,6 +88,10 @@ pub struct App {
     /// Sorted service types across all discovered records, recomputed with
     /// the visible groups (rendering reads it several times per frame).
     pub service_types: Vec<String>,
+    /// How many rows each top-panel tab lists, in [`GroupingMode::TABS`] order.
+    /// Recomputed with the visible rows from the same filtered records, so a
+    /// tab's count always matches the list it would show.
+    pub tab_counts: [usize; GroupingMode::TABS.len()],
     pub ticks: u64,
     /// Rows of the "group by command" view; populated only in that grouping mode.
     pub command_groups: Vec<CommandGroup>,
@@ -140,6 +144,7 @@ impl App {
             discovery_factory: None,
             group_matches: Vec::new(),
             service_types: Vec::new(),
+            tab_counts: [0; GroupingMode::TABS.len()],
             ticks: 0,
             command_groups: Vec::new(),
             service_picker_index: 0,
@@ -281,27 +286,42 @@ impl App {
         self.service_types = FilterState::discovered_types(&records);
         self.filter.sync_service_types(&records);
         let filtered = self.filter.apply(&records);
+        self.tab_counts = self.count_tabs(&filtered);
 
-        if self.filter.grouping == GroupingMode::Command {
+        // The command tab groups configured rules rather than projecting the
+        // discovered entries, so it has its own row builder.
+        let Some(browse) = self.filter.grouping.browse_mode() else {
             self.recompute_command_groups(&filtered);
             return;
-        }
+        };
 
         self.command_groups = Vec::new();
         let previous = self
             .visible_groups
             .get(self.selected)
-            .map(|group| group.id.clone());
-        self.visible_groups = group_entries(&filtered, self.filter.grouping);
+            .map(|group| group.id().clone());
+        self.visible_groups = browse_groups(&filtered, browse);
         self.group_matches = self
             .visible_groups
             .iter()
             .map(|group| self.matcher.matches_group(group))
             .collect();
-        match find_selection(&self.visible_groups, previous, |group| group.id.clone()) {
+        // Structured row identity, not the list position: the cursor stays on
+        // the row the user chose even when rows appear, vanish, or re-sort.
+        match find_selection(&self.visible_groups, previous, |group| group.id().clone()) {
             Some(index) => self.selected = index,
             None => self.clamp_selection(),
         }
+    }
+
+    /// How many rows each tab would list, in [`GroupingMode::TABS`] order: the
+    /// browse tabs count the rows of their projection of `filtered`, and the
+    /// command tab counts the configured rules it lists.
+    fn count_tabs(&self, filtered: &[Entry]) -> [usize; GroupingMode::TABS.len()] {
+        GroupingMode::TABS.map(|mode| match mode.browse_mode() {
+            Some(browse) => browse_row_count(filtered, browse),
+            None => self.matcher.command_count(),
+        })
     }
 
     /// Build the command-grouped rows: each configured command paired with the
@@ -312,7 +332,7 @@ impl App {
             .get(self.selected)
             .map(|group| group.command.name.clone());
 
-        let service_groups = group_entries(filtered, GroupingMode::LogicalService);
+        let service_groups = browse_groups(filtered, BrowseMode::LogicalService);
         let mut command_groups: Vec<CommandGroup> = self
             .matcher
             .commands()
@@ -636,7 +656,7 @@ impl App {
             .unwrap_or_default();
         match matches.len() {
             0 => {
-                self.status = format!("no configured actions match `{}`", group.label);
+                self.status = format!("no configured actions match `{}`", group.label());
                 Ok(None)
             }
             1 => self.choose_action(matches.into_iter().next().unwrap()),
@@ -685,7 +705,7 @@ impl App {
             .into_iter()
             .find(|result| result.command.name == command.name)
         else {
-            self.status = format!("`{}` no longer matches `{}`", command.name, service.label);
+            self.status = format!("`{}` no longer matches `{}`", command.name, service.label());
             self.return_to_browse();
             return Ok(None);
         };
@@ -851,28 +871,45 @@ impl App {
         Ok(None)
     }
 
+    /// Narrow the list to the selected row's host, or clear an active narrowing.
+    ///
+    /// Only a projection whose rows have one invariant hostname can offer this:
+    /// the logical-service and host views. The service-type view's rows span
+    /// several hosts and the command view lists rules rather than discovered
+    /// entries, so both report the filter unavailable instead of silently
+    /// filtering by some child's host.
     fn toggle_same_host_filter(&mut self) {
-        if self.filter.grouping == GroupingMode::Command && self.filter.host_filter.is_none() {
-            self.status = "same-host filter is unavailable in command view".to_string();
-            return;
-        }
         if self.filter.host_filter.is_some() {
             self.filter.clear_host_filter();
             self.status = "host filter cleared".to_string();
             self.recompute_visible();
             return;
         }
-        match self
-            .visible_groups
-            .get(self.selected)
-            .and_then(|group| group.hostname.clone())
-        {
-            Some(host) => {
+        // A `&'static str`, so the messages below borrow nothing from `self`.
+        let view = self.filter.grouping.label();
+        let unavailable =
+            |reason| format!("same-host filter is unavailable in the {view} view: {reason}");
+        if self.filter.grouping.browse_mode().is_none() {
+            self.status = unavailable("it lists commands, not discovered services");
+            return;
+        }
+        let Some(group) = self.visible_groups.get(self.selected) else {
+            self.status = "no row selected".to_string();
+            return;
+        };
+        match group.facts().host() {
+            RowHost::Resolved(host) => {
+                let host = host.to_string();
                 self.status = format!("filtering by host `{host}`");
                 self.filter.set_host_filter(host);
                 self.recompute_visible();
             }
-            None => self.status = "selected service has no resolved host yet".to_string(),
+            RowHost::Unresolved => {
+                self.status = "selected row has no resolved host yet".to_string();
+            }
+            RowHost::Varies => {
+                self.status = unavailable("its rows span several hosts");
+            }
         }
     }
 }
@@ -921,7 +958,7 @@ mod tests {
     use super::*;
     use crate::ui::keymap::KeyBindings;
     use crate::{
-        discovery::{OccurrenceId, Registration},
+        discovery::{OccurrenceId, Registration, RowServiceType, UNRESOLVED_HOST_LABEL},
         plumber::Matcher,
     };
 
@@ -959,10 +996,10 @@ mod tests {
 
         assert_eq!(app.records.len(), 1);
         assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].instances.len(), 1);
+        assert_eq!(app.visible_groups[0].instances().len(), 1);
         assert_eq!(
-            app.visible_groups[0].hostname.as_deref(),
-            Some("workstation.local")
+            app.visible_groups[0].facts().host(),
+            RowHost::Resolved("workstation.local")
         );
     }
 
@@ -1046,8 +1083,8 @@ mode = "execute"
         // One logical service that carries both of its addresses.
         assert_eq!(app.records.len(), 1);
         assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].instances.len(), 1);
-        assert_eq!(app.visible_groups[0].instances[0].addresses.len(), 2);
+        assert_eq!(app.visible_groups[0].instances().len(), 1);
+        assert_eq!(app.visible_groups[0].instances()[0].addresses.len(), 2);
     }
 
     // ── interaction harness ────────────────────────────────────────────────
@@ -1286,7 +1323,7 @@ mode = "execute"
         assert_eq!(app.mode, AppMode::Search);
         assert_eq!(app.filter.text_query, "z");
         assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].label, "zulu");
+        assert_eq!(app.visible_groups[0].label(), "zulu");
     }
 
     #[test]
@@ -1323,7 +1360,7 @@ mode = "execute"
         assert!(
             app.visible_groups
                 .iter()
-                .all(|g| g.service_type == "_ssh._tcp")
+                .all(|g| g.facts().service_type() == RowServiceType::Invariant("_ssh._tcp"))
         );
         assert_eq!(app.visible_groups.len(), 1);
     }
@@ -1417,8 +1454,8 @@ mode = "execute"
             vec![ssh_multi("alpha", &["10.0.0.1", "10.0.0.2"])],
         );
         assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].instances.len(), 1);
-        assert_eq!(app.visible_groups[0].instances[0].addresses.len(), 2);
+        assert_eq!(app.visible_groups[0].instances().len(), 1);
+        assert_eq!(app.visible_groups[0].instances()[0].addresses.len(), 2);
 
         assert!(send(&mut app, KeyCode::Enter).is_none());
         assert_eq!(app.mode, AppMode::InstancePicker);
@@ -1427,6 +1464,265 @@ mode = "execute"
         send(&mut app, KeyCode::Down);
         let command = send(&mut app, KeyCode::Enter).expect("instance chosen");
         assert_eq!(command.argv, vec!["echo", "10.0.0.2"]);
+    }
+
+    // ── mode-aware aggregate views ─────────────────────────────────────────
+
+    /// A service on `host` with its own type and port.
+    fn service_on(name: &str, service_type: &str, host: &str, port: u16) -> Entry {
+        let mut record = Entry::new(name, service_type, "local");
+        record.hostname = Some(host.to_string());
+        record.addresses = vec!["10.0.0.1".parse().unwrap()];
+        record.port = Some(port);
+        record
+    }
+
+    /// The tab count for `mode`, by its position in the tab bar.
+    fn tab_count(app: &App, mode: GroupingMode) -> usize {
+        let index = GroupingMode::TABS
+            .iter()
+            .position(|tab| *tab == mode)
+            .expect("a tab for the mode");
+        app.tab_counts[index]
+    }
+
+    #[test]
+    fn tab_counts_follow_their_exact_definitions() {
+        let app = app_with(
+            matcher_from(&[SSH, PING]),
+            vec![
+                // Two services on one host, one on another, one unresolved.
+                service_on("shell", "_ssh._tcp", "nas.local", 22),
+                service_on("site", "_http._tcp", "nas.local", 80),
+                service_on("shell", "_ssh._tcp", "pi.local", 22),
+                Entry::new("ghost", "_ipp._tcp", "local"),
+            ],
+        );
+
+        // Logical-service rows, not the occurrences behind them.
+        assert_eq!(tab_count(&app, GroupingMode::LogicalService), 4);
+        // Resolved host rows plus the single unresolved row.
+        assert_eq!(tab_count(&app, GroupingMode::Host), 3);
+        // Distinct service types.
+        assert_eq!(tab_count(&app, GroupingMode::ServiceType), 3);
+        // Configured rules, whatever was discovered.
+        assert_eq!(tab_count(&app, GroupingMode::Command), 2);
+    }
+
+    #[test]
+    fn every_tab_count_matches_the_rows_that_tab_lists() {
+        let mut app = app_with(
+            matcher_from(&[SSH]),
+            vec![
+                service_on("shell", "_ssh._tcp", "nas.local", 22),
+                service_on("site", "_http._tcp", "nas.local", 80),
+                service_on("shell", "_ssh._tcp", "pi.local", 22),
+                Entry::new("ghost", "_ipp._tcp", "local"),
+            ],
+        );
+
+        for mode in GroupingMode::TABS {
+            app.filter.grouping = mode;
+            app.recompute_visible();
+            let rows = if mode == GroupingMode::Command {
+                app.command_groups.len()
+            } else {
+                app.visible_groups.len()
+            };
+            assert_eq!(tab_count(&app, mode), rows, "{mode:?} count vs its rows");
+        }
+    }
+
+    #[test]
+    fn a_host_row_offers_its_services_without_borrowing_one_childs_metadata() {
+        // One host offering SSH and HTTP on different ports.
+        let mut app = app_with(
+            matcher_from(&[SSH]),
+            vec![
+                service_on("shell", "_ssh._tcp", "nas.local", 22),
+                service_on("site", "_http._tcp", "nas.local", 80),
+            ],
+        );
+        app.filter.grouping = GroupingMode::Host;
+        app.recompute_visible();
+
+        assert_eq!(app.visible_groups.len(), 1);
+        let host = &app.visible_groups[0];
+        assert_eq!(host.label(), "nas.local");
+        // The row states the host; the differing types stay on the children.
+        assert_eq!(host.facts().host(), RowHost::Resolved("nas.local"));
+        assert_eq!(host.facts().service_type(), RowServiceType::Varies);
+        assert_eq!(host.logical_service_count(), 2);
+
+        // Invoking the aggregate runs the command against the concrete child
+        // that matches it, not against the row.
+        let command = send(&mut app, KeyCode::Enter).expect("the ssh child runs");
+        assert_eq!(command.argv, vec!["ssh", "nas.local"]);
+    }
+
+    #[test]
+    fn a_service_type_row_targets_the_concrete_child_the_user_picks() {
+        // One type offered by two hosts with different addresses and ports.
+        let mut alpha = service_on("alpha", "_ssh._tcp", "alpha.local", 22);
+        alpha.addresses = vec!["10.0.0.1".parse().unwrap()];
+        let mut beta = service_on("beta", "_ssh._tcp", "beta.local", 2222);
+        beta.addresses = vec!["10.0.0.2".parse().unwrap()];
+
+        let mut app = app_with(matcher_from(&[PING_ADDR]), vec![alpha, beta]);
+        app.filter.grouping = GroupingMode::ServiceType;
+        app.recompute_visible();
+
+        assert_eq!(app.visible_groups.len(), 1);
+        let by_type = &app.visible_groups[0];
+        assert_eq!(by_type.label(), "_ssh._tcp");
+        // No host is type-wide, so the row names none.
+        assert_eq!(by_type.facts().host(), RowHost::Varies);
+        assert_eq!(by_type.resolved_host_count(), 2);
+
+        // The rule needs a concrete address, so the aggregate offers up its
+        // children rather than answering for them.
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::InstancePicker);
+        send(&mut app, KeyCode::Down);
+        let command = send(&mut app, KeyCode::Enter).expect("the chosen child runs");
+        assert_eq!(command.argv, vec!["echo", "10.0.0.2"]);
+    }
+
+    #[test]
+    fn a_command_row_runs_against_a_concrete_service() {
+        let mut app = app_with(
+            matcher_from(&[SSH]),
+            vec![
+                service_on("alpha", "_ssh._tcp", "alpha.local", 22),
+                service_on("beta", "_ssh._tcp", "beta.local", 22),
+            ],
+        );
+        app.filter.grouping = GroupingMode::Command;
+        app.recompute_visible();
+
+        assert_eq!(app.command_groups[0].services.len(), 2);
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::ServicePicker);
+        let command = send(&mut app, KeyCode::Enter).expect("the picked service runs");
+        assert_eq!(command.argv, vec!["ssh", "alpha.local"]);
+    }
+
+    #[test]
+    fn same_host_filter_is_offered_only_by_invariant_host_projections() {
+        let mut app = app_with(
+            matcher_from(&[SSH]),
+            vec![
+                service_on("shell", "_ssh._tcp", "nas.local", 22),
+                service_on("site", "_http._tcp", "pi.local", 80),
+            ],
+        );
+
+        // A host row has one hostname by construction: the filter applies.
+        app.filter.grouping = GroupingMode::Host;
+        app.recompute_visible();
+        send(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.filter.host_filter.as_deref(), Some("nas.local"));
+        send(&mut app, KeyCode::Char('s'));
+        assert!(app.filter.host_filter.is_none());
+
+        // A service-type row spans hosts: the filter must say so rather than
+        // silently filter by whichever child happens to sort first.
+        app.filter.grouping = GroupingMode::ServiceType;
+        app.recompute_visible();
+        send(&mut app, KeyCode::Char('s'));
+        assert!(app.filter.host_filter.is_none(), "no host was filtered by");
+        assert!(app.status.contains("unavailable"), "status: {}", app.status);
+        assert!(app.status.contains("span several hosts"));
+
+        // The command view lists rules, not discovered services.
+        app.filter.grouping = GroupingMode::Command;
+        app.recompute_visible();
+        send(&mut app, KeyCode::Char('s'));
+        assert!(app.filter.host_filter.is_none());
+        assert!(app.status.contains("unavailable"));
+    }
+
+    #[test]
+    fn an_active_host_filter_can_be_cleared_from_any_view() {
+        let mut app = app_with(
+            matcher_from(&[SSH]),
+            vec![service_on("shell", "_ssh._tcp", "nas.local", 22)],
+        );
+        send(&mut app, KeyCode::Char('s'));
+        assert_eq!(app.filter.host_filter.as_deref(), Some("nas.local"));
+
+        // Clearing describes the filter, not the row under the cursor, so the
+        // views that cannot set one can still lift it.
+        app.filter.grouping = GroupingMode::Command;
+        app.recompute_visible();
+        send(&mut app, KeyCode::Char('s'));
+
+        assert!(app.filter.host_filter.is_none());
+        assert!(app.status.contains("host filter cleared"));
+    }
+
+    #[test]
+    fn an_unresolved_host_row_never_collides_with_the_sentinel_hostname() {
+        let mut impostor = Entry::new("impostor", "_ssh._tcp", "local");
+        impostor.hostname = Some(UNRESOLVED_HOST_LABEL.to_string());
+        impostor.port = Some(22);
+
+        let mut app = app_with(
+            matcher_from(&[SSH]),
+            vec![impostor, Entry::new("ghost", "_ipp._tcp", "local")],
+        );
+        app.filter.grouping = GroupingMode::Host;
+        app.recompute_visible();
+
+        // Two rows reading alike: the impostor's resolved host, and the row of
+        // registrations that have resolved none.
+        assert_eq!(app.visible_groups.len(), 2);
+        assert!(
+            app.visible_groups
+                .iter()
+                .all(|group| group.label() == UNRESOLVED_HOST_LABEL)
+        );
+
+        // The impostor is a real host, so it can be filtered by.
+        send(&mut app, KeyCode::Char('s'));
+        assert_eq!(
+            app.filter.host_filter.as_deref(),
+            Some(UNRESOLVED_HOST_LABEL)
+        );
+        assert_eq!(app.visible_groups.len(), 1);
+        send(&mut app, KeyCode::Char('s'));
+
+        // The unresolved row is not a host and has nothing to filter by.
+        app.selected = 1;
+        send(&mut app, KeyCode::Char('s'));
+        assert!(app.filter.host_filter.is_none());
+        assert!(
+            app.status.contains("no resolved host"),
+            "status: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn selection_survives_recomputation_by_structured_row_identity() {
+        let mut app = app_with(
+            matcher_from(&[SSH]),
+            vec![
+                service_on("shell", "_ssh._tcp", "nas.local", 22),
+                service_on("shell", "_ssh._tcp", "pi.local", 22),
+            ],
+        );
+        // Two rows labelled `shell`; the cursor sits on the second.
+        send(&mut app, KeyCode::Down);
+        let chosen = app.visible_groups[app.selected].id().clone();
+
+        // A new row sorts in ahead of the selection.
+        let earlier = service_on("alpha", "_ssh._tcp", "alpha.local", 22);
+        app.records.insert(earlier.id(), earlier);
+        app.recompute_visible();
+
+        assert_eq!(app.selected, 2, "the cursor followed its row");
+        assert_eq!(*app.visible_groups[app.selected].id(), chosen);
     }
 
     #[test]
@@ -1477,7 +1773,7 @@ mode = "execute"
 
         // They still read as one logical service.
         assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].instances.len(), 2);
+        assert_eq!(app.visible_groups[0].instances().len(), 2);
     }
 
     #[test]
@@ -1547,7 +1843,7 @@ mode = "execute"
 
         assert_eq!(app.records.len(), 1);
         assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].label, "beta");
+        assert_eq!(app.visible_groups[0].label(), "beta");
     }
 
     #[test]
@@ -1684,7 +1980,7 @@ mode = "execute"
             .unwrap();
         app.drain_discovery();
         assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].label, "gamma");
+        assert_eq!(app.visible_groups[0].label(), "gamma");
     }
 
     #[test]
@@ -1875,7 +2171,7 @@ mode = "execute"
             .unwrap();
         app.drain_discovery();
         assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].label, "gamma");
+        assert_eq!(app.visible_groups[0].label(), "gamma");
     }
 
     /// The session owns its receiver, so a replaced session's events cannot
@@ -1911,7 +2207,8 @@ mode = "execute"
 
         assert_eq!(app.visible_groups.len(), 1);
         assert_eq!(
-            app.visible_groups[0].label, "fresh",
+            app.visible_groups[0].label(),
+            "fresh",
             "only the current session's events may populate the list"
         );
     }

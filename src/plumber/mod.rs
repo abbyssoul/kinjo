@@ -66,7 +66,7 @@ impl Matcher {
             .iter()
             .filter_map(|command| {
                 let matching_records: Vec<Entry> = group
-                    .instances
+                    .instances()
                     .iter()
                     .flat_map(|record| command.candidates(record))
                     .collect();
@@ -441,9 +441,9 @@ mode = "execute"
         let matcher = builder.build();
         let mut record = Entry::new("alpha", "_ssh._tcp", "local");
         record.hostname = Some("alpha.local".to_string());
-        let group = crate::discovery::group_entries(
+        let group = crate::discovery::browse_groups(
             &[record],
-            crate::discovery::GroupingMode::LogicalService,
+            crate::discovery::BrowseMode::LogicalService,
         )
         .remove(0);
         assert_eq!(matcher.matches_group(&group).len(), 1);
@@ -485,9 +485,9 @@ mode = "fork"
         wrong_txt
             .txt
             .insert("path".to_string(), "ipp/print".to_string());
-        let group = crate::discovery::group_entries(
+        let group = crate::discovery::browse_groups(
             &[matching, wrong_txt],
-            crate::discovery::GroupingMode::ServiceType,
+            crate::discovery::BrowseMode::ServiceType,
         )
         .remove(0);
 
@@ -522,9 +522,9 @@ mode = "execute"
             .unwrap();
         let matcher = builder.build();
         let record = Entry::new("alpha", "_ssh._tcp", "local");
-        let group = crate::discovery::group_entries(
+        let group = crate::discovery::browse_groups(
             &[record],
-            crate::discovery::GroupingMode::LogicalService,
+            crate::discovery::BrowseMode::LogicalService,
         )
         .remove(0);
 
@@ -587,9 +587,9 @@ mode = "execute"
         record.hostname = Some("site.local".to_string());
         record.addresses = vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))];
         record.port = Some(8080);
-        let group = crate::discovery::group_entries(
+        let group = crate::discovery::browse_groups(
             &[record],
-            crate::discovery::GroupingMode::LogicalService,
+            crate::discovery::BrowseMode::LogicalService,
         )
         .remove(0);
 
@@ -641,12 +641,12 @@ mode = "execute"
         wireless.hostname = Some("rpi5-0.local".to_string());
         wireless.addresses = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 50, 245))];
         wireless.port = Some(9);
-        let group = crate::discovery::group_entries(
+        let group = crate::discovery::browse_groups(
             &[wired, wireless],
-            crate::discovery::GroupingMode::LogicalService,
+            crate::discovery::BrowseMode::LogicalService,
         )
         .remove(0);
-        assert_eq!(group.instances.len(), 2);
+        assert_eq!(group.instances().len(), 2);
 
         let matches = matcher.matches_group(&group);
 
@@ -680,7 +680,7 @@ mode = "execute"
             .map(|address| address.parse().unwrap())
             .collect();
         record.port = Some(9);
-        crate::discovery::group_entries(&[record], crate::discovery::GroupingMode::LogicalService)
+        crate::discovery::browse_groups(&[record], crate::discovery::BrowseMode::LogicalService)
             .remove(0)
     }
 
