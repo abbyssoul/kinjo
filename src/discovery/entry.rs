@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     num::NonZeroU32,
     time::Instant,
@@ -98,8 +99,69 @@ impl EntryId {
     }
 }
 
+/// The label shown for the row that collects registrations which have not
+/// resolved a host yet. It is display text only: [`HostKey::Unresolved`], not
+/// this string, is what groups those registrations, so a device advertising
+/// this exact hostname cannot join them.
+pub const UNRESOLVED_HOST_LABEL: &str = "<unresolved host>";
+
+/// Which host a row belongs to. A variant rather than an `Option<String>` so
+/// that "no host resolved yet" is a distinct identity from every hostname a
+/// device could advertise, including one equal to [`UNRESOLVED_HOST_LABEL`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntryGroupId(pub String);
+pub enum HostKey {
+    Resolved(String),
+    /// Ordered after every resolved host, which settles the order when a device
+    /// advertises [`UNRESOLVED_HOST_LABEL`] as its hostname and the two rows'
+    /// labels are identical.
+    Unresolved,
+}
+
+impl HostKey {
+    fn of(hostname: Option<&str>) -> Self {
+        match hostname {
+            Some(host) => HostKey::Resolved(host.to_string()),
+            None => HostKey::Unresolved,
+        }
+    }
+}
+
+/// Identity of one row of a browse projection.
+///
+/// Structured, not a joined string: a separator occurring inside a service name
+/// cannot shift a boundary and make two different rows compare equal — the same
+/// reasoning that gave [`EntryId`] a structured key. Being `Ord`, it is also the
+/// final sort key that makes row order total when labels collide, and the handle
+/// the UI re-finds a selected row by after a recomputation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EntryGroupId {
+    /// A logical service: everything its occurrences must agree on to be one
+    /// user-facing service.
+    LogicalService {
+        name: String,
+        service_type: String,
+        domain: String,
+        host: HostKey,
+        port: Option<u16>,
+    },
+    /// One host, or the single row collecting the registrations that have not
+    /// resolved a host yet.
+    Host(HostKey),
+    /// One DNS-SD service type.
+    ServiceType(String),
+}
+
+/// A projection of discovered entries into browsable rows.
+///
+/// Each variant has its own invariants, and [`browse_groups`] gives a row only
+/// the facts that hold for every occurrence it aggregates. A host row has no
+/// one service type, port, or TXT set; a service-type row has no one host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BrowseMode {
+    LogicalService,
+    Host,
+    ServiceType,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum GroupingMode {
@@ -107,6 +169,21 @@ pub enum GroupingMode {
     Host,
     ServiceType,
     Command,
+}
+
+impl GroupingMode {
+    /// The browse projection behind this tab, or `None` for
+    /// [`GroupingMode::Command`] — which lists configured rules rather than a
+    /// projection of discovered entries, and reuses logical-service rows as its
+    /// children.
+    pub fn browse_mode(self) -> Option<BrowseMode> {
+        match self {
+            GroupingMode::LogicalService => Some(BrowseMode::LogicalService),
+            GroupingMode::Host => Some(BrowseMode::Host),
+            GroupingMode::ServiceType => Some(BrowseMode::ServiceType),
+            GroupingMode::Command => None,
+        }
+    }
 }
 
 impl GroupingMode {
@@ -334,122 +411,373 @@ fn is_mac_suffix(rest: &str) -> bool {
     groups == 6
 }
 
-#[derive(Debug, Clone)]
-pub struct EntryGroup {
-    pub id: EntryGroupId,
-    pub label: String,
+/// The facts every occurrence of a logical-service row shares.
+///
+/// These are exactly the fields the row's identity is built from, so none of
+/// them can be an arbitrary occurrence's value. Data that genuinely varies
+/// between occurrences — addresses and TXT records — is deliberately absent:
+/// ask the row's occurrences, or [`EntryGroup::txt`], for those.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalService {
+    /// The base display name every occurrence shares; the row's label.
+    pub name: String,
     pub service_type: String,
     pub domain: String,
+    /// The host every occurrence resolved to, or `None` while unresolved.
     pub hostname: Option<String>,
     pub port: Option<u16>,
-    pub txt: BTreeMap<String, String>,
-    pub instances: Vec<Entry>,
 }
 
-pub fn group_entries(records: &[Entry], mode: GroupingMode) -> Vec<EntryGroup> {
-    let mut buckets: HashMap<String, Vec<Entry>> = HashMap::new();
+/// The facts every occurrence of a host row shares: the host, and nothing else.
+///
+/// Service type, port, domain, and TXT data belong to the row's child services,
+/// which may disagree about all of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostAggregate {
+    /// `None` for the row collecting registrations with no resolved host yet.
+    pub hostname: Option<String>,
+}
+
+/// The facts every occurrence of a service-type row shares: the type, and
+/// nothing else. Host, port, and TXT data belong to the row's child services.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceTypeAggregate {
+    pub service_type: String,
+}
+
+/// A row's facts, in the shape its projection can vouch for.
+///
+/// One variant per [`BrowseMode`], so a caller cannot read a field the active
+/// projection does not guarantee — the aggregate views have no service type,
+/// port, or TXT set to read at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupFacts {
+    LogicalService(LogicalService),
+    Host(HostAggregate),
+    ServiceType(ServiceTypeAggregate),
+}
+
+/// What a row can truthfully say about the host of its occurrences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowHost<'a> {
+    /// Every occurrence in the row is on this host.
+    Resolved(&'a str),
+    /// Every occurrence in the row is on one host, which has not resolved a
+    /// name yet.
+    Unresolved,
+    /// The row aggregates several hosts, so it has no host-wide hostname and
+    /// host-scoped operations (the same-host filter) are unavailable.
+    Varies,
+}
+
+/// What a row can truthfully say about the DNS-SD service type of its
+/// occurrences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowServiceType<'a> {
+    /// Every occurrence in the row advertises this type.
+    Invariant(&'a str),
+    /// The row aggregates several service types.
+    Varies,
+}
+
+impl GroupFacts {
+    /// The row's label. Derived from the facts rather than stored beside them,
+    /// so the text and the facts cannot disagree.
+    pub fn label(&self) -> String {
+        match self {
+            GroupFacts::LogicalService(service) => service.name.clone(),
+            GroupFacts::Host(host) => host
+                .hostname
+                .clone()
+                .unwrap_or_else(|| UNRESOLVED_HOST_LABEL.to_string()),
+            GroupFacts::ServiceType(aggregate) => aggregate.service_type.clone(),
+        }
+    }
+
+    pub fn host(&self) -> RowHost<'_> {
+        let hostname = match self {
+            GroupFacts::LogicalService(service) => service.hostname.as_deref(),
+            GroupFacts::Host(host) => host.hostname.as_deref(),
+            // A service type is offered by whoever offers it.
+            GroupFacts::ServiceType(_) => return RowHost::Varies,
+        };
+        match hostname {
+            Some(host) => RowHost::Resolved(host),
+            None => RowHost::Unresolved,
+        }
+    }
+
+    pub fn service_type(&self) -> RowServiceType<'_> {
+        match self {
+            GroupFacts::LogicalService(service) => RowServiceType::Invariant(&service.service_type),
+            GroupFacts::ServiceType(aggregate) => {
+                RowServiceType::Invariant(&aggregate.service_type)
+            }
+            // A host offers whatever it offers.
+            GroupFacts::Host(_) => RowServiceType::Varies,
+        }
+    }
+}
+
+/// A TXT key's value across the occurrences of a row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxtValue {
+    /// Every occurrence carries this key with this value.
+    Shared(String),
+    /// The occurrences disagree, or only some carry the key at all. No single
+    /// value describes the row, and saying so is the only honest answer.
+    Mixed,
+}
+
+/// A logical service listed inside an aggregate row.
+///
+/// Display facts and a count only: the occurrences themselves stay owned by the
+/// row, so a child list can never drift from the entries it describes. Actions
+/// target the row's occurrences, never a child summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildService {
+    pub id: EntryGroupId,
+    pub facts: LogicalService,
+    pub occurrences: usize,
+}
+
+/// One row of a browse projection: its identity, the facts valid for its
+/// projection, and the concrete occurrences it aggregates.
+///
+/// The occurrences are the row's only entry collection. Labels, counts, child
+/// lists, and TXT views are derived from them or from the row's identity on
+/// demand, never stored alongside where they could fall out of step.
+#[derive(Debug, Clone)]
+pub struct EntryGroup {
+    id: EntryGroupId,
+    label: String,
+    facts: GroupFacts,
+    instances: Vec<Entry>,
+}
+
+impl EntryGroup {
+    /// The row's structured identity: stable across recomputation and unique
+    /// within a projection, so the UI can re-find a selected row by it.
+    pub fn id(&self) -> &EntryGroupId {
+        &self.id
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The facts this row's projection can vouch for.
+    pub fn facts(&self) -> &GroupFacts {
+        &self.facts
+    }
+
+    /// The concrete occurrences this row aggregates. Matching and invocation
+    /// use these; the row's aggregate facts describe them but never stand in
+    /// for one of them.
+    pub fn instances(&self) -> &[Entry] {
+        &self.instances
+    }
+
+    pub fn occurrence_count(&self) -> usize {
+        self.instances.len()
+    }
+
+    /// Distinct logical services among this row's occurrences.
+    pub fn logical_service_count(&self) -> usize {
+        browse_row_count(&self.instances, BrowseMode::LogicalService)
+    }
+
+    /// Distinct hosts among the occurrences that have resolved one. The
+    /// unresolved occurrences are deliberately uncounted: they are not a host.
+    pub fn resolved_host_count(&self) -> usize {
+        self.instances
+            .iter()
+            .filter_map(|record| record.hostname.as_deref())
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    /// The distinct service types across this row's occurrences, sorted. A host
+    /// row may offer several; a logical-service or service-type row has one.
+    pub fn service_types(&self) -> Vec<String> {
+        self.instances
+            .iter()
+            .map(|record| record.service_type.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// The logical services this row aggregates, in list order.
+    pub fn child_services(&self) -> Vec<ChildService> {
+        let mut buckets: BTreeMap<EntryGroupId, (LogicalService, usize)> = BTreeMap::new();
+        for record in &self.instances {
+            let (id, facts) = logical_service_of(record);
+            let child = buckets.entry(id).or_insert_with(|| (facts, 0));
+            child.1 += 1;
+        }
+        let mut children: Vec<ChildService> = buckets
+            .into_iter()
+            .map(|(id, (facts, occurrences))| ChildService {
+                id,
+                facts,
+                occurrences,
+            })
+            .collect();
+        children.sort_by(|a, b| {
+            a.facts
+                .name
+                .cmp(&b.facts.name)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        children
+    }
+
+    /// This row's TXT data, over the union of its occurrences' keys.
+    ///
+    /// A key every occurrence carries with one value is [`TxtValue::Shared`];
+    /// anything else is [`TxtValue::Mixed`], because no single value describes
+    /// the row. Only the logical-service view shows this: an aggregate row
+    /// collects unrelated services, whose TXT keys mean nothing side by side.
+    pub fn txt(&self) -> BTreeMap<String, TxtValue> {
+        let mut merged: BTreeMap<String, TxtValue> = BTreeMap::new();
+        for record in &self.instances {
+            for (key, value) in &record.txt {
+                match merged.get(key) {
+                    None => {
+                        merged.insert(key.clone(), TxtValue::Shared(value.clone()));
+                    }
+                    Some(TxtValue::Shared(existing)) if existing != value => {
+                        merged.insert(key.clone(), TxtValue::Mixed);
+                    }
+                    Some(TxtValue::Shared(_) | TxtValue::Mixed) => {}
+                }
+            }
+        }
+        // A key only some occurrences carry is not row-wide either.
+        for (key, value) in merged.iter_mut() {
+            if self
+                .instances
+                .iter()
+                .any(|record| !record.txt.contains_key(key))
+            {
+                *value = TxtValue::Mixed;
+            }
+        }
+        merged
+    }
+}
+
+/// Project `records` onto the rows of `mode`, in display order.
+///
+/// Each row carries only the facts its projection guarantees, plus every
+/// occurrence behind it.
+pub fn browse_groups(records: &[Entry], mode: BrowseMode) -> Vec<EntryGroup> {
+    let mut buckets: BTreeMap<EntryGroupId, (GroupFacts, Vec<Entry>)> = BTreeMap::new();
     for record in records {
+        let (id, facts) = row_of(record, mode);
         buckets
-            .entry(group_key(record, mode))
-            .or_default()
+            .entry(id)
+            .or_insert_with(|| (facts, Vec::new()))
+            .1
             .push(record.clone());
     }
 
     let mut groups: Vec<EntryGroup> = buckets
-        .into_values()
-        .map(|mut instances| {
-            instances.sort_by(|a, b| {
-                a.name
-                    .cmp(&b.name)
-                    .then_with(|| a.service_type.cmp(&b.service_type))
-                    .then_with(|| a.hostname.cmp(&b.hostname))
-                    .then_with(|| a.addresses.cmp(&b.addresses))
-                    .then_with(|| a.port.cmp(&b.port))
-                    // Two occurrences of one registration can agree on every
-                    // field above and differ only in who named them; order them
-                    // anyway so the rendered list does not shuffle.
-                    .then_with(|| a.occurrence.cmp(&b.occurrence))
-            });
-            let first = instances[0].clone();
-            let label = group_label(&first, mode);
-            let id = EntryGroupId(format!("{}:{}", mode.label(), group_key(&first, mode)));
+        .into_iter()
+        .map(|(id, (facts, mut instances))| {
+            instances.sort_by(compare_occurrences);
             EntryGroup {
+                label: facts.label(),
                 id,
-                label,
-                service_type: first.service_type,
-                domain: first.domain,
-                hostname: first.hostname,
-                port: first.port,
-                txt: first.txt,
+                facts,
                 instances,
             }
         })
         .collect();
 
-    groups.sort_by(|a, b| {
-        a.label
-            .cmp(&b.label)
-            .then_with(|| a.service_type.cmp(&b.service_type))
-    });
+    // Label first — that is the order a reader perceives — then the structured
+    // identity, which is unique per row. The order is therefore total: rows
+    // with duplicate labels keep a fixed sequence across recomputations rather
+    // than shuffling with the input.
+    groups.sort_by(|a, b| a.label.cmp(&b.label).then_with(|| a.id.cmp(&b.id)));
     groups
 }
 
-fn group_key(record: &Entry, mode: GroupingMode) -> String {
-    match mode {
-        // `Command` grouping is handled by a dedicated path in `App`; if it ever
-        // reaches `group_entries` it behaves like logical-service grouping.
-        //
-        // The base display name (not the raw instance name) keys the group, so
-        // a multi-homed host's per-interface instances — same service, names
-        // differing only in Avahi's ` [MAC]` decoration — collapse into one
-        // logical service whose instances carry the per-interface addresses.
-        GroupingMode::LogicalService | GroupingMode::Command => join_key(&[
-            &record.base_display_name(),
-            &record.service_type,
-            &record.domain,
-            &hostname_key(record.hostname.as_deref()),
-            &record
-                .port
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "<unknown-port>".to_string()),
-        ]),
-        GroupingMode::Host => hostname_key(record.hostname.as_deref()),
-        GroupingMode::ServiceType => record.service_type.clone(),
-    }
-}
-
-/// Keys an optional hostname with a presence tag, so a record whose hostname
-/// is literally a sentinel string (e.g. `"<unresolved host>"`) can never land
-/// in the same group as records with no hostname at all. A port needs no such
-/// tag: its rendered form is always digits, which no sentinel matches.
-fn hostname_key(hostname: Option<&str>) -> String {
-    match hostname {
-        Some(host) => format!("host:{host}"),
-        None => "unresolved".to_string(),
-    }
-}
-
-/// Joins key parts into one string unambiguously: each part is prefixed with
-/// its length, so a separator character occurring *inside* a part cannot shift
-/// a boundary and make two different keys compare equal — the same reasoning
-/// that gave [`EntryId`] a structured key instead of a joined string.
-fn join_key(parts: &[&str]) -> String {
-    parts
+/// How many rows the `mode` projection of `records` has, without building them.
+/// Tab counts read this, so a tab's count and its list can never disagree.
+pub fn browse_row_count(records: &[Entry], mode: BrowseMode) -> usize {
+    records
         .iter()
-        .map(|part| format!("{}:{part}", part.len()))
-        .collect::<Vec<_>>()
-        .join("|")
+        .map(|record| row_of(record, mode).0)
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
-fn group_label(record: &Entry, mode: GroupingMode) -> String {
+/// The row `record` belongs to under `mode`: its identity, and the facts every
+/// occurrence of that row shares.
+///
+/// Identity and facts are built here from the same fields, which is what makes
+/// a row's facts true of all its occurrences instead of copied from one of
+/// them: any two records in a bucket produce identical facts by construction.
+fn row_of(record: &Entry, mode: BrowseMode) -> (EntryGroupId, GroupFacts) {
     match mode {
-        GroupingMode::LogicalService | GroupingMode::Command => record.base_display_name(),
-        GroupingMode::Host => record
-            .hostname
-            .clone()
-            .unwrap_or_else(|| "<unresolved host>".to_string()),
-        GroupingMode::ServiceType => record.service_type.clone(),
+        BrowseMode::LogicalService => {
+            let (id, facts) = logical_service_of(record);
+            (id, GroupFacts::LogicalService(facts))
+        }
+        BrowseMode::Host => (
+            EntryGroupId::Host(HostKey::of(record.hostname.as_deref())),
+            GroupFacts::Host(HostAggregate {
+                hostname: record.hostname.clone(),
+            }),
+        ),
+        BrowseMode::ServiceType => (
+            EntryGroupId::ServiceType(record.service_type.clone()),
+            GroupFacts::ServiceType(ServiceTypeAggregate {
+                service_type: record.service_type.clone(),
+            }),
+        ),
     }
+}
+
+/// The logical service `record` is an occurrence of: its identity and shared
+/// facts.
+///
+/// The base display name keys it, not the raw instance name: a multi-homed
+/// host's per-interface instances — same service, names differing only in
+/// Avahi's ` [MAC]` decoration — are one logical service whose occurrences
+/// carry the per-interface addresses.
+fn logical_service_of(record: &Entry) -> (EntryGroupId, LogicalService) {
+    let facts = LogicalService {
+        name: record.base_display_name(),
+        service_type: record.service_type.clone(),
+        domain: record.domain.clone(),
+        hostname: record.hostname.clone(),
+        port: record.port,
+    };
+    let id = EntryGroupId::LogicalService {
+        name: facts.name.clone(),
+        service_type: facts.service_type.clone(),
+        domain: facts.domain.clone(),
+        host: HostKey::of(facts.hostname.as_deref()),
+        port: facts.port,
+    };
+    (id, facts)
+}
+
+/// Total order over the occurrences within one row: the fields a reader sees
+/// first, then the occurrence identity, which is unique. Two occurrences of one
+/// registration can agree on every visible field and differ only in who named
+/// them; ordering by identity last keeps the rendered list from shuffling.
+fn compare_occurrences(a: &Entry, b: &Entry) -> Ordering {
+    a.name
+        .cmp(&b.name)
+        .then_with(|| a.service_type.cmp(&b.service_type))
+        .then_with(|| a.hostname.cmp(&b.hostname))
+        .then_with(|| a.addresses.cmp(&b.addresses))
+        .then_with(|| a.port.cmp(&b.port))
+        .then_with(|| a.id().cmp(&b.id()))
 }
 
 pub fn decode_dns_sd_escapes(value: &str) -> String {
@@ -547,10 +875,10 @@ mod tests {
         ];
         entry.port = Some(22);
 
-        let groups = group_entries(&[entry], GroupingMode::LogicalService);
+        let groups = browse_groups(&[entry], BrowseMode::LogicalService);
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].instances.len(), 1);
-        assert_eq!(groups[0].instances[0].addresses.len(), 2);
+        assert_eq!(groups[0].instances().len(), 1);
+        assert_eq!(groups[0].instances()[0].addresses.len(), 2);
     }
 
     #[test]
@@ -618,11 +946,11 @@ mod tests {
         wireless.addresses = vec!["192.168.50.245".parse().unwrap()];
         wireless.port = Some(9);
 
-        let groups = group_entries(&[wired, wireless], GroupingMode::LogicalService);
+        let groups = browse_groups(&[wired, wireless], BrowseMode::LogicalService);
 
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].label, "rpi5-0");
-        assert_eq!(groups[0].instances.len(), 2);
+        assert_eq!(groups[0].label(), "rpi5-0");
+        assert_eq!(groups[0].instances().len(), 2);
     }
 
     #[test]
@@ -636,7 +964,7 @@ mod tests {
         site_b.hostname = Some("nas.local".to_string());
         site_b.port = Some(80);
 
-        let groups = group_entries(&[site_a, site_b], GroupingMode::LogicalService);
+        let groups = browse_groups(&[site_a, site_b], BrowseMode::LogicalService);
 
         assert_eq!(groups.len(), 2);
     }
@@ -645,9 +973,9 @@ mod tests {
     fn logical_group_label_uses_decoded_display_name() {
         let record = Entry::new(r"HP\032Printer", "_ipp._tcp", "local");
 
-        let groups = group_entries(&[record], GroupingMode::LogicalService);
+        let groups = browse_groups(&[record], BrowseMode::LogicalService);
 
-        assert_eq!(groups[0].label, "HP Printer");
+        assert_eq!(groups[0].label(), "HP Printer");
     }
 
     fn resolved(name: &str, service_type: &str) -> Entry {
@@ -762,20 +1090,20 @@ mod tests {
 
     #[test]
     fn occurrences_of_one_registration_group_into_one_logical_service() {
-        let groups = group_entries(
+        let groups = browse_groups(
             &[
                 on_interface("alpha", "10.0.0.1", 1),
                 on_interface("alpha", "10.0.0.2", 2),
             ],
-            GroupingMode::LogicalService,
+            BrowseMode::LogicalService,
         );
 
         // Grouping is presentation: it merges the occurrences for display
         // without erasing the identity that keeps them independently removable.
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].label, "alpha");
-        assert_eq!(groups[0].instances.len(), 2);
-        assert_ne!(groups[0].instances[0].id(), groups[0].instances[1].id());
+        assert_eq!(groups[0].label(), "alpha");
+        assert_eq!(groups[0].instances().len(), 2);
+        assert_ne!(groups[0].instances()[0].id(), groups[0].instances()[1].id());
     }
 
     #[test]
@@ -795,7 +1123,7 @@ mod tests {
         let first = Entry::new("a|b", "c", "local");
         let second = Entry::new("a", "b|c", "local");
 
-        let groups = group_entries(&[first, second], GroupingMode::LogicalService);
+        let groups = browse_groups(&[first, second], BrowseMode::LogicalService);
 
         assert_eq!(groups.len(), 2);
     }
@@ -844,23 +1172,240 @@ mod tests {
         let b = resolved("beta", "_http._tcp");
         let pending = Entry::new("ghost", "_ipp._tcp", "local");
 
-        let groups = group_entries(&[a, b, pending], GroupingMode::Host);
+        let groups = browse_groups(&[a, b, pending], BrowseMode::Host);
 
-        let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
+        let labels: Vec<&str> = groups.iter().map(|g| g.label()).collect();
         assert!(labels.contains(&"alpha.local"));
         assert!(labels.contains(&"beta.local"));
         assert!(labels.contains(&"<unresolved host>"));
     }
 
+    // ── mode-aware projections ─────────────────────────────────────────────
+
+    /// One service on `host`, with its own type, port, and TXT data.
+    fn service_on(
+        name: &str,
+        service_type: &str,
+        host: &str,
+        port: u16,
+        txt: &[(&str, &str)],
+    ) -> Entry {
+        let mut record = Entry::new(name, service_type, "local");
+        record.hostname = Some(host.to_string());
+        record.addresses = vec!["192.0.2.1".parse().unwrap()];
+        record.port = Some(port);
+        record.txt = txt
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        record
+    }
+
     #[test]
-    fn hostname_equal_to_the_sentinel_does_not_join_the_unresolved_group() {
+    fn a_host_row_states_only_its_host_and_lists_every_service_on_it() {
+        // One host offering SSH and HTTP on different ports with different TXT.
+        let shell = service_on("shell", "_ssh._tcp", "nas.local", 22, &[("v", "2")]);
+        let site = service_on("site", "_http._tcp", "nas.local", 80, &[("path", "/admin")]);
+
+        let groups = browse_groups(&[shell, site], BrowseMode::Host);
+
+        assert_eq!(groups.len(), 1);
+        let host = &groups[0];
+        assert_eq!(host.label(), "nas.local");
+        // The row vouches for the host and nothing else: a `HostAggregate` has
+        // no service type, port, or TXT field to mistake for host-wide data.
+        assert_eq!(
+            *host.facts(),
+            GroupFacts::Host(HostAggregate {
+                hostname: Some("nas.local".to_string()),
+            })
+        );
+        assert_eq!(host.facts().host(), RowHost::Resolved("nas.local"));
+        assert_eq!(host.facts().service_type(), RowServiceType::Varies);
+
+        // Both services are listed, each keeping its own type and port.
+        let children = host.child_services();
+        let listed: Vec<(&str, &str, Option<u16>)> = children
+            .iter()
+            .map(|child| {
+                (
+                    child.facts.name.as_str(),
+                    child.facts.service_type.as_str(),
+                    child.facts.port,
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("shell", "_ssh._tcp", Some(22)),
+                ("site", "_http._tcp", Some(80)),
+            ]
+        );
+        assert_eq!(host.service_types(), vec!["_http._tcp", "_ssh._tcp"]);
+        assert_eq!(host.logical_service_count(), 2);
+        assert_eq!(host.occurrence_count(), 2);
+    }
+
+    #[test]
+    fn a_service_type_row_states_only_its_type_and_lists_every_host_offering_it() {
+        let alpha = service_on("alpha", "_ssh._tcp", "alpha.local", 22, &[("os", "linux")]);
+        let beta = service_on("beta", "_ssh._tcp", "beta.local", 2222, &[("os", "bsd")]);
+        let pending = Entry::new("ghost", "_ssh._tcp", "local");
+
+        let groups = browse_groups(&[alpha, beta, pending], BrowseMode::ServiceType);
+
+        assert_eq!(groups.len(), 1);
+        let by_type = &groups[0];
+        assert_eq!(by_type.label(), "_ssh._tcp");
+        assert_eq!(
+            by_type.facts().service_type(),
+            RowServiceType::Invariant("_ssh._tcp")
+        );
+        // No host is type-wide, so the row refuses to name one at all.
+        assert_eq!(by_type.facts().host(), RowHost::Varies);
+
+        let children = by_type.child_services();
+        let hosts: Vec<Option<&str>> = children
+            .iter()
+            .map(|child| child.facts.hostname.as_deref())
+            .collect();
+        assert_eq!(hosts, vec![Some("alpha.local"), Some("beta.local"), None]);
+        // Each child keeps its own port rather than sharing a row-wide one.
+        let ports: Vec<Option<u16>> = children.iter().map(|child| child.facts.port).collect();
+        assert_eq!(ports, vec![Some(22), Some(2222), None]);
+
+        // Three logical services and occurrences, but only two resolved hosts:
+        // the unresolved one is not a host.
+        assert_eq!(by_type.logical_service_count(), 3);
+        assert_eq!(by_type.occurrence_count(), 3);
+        assert_eq!(by_type.resolved_host_count(), 2);
+    }
+
+    #[test]
+    fn duplicate_labels_keep_a_deterministic_order_across_input_permutations() {
+        // Three rows whose labels are all `shell`: only the structured identity
+        // separates them, so only it can order them.
+        let on_nas = service_on("shell", "_ssh._tcp", "nas.local", 22, &[]);
+        let on_pi = service_on("shell", "_ssh._tcp", "pi.local", 22, &[]);
+        let other_port = service_on("shell", "_ssh._tcp", "nas.local", 2222, &[]);
+
+        let forward = browse_groups(
+            &[on_nas.clone(), on_pi.clone(), other_port.clone()],
+            BrowseMode::LogicalService,
+        );
+        let reversed = browse_groups(&[other_port, on_pi, on_nas], BrowseMode::LogicalService);
+
+        assert_eq!(forward.len(), 3);
+        assert!(forward.iter().all(|group| group.label() == "shell"));
+        // Same records, any input order, same row order.
+        let ids = |groups: &[EntryGroup]| {
+            groups
+                .iter()
+                .map(|group| group.id().clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&forward), ids(&reversed));
+
+        let endpoints: Vec<(Option<&str>, Option<u16>)> = forward
+            .iter()
+            .map(|group| match group.facts() {
+                GroupFacts::LogicalService(service) => (service.hostname.as_deref(), service.port),
+                other => panic!("expected a logical service, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            endpoints,
+            vec![
+                (Some("nas.local"), Some(22)),
+                (Some("nas.local"), Some(2222)),
+                (Some("pi.local"), Some(22)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_unresolved_host_row_is_an_identity_not_a_label() {
+        // A device advertising the sentinel as its hostname has resolved a host
+        // and must not be collected into the unresolved row beside it.
         let mut impostor = Entry::new("impostor", "_ssh._tcp", "local");
-        impostor.hostname = Some("<unresolved host>".to_string());
+        impostor.hostname = Some(UNRESOLVED_HOST_LABEL.to_string());
+        impostor.port = Some(22);
         let pending = Entry::new("ghost", "_ipp._tcp", "local");
 
-        let groups = group_entries(&[impostor, pending], GroupingMode::Host);
+        let groups = browse_groups(&[impostor, pending], BrowseMode::Host);
 
         assert_eq!(groups.len(), 2);
+        // Both rows read identically; only their identities tell them apart.
+        assert!(
+            groups
+                .iter()
+                .all(|group| group.label() == UNRESOLVED_HOST_LABEL)
+        );
+        assert_eq!(
+            *groups[0].id(),
+            EntryGroupId::Host(HostKey::Resolved(UNRESOLVED_HOST_LABEL.to_string()))
+        );
+        assert_eq!(
+            groups[0].facts().host(),
+            RowHost::Resolved(UNRESOLVED_HOST_LABEL)
+        );
+        // Identical labels, so the structured identity settles the order.
+        assert_eq!(*groups[1].id(), EntryGroupId::Host(HostKey::Unresolved));
+        assert_eq!(groups[1].facts().host(), RowHost::Unresolved);
+    }
+
+    #[test]
+    fn logical_service_txt_is_shared_only_where_every_occurrence_agrees() {
+        let mut wired = on_interface("alpha", "10.0.0.1", 1);
+        wired.txt.insert("model".to_string(), "rpi5".to_string());
+        wired.txt.insert("iface".to_string(), "eth0".to_string());
+        wired.txt.insert("wired".to_string(), "yes".to_string());
+        let mut wireless = on_interface("alpha", "10.0.0.2", 2);
+        wireless.txt.insert("model".to_string(), "rpi5".to_string());
+        wireless
+            .txt
+            .insert("iface".to_string(), "wlan0".to_string());
+
+        let groups = browse_groups(&[wired, wireless], BrowseMode::LogicalService);
+
+        assert_eq!(groups.len(), 1);
+        let txt = groups[0].txt();
+        // Agreed on by every occurrence.
+        assert_eq!(
+            txt.get("model"),
+            Some(&TxtValue::Shared("rpi5".to_string()))
+        );
+        // Disagreed on: neither value describes the service.
+        assert_eq!(txt.get("iface"), Some(&TxtValue::Mixed));
+        // Carried by only one occurrence, so not service-wide either.
+        assert_eq!(txt.get("wired"), Some(&TxtValue::Mixed));
+    }
+
+    #[test]
+    fn row_counts_agree_with_the_rows_each_projection_builds() {
+        let records = vec![
+            service_on("shell", "_ssh._tcp", "nas.local", 22, &[]),
+            service_on("site", "_http._tcp", "nas.local", 80, &[]),
+            service_on("shell", "_ssh._tcp", "pi.local", 22, &[]),
+            Entry::new("ghost", "_ipp._tcp", "local"),
+        ];
+
+        for mode in [
+            BrowseMode::LogicalService,
+            BrowseMode::Host,
+            BrowseMode::ServiceType,
+        ] {
+            assert_eq!(
+                browse_row_count(&records, mode),
+                browse_groups(&records, mode).len(),
+                "{mode:?} count must match the rows it would build"
+            );
+        }
+        assert_eq!(browse_row_count(&records, BrowseMode::LogicalService), 4);
+        // Two resolved hosts plus the one unresolved row.
+        assert_eq!(browse_row_count(&records, BrowseMode::Host), 3);
+        assert_eq!(browse_row_count(&records, BrowseMode::ServiceType), 3);
     }
 
     #[test]
@@ -869,28 +1414,28 @@ mod tests {
         let b = resolved("beta", "_ssh._tcp");
         let c = resolved("gamma", "_http._tcp");
 
-        let groups = group_entries(&[a, b, c], GroupingMode::ServiceType);
+        let groups = browse_groups(&[a, b, c], BrowseMode::ServiceType);
 
         assert_eq!(groups.len(), 2);
         let ssh = groups
             .iter()
-            .find(|g| g.label == "_ssh._tcp")
+            .find(|g| g.label() == "_ssh._tcp")
             .expect("ssh group");
-        assert_eq!(ssh.instances.len(), 2);
+        assert_eq!(ssh.instances().len(), 2);
     }
 
     #[test]
     fn groups_are_sorted_by_label() {
-        let groups = group_entries(
+        let groups = browse_groups(
             &[
                 resolved("charlie", "_ssh._tcp"),
                 resolved("alpha", "_ssh._tcp"),
                 resolved("bravo", "_ssh._tcp"),
             ],
-            GroupingMode::LogicalService,
+            BrowseMode::LogicalService,
         );
 
-        let labels: Vec<&str> = groups.iter().map(|g| g.label.as_str()).collect();
+        let labels: Vec<&str> = groups.iter().map(|g| g.label()).collect();
         assert_eq!(labels, vec!["alpha", "bravo", "charlie"]);
     }
 
@@ -905,14 +1450,18 @@ mod tests {
     }
 
     #[test]
-    fn command_mode_group_key_behaves_like_logical_service() {
-        let mut entry = resolved("alpha", "_ssh._tcp");
-        entry.addresses = vec!["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()];
-
-        let groups = group_entries(&[entry], GroupingMode::Command);
-
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].instances.len(), 1);
-        assert_eq!(groups[0].label, "alpha");
+    fn only_the_command_tab_lacks_a_browse_projection() {
+        assert_eq!(
+            GroupingMode::LogicalService.browse_mode(),
+            Some(BrowseMode::LogicalService)
+        );
+        assert_eq!(GroupingMode::Host.browse_mode(), Some(BrowseMode::Host));
+        assert_eq!(
+            GroupingMode::ServiceType.browse_mode(),
+            Some(BrowseMode::ServiceType)
+        );
+        // The command tab lists configured rules, not a projection of the
+        // discovered entries, so it has no browse mode to ask for.
+        assert_eq!(GroupingMode::Command.browse_mode(), None);
     }
 }

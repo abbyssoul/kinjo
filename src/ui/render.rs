@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
@@ -12,7 +10,10 @@ use ratatui::{
 };
 
 use crate::{
-    discovery::{Entry, EntryGroup, GroupingMode},
+    discovery::{
+        ChildService, Entry, EntryGroup, GroupFacts, GroupingMode, HostAggregate, LogicalService,
+        RowHost, RowServiceType, ServiceTypeAggregate, TxtValue,
+    },
     plumber::MatchResult,
 };
 
@@ -79,21 +80,6 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 // ── top bar (view tabs) ────────────────────────────────────────────────────
 fn render_top_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let spinner = SPINNER[(app.ticks / 2) as usize % SPINNER.len()];
-    let hosts = app
-        .records
-        .values()
-        .filter_map(|r| r.hostname.clone())
-        .collect::<BTreeSet<_>>()
-        .len();
-
-    // Per-tab count shown alongside the title so the bar still surfaces the
-    // discovery totals it used to.
-    let tab_count = |mode: GroupingMode| match mode {
-        GroupingMode::LogicalService => app.records.len(),
-        GroupingMode::Host => hosts,
-        GroupingMode::ServiceType => app.service_types.len(),
-        GroupingMode::Command => app.matcher.command_count(),
-    };
 
     let mut spans = vec![
         Span::styled(
@@ -106,9 +92,13 @@ fn render_top_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ),
     ];
 
-    for mode in GroupingMode::TABS {
+    // Each tab is labelled with how many rows it lists: logical services, hosts
+    // (plus the unresolved row when there is one), service types, or configured
+    // commands. `App` counts them from the same filtered records it builds the
+    // rows from, so a count can never contradict the list behind its tab.
+    for (mode, count) in GroupingMode::TABS.into_iter().zip(app.tab_counts) {
         let active = mode == app.filter.grouping;
-        let text = format!(" {} {} ", mode.tab_title(), tab_count(mode));
+        let text = format!(" {} {count} ", mode.tab_title());
         let style = if active {
             Style::default()
                 .fg(BG_BAR)
@@ -263,8 +253,14 @@ fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+/// One row of the service/host/type list.
+///
+/// The two variable columns say only what the row's projection guarantees: a
+/// logical service has one type and one host to name, while a host or
+/// service-type row instead reports aggregates over its children — never one
+/// child's type, port, or host standing in for the whole row.
 fn service_row(group: &EntryGroup, selected: bool, matches: usize) -> Row<'static> {
-    let color = category_color(&group.service_type);
+    let color = row_color(group.facts());
     let base = selection_style(selected);
     let gutter = gutter_span(selected);
 
@@ -274,8 +270,33 @@ fn service_row(group: &EntryGroup, selected: bool, matches: usize) -> Row<'stati
         base.fg(Color::White)
     };
 
-    // instance count badge
-    let n = group.instances.len();
+    let (detail, detail_color) = match group.facts() {
+        GroupFacts::LogicalService(service) => (short_type(&service.service_type), color),
+        // How many logical services the aggregate collects — a fact about the
+        // whole row, unlike the arbitrary first child's type this used to show.
+        GroupFacts::Host(_) | GroupFacts::ServiceType(_) => {
+            (format!("{} svc", group.logical_service_count()), FG_DIM)
+        }
+    };
+
+    let trailing = match group.facts() {
+        GroupFacts::LogicalService(service) => service
+            .hostname
+            .clone()
+            .unwrap_or_else(|| "…resolving".to_string()),
+        // Every type this host offers, not one of them.
+        GroupFacts::Host(_) => group
+            .service_types()
+            .iter()
+            .map(|service_type| short_type(service_type))
+            .collect::<Vec<_>>()
+            .join(", "),
+        // How many hosts offer this type, since no single one does.
+        GroupFacts::ServiceType(_) => format!("{} hosts", group.resolved_host_count()),
+    };
+
+    // occurrence count badge
+    let n = group.occurrence_count();
     let count = if n > 1 {
         Span::styled(
             display::text(&format!("×{n}")),
@@ -295,20 +316,33 @@ fn service_row(group: &EntryGroup, selected: bool, matches: usize) -> Row<'stati
         Span::styled("·", base.fg(ACCENT_DIM))
     };
 
-    let host = group.hostname.as_deref().unwrap_or("…resolving");
-
     Row::new(vec![
         Cell::from(Line::from(vec![gutter, Span::styled("●", base.fg(color))])),
-        Cell::from(Span::styled(display::text(&group.label), name_style)),
-        Cell::from(Span::styled(
-            display::text(&short_type(&group.service_type)),
-            base.fg(color),
-        )),
+        Cell::from(Span::styled(display::text(group.label()), name_style)),
+        Cell::from(Span::styled(display::text(&detail), base.fg(detail_color))),
         Cell::from(count),
         Cell::from(matches_cell),
-        Cell::from(Span::styled(display::text(host), base.fg(FG_DIM))),
+        Cell::from(Span::styled(display::text(&trailing), base.fg(FG_DIM))),
     ])
     .style(base)
+}
+
+/// A row's accent colour: the category of the service type it can vouch for, or
+/// a neutral tone when it aggregates several types and no one colour is honest.
+fn row_color(facts: &GroupFacts) -> Color {
+    match facts.service_type() {
+        RowServiceType::Invariant(service_type) => category_color(service_type),
+        RowServiceType::Varies => FG_DIM,
+    }
+}
+
+/// The host text a row can truthfully show.
+fn host_text(facts: &GroupFacts) -> String {
+    match facts.host() {
+        RowHost::Resolved(host) => host.to_string(),
+        RowHost::Unresolved => "…resolving".to_string(),
+        RowHost::Varies => "several hosts".to_string(),
+    }
 }
 
 // ── details / preview ────────────────────────────────────────────────────
@@ -330,58 +364,77 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         return;
     };
 
-    let color = category_color(&group.service_type);
     // header — name spans the value column, dot sits in the label column
     let mut rows: Vec<Row> = vec![Row::new(vec![
-        Cell::from(Span::styled(" ●", Style::default().fg(color))),
         Cell::from(Span::styled(
-            display::text(&group.label),
+            " ●",
+            Style::default().fg(row_color(group.facts())),
+        )),
+        Cell::from(Span::styled(
+            display::text(group.label()),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )),
     ])];
-    rows.push(field_row("type", &group.service_type, color));
-    rows.push(field_row("domain", &group.domain, FG_DIM));
+
+    // Each projection describes itself. The aggregates list their children
+    // rather than presenting one child's fields as though they were the row's.
+    match group.facts() {
+        GroupFacts::LogicalService(service) => {
+            push_logical_service_rows(&mut rows, group, service);
+        }
+        GroupFacts::Host(host) => push_host_rows(&mut rows, group, host),
+        GroupFacts::ServiceType(aggregate) => push_service_type_rows(&mut rows, group, aggregate),
+    }
+
+    rows.push(blank_row());
+    push_action_rows(
+        &mut rows,
+        app.group_matches
+            .get(app.selected)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+    );
+
+    render_detail_rows(frame, app, area, block, rows);
+}
+
+/// A logical service: the fields all of its occurrences share, its TXT data,
+/// and the occurrences themselves.
+fn push_logical_service_rows(
+    rows: &mut Vec<Row<'static>>,
+    group: &EntryGroup,
+    service: &LogicalService,
+) {
+    let color = category_color(&service.service_type);
+    rows.push(field_row("type", &service.service_type, color));
+    rows.push(field_row("domain", &service.domain, FG_DIM));
     rows.push(field_row(
         "host",
-        group.hostname.as_deref().unwrap_or("…resolving"),
+        service.hostname.as_deref().unwrap_or("…resolving"),
         FG_DIM,
     ));
-    rows.push(field_row(
-        "port",
-        &group
-            .port
-            .map(|p| p.to_string())
-            .unwrap_or_else(|| "…".to_string()),
-        FG_DIM,
-    ));
+    rows.push(field_row("port", &port_text(service.port), FG_DIM));
 
-    if !group.txt.is_empty() {
+    // TXT data is not part of what makes occurrences one logical service, so it
+    // may differ between them; only the keys they agree on get a value here.
+    let txt = group.txt();
+    if !txt.is_empty() {
         rows.push(blank_row());
         rows.push(section_row("TXT records"));
-        for (key, value) in group.txt.iter() {
-            rows.push(Row::new(vec![
-                Cell::from(Span::styled(
-                    display::text(&format!(" {key}")),
-                    Style::default().fg(WARN),
-                )),
-                Cell::from(Line::from(vec![
-                    Span::styled("= ", Style::default().fg(ACCENT_DIM)),
-                    Span::styled(display::text(value), Style::default().fg(Color::White)),
-                ])),
-            ]));
+        for (key, value) in &txt {
+            rows.push(txt_row(key, value));
         }
     }
 
-    // instance tree
     rows.push(blank_row());
     rows.push(section_row(&format!(
-        "instances ({})",
-        group.instances.len()
+        "occurrences ({})",
+        group.occurrence_count()
     )));
-    let last = group.instances.len().saturating_sub(1);
-    for (i, record) in group.instances.iter().enumerate() {
+    let last = group.occurrence_count().saturating_sub(1);
+    for (i, record) in group.instances().iter().enumerate() {
         let branch = if i == last { "└─" } else { "├─" };
         rows.push(Row::new(vec![
             Cell::from(Line::from(vec![
@@ -392,6 +445,7 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 ),
             ])),
             Cell::from(Line::from(vec![
+                // Addresses differ per occurrence, so each names its own.
                 Span::styled(
                     display::text(&instance_endpoint(record)),
                     Style::default().fg(Color::White),
@@ -403,37 +457,172 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
             ])),
         ]));
     }
+}
 
-    // matching actions
+/// A host: its name, how much it is running, and which services those are. The
+/// services' types, ports, and TXT data are theirs, so they stay on their own
+/// lines rather than being promoted to host-wide fields.
+fn push_host_rows(rows: &mut Vec<Row<'static>>, group: &EntryGroup, host: &HostAggregate) {
+    rows.push(field_row(
+        "host",
+        host.hostname.as_deref().unwrap_or("not resolved yet"),
+        FG_DIM,
+    ));
+    rows.push(field_row(
+        "seen",
+        &format!("{} occurrence(s)", group.occurrence_count()),
+        FG_DIM,
+    ));
+
     rows.push(blank_row());
-    let actions = app
-        .group_matches
-        .get(app.selected)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    rows.push(section_row(&format!(
+        "services ({})",
+        group.logical_service_count()
+    )));
+    // The host is the row; repeating it on every child would say nothing.
+    push_child_service_rows(rows, &group.child_services(), ChildEndpoint::PortOnly);
+}
+
+/// A service type: the type, how many hosts offer it, and which services those
+/// are. No host, port, or TXT set is type-wide.
+fn push_service_type_rows(
+    rows: &mut Vec<Row<'static>>,
+    group: &EntryGroup,
+    aggregate: &ServiceTypeAggregate,
+) {
+    rows.push(field_row(
+        "type",
+        &aggregate.service_type,
+        category_color(&aggregate.service_type),
+    ));
+    rows.push(field_row(
+        "hosts",
+        &format!("{} resolved", group.resolved_host_count()),
+        FG_DIM,
+    ));
+    rows.push(field_row(
+        "seen",
+        &format!("{} occurrence(s)", group.occurrence_count()),
+        FG_DIM,
+    ));
+
+    rows.push(blank_row());
+    rows.push(section_row(&format!(
+        "services ({})",
+        group.logical_service_count()
+    )));
+    // The type is the row, but each child is on its own host.
+    push_child_service_rows(rows, &group.child_services(), ChildEndpoint::HostAndPort);
+}
+
+/// How much of a child service's endpoint its parent row leaves for it to say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildEndpoint {
+    /// The parent row already names the host every child is on.
+    PortOnly,
+    /// The parent spans several hosts, so each child names its own.
+    HostAndPort,
+}
+
+fn push_child_service_rows(
+    rows: &mut Vec<Row<'static>>,
+    children: &[ChildService],
+    endpoint: ChildEndpoint,
+) {
+    let last = children.len().saturating_sub(1);
+    for (i, child) in children.iter().enumerate() {
+        let branch = if i == last { "└─" } else { "├─" };
+        let port = port_text(child.facts.port);
+        let endpoint = match endpoint {
+            ChildEndpoint::PortOnly => format!(":{port}"),
+            ChildEndpoint::HostAndPort => format!(
+                "{}:{port}",
+                child.facts.hostname.as_deref().unwrap_or("…resolving")
+            ),
+        };
+        let occurrences = if child.occurrences > 1 {
+            format!("  ×{}", child.occurrences)
+        } else {
+            String::new()
+        };
+        rows.push(Row::new(vec![
+            Cell::from(Line::from(vec![
+                Span::styled(format!(" {branch} "), Style::default().fg(ACCENT_DIM)),
+                Span::styled(
+                    "●",
+                    Style::default().fg(category_color(&child.facts.service_type)),
+                ),
+            ])),
+            Cell::from(Line::from(vec![
+                Span::styled(
+                    display::text(&child.facts.name),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    display::text(&format!(
+                        "  {}  {endpoint}{occurrences}",
+                        short_type(&child.facts.service_type)
+                    )),
+                    Style::default().fg(FG_DIM),
+                ),
+            ])),
+        ]));
+    }
+}
+
+/// The actions matching a row. They are matched against the row's concrete
+/// occurrences, so this section is valid for every projection.
+fn push_action_rows(rows: &mut Vec<Row<'static>>, actions: &[MatchResult]) {
     rows.push(section_row(&format!("actions ({})", actions.len())));
     if actions.is_empty() {
         rows.push(Row::new(vec![
             Cell::from(""),
             Cell::from(Span::styled(
-                "no configured commands match this service",
+                "no configured commands match this row",
                 Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
             )),
         ]));
-    } else {
-        for action in actions {
-            rows.push(action_row(action));
-        }
-        rows.push(Row::new(vec![
-            Cell::from(""),
-            Cell::from(Span::styled(
-                "press ⏎ to run",
-                Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
-            )),
-        ]));
+        return;
     }
+    for action in actions {
+        rows.push(action_row(action));
+    }
+    rows.push(Row::new(vec![
+        Cell::from(""),
+        Cell::from(Span::styled(
+            "press ⏎ to run",
+            Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
+        )),
+    ]));
+}
 
-    render_detail_rows(frame, app, area, block, rows);
+fn txt_row(key: &str, value: &TxtValue) -> Row<'static> {
+    let value = match value {
+        TxtValue::Shared(value) => {
+            Span::styled(display::text(value), Style::default().fg(Color::White))
+        }
+        // The occurrences disagree: there is no service-wide value to show, and
+        // showing one of them would be a claim about all of them.
+        TxtValue::Mixed => Span::styled(
+            "‹differs per occurrence›",
+            Style::default().fg(WARN).add_modifier(Modifier::ITALIC),
+        ),
+    };
+    Row::new(vec![
+        Cell::from(Span::styled(
+            display::text(&format!(" {key}")),
+            Style::default().fg(WARN),
+        )),
+        Cell::from(Line::from(vec![
+            Span::styled("= ", Style::default().fg(ACCENT_DIM)),
+            value,
+        ])),
+    ])
+}
+
+fn port_text(port: Option<u16>) -> String {
+    port.map(|port| port.to_string())
+        .unwrap_or_else(|| "…".to_string())
 }
 
 fn field_row(label: &str, value: &str, value_color: Color) -> Row<'static> {
@@ -624,22 +813,18 @@ fn render_command_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         let last = group.services.len().saturating_sub(1);
         for (i, service) in group.services.iter().enumerate() {
             let branch = if i == last { "└─" } else { "├─" };
-            let host = service.hostname.as_deref().unwrap_or("…resolving");
             rows.push(Row::new(vec![
                 Cell::from(Line::from(vec![
                     Span::styled(format!(" {branch} "), Style::default().fg(ACCENT_DIM)),
-                    Span::styled(
-                        "●",
-                        Style::default().fg(category_color(&service.service_type)),
-                    ),
+                    Span::styled("●", Style::default().fg(row_color(service.facts()))),
                 ])),
                 Cell::from(Line::from(vec![
                     Span::styled(
-                        display::text(&service.label),
+                        display::text(service.label()),
                         Style::default().fg(Color::White),
                     ),
                     Span::styled(
-                        display::text(&format!("  {host}")),
+                        display::text(&format!("  {}", host_text(service.facts()))),
                         Style::default().fg(FG_DIM),
                     ),
                 ])),
@@ -821,12 +1006,14 @@ fn render_service_picker(frame: &mut Frame<'_>, app: &App) {
         services,
         app.service_picker_index,
         |service, selected, base| {
-            let host = service.hostname.as_deref().unwrap_or("…resolving");
             Line::from(vec![
                 gutter_span(selected),
-                Span::styled("● ", base.fg(category_color(&service.service_type))),
-                Span::styled(display::text(&service.label), base.fg(Color::White)),
-                Span::styled(display::text(&format!("  {host}")), base.fg(FG_DIM)),
+                Span::styled("● ", base.fg(row_color(service.facts()))),
+                Span::styled(display::text(service.label()), base.fg(Color::White)),
+                Span::styled(
+                    display::text(&format!("  {}", host_text(service.facts()))),
+                    base.fg(FG_DIM),
+                ),
             ])
         },
     );
@@ -871,7 +1058,7 @@ fn render_help(frame: &mut Frame<'_>) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "   badges:  ×N instances   ★N matching commands",
+        "   badges:  ×N occurrences   ★N matching commands",
         Style::default().fg(FG_DIM),
     )));
     render_popup(
@@ -1177,12 +1364,12 @@ fn build_list_items<T>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
+    use std::{num::NonZeroU32, sync::mpsc};
 
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
     use crate::{
-        discovery::{DiscoveryBackend, group_entries},
+        discovery::{BrowseMode, DiscoveryBackend, OccurrenceId, browse_groups},
         plumber::{ActionMode, CommandAction, CommandConfig, Matcher},
         ui::{
             app::App,
@@ -1338,7 +1525,7 @@ mod tests {
         app.mode = AppMode::Search;
         app.filter.text_query = "query\t\u{7f}".to_string();
         app.service_types = vec![entry.service_type.clone()];
-        app.visible_groups = group_entries(&[entry.clone()], GroupingMode::LogicalService);
+        app.visible_groups = browse_groups(&[entry.clone()], BrowseMode::LogicalService);
         app.group_matches = vec![Vec::new()];
         app.records.insert(entry.id(), entry.clone());
 
@@ -1370,6 +1557,179 @@ mod tests {
             Some(raw_txt_value)
         );
         assert!(fuzzy_match(&stored.searchable_text(), "svc\u{1b}[2J"));
+    }
+
+    // ── mode-aware aggregate rendering ─────────────────────────────────────
+
+    fn service_on(
+        name: &str,
+        service_type: &str,
+        host: &str,
+        port: u16,
+        txt: &[(&str, &str)],
+    ) -> Entry {
+        let mut record = Entry::new(name, service_type, "local");
+        record.hostname = Some(host.to_string());
+        record.addresses = vec!["192.0.2.1".parse().unwrap()];
+        record.port = Some(port);
+        record.txt = txt
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        record
+    }
+
+    /// An app showing `records` under `mode`, as a render pass would see it.
+    fn browsing(mode: GroupingMode, records: &[Entry]) -> App {
+        let mut app = test_app("local");
+        app.filter.grouping = mode;
+        for record in records {
+            app.records.insert(record.id(), record.clone());
+        }
+        app.service_types = crate::ui::filter::FilterState::discovered_types(records);
+        app.filter.sync_service_types(records);
+        app.visible_groups = browse_groups(records, mode.browse_mode().expect("a browse mode"));
+        app.group_matches = vec![Vec::new(); app.visible_groups.len()];
+        app
+    }
+
+    #[test]
+    fn host_details_list_every_service_and_claim_no_representative_metadata() {
+        // One host offering SSH and HTTP on different ports with different TXT.
+        let app = browsing(
+            GroupingMode::Host,
+            &[
+                service_on("shell", "_ssh._tcp", "nas.local", 22, &[("v", "2")]),
+                service_on("site", "_http._tcp", "nas.local", 80, &[("path", "/admin")]),
+            ],
+        );
+
+        let rendered = buffer_text(&render_buffer(&app, 180, 36));
+
+        // Both children are listed with their own type and port.
+        assert!(rendered.contains("shell"), "{rendered}");
+        assert!(rendered.contains("site"), "{rendered}");
+        assert!(rendered.contains(":22"));
+        assert!(rendered.contains(":80"));
+        assert!(rendered.contains("services (2)"));
+        assert!(rendered.contains("2 occurrence(s)"));
+
+        // No child's TXT data is presented as the host's.
+        assert!(!rendered.contains("TXT records"), "{rendered}");
+        assert!(!rendered.contains("/admin"), "{rendered}");
+    }
+
+    #[test]
+    fn service_type_details_list_every_host_and_claim_no_representative_metadata() {
+        // One type offered by several hosts with different metadata, plus a
+        // registration that has not resolved a host yet.
+        let app = browsing(
+            GroupingMode::ServiceType,
+            &[
+                service_on("alpha", "_ssh._tcp", "alpha.local", 22, &[("os", "linux")]),
+                service_on("beta", "_ssh._tcp", "beta.local", 2222, &[("os", "bsd")]),
+                Entry::new("ghost", "_ssh._tcp", "local"),
+            ],
+        );
+
+        let rendered = buffer_text(&render_buffer(&app, 180, 36));
+
+        // Every child host is listed against its own service.
+        assert!(rendered.contains("alpha.local:22"), "{rendered}");
+        assert!(rendered.contains("beta.local:2222"), "{rendered}");
+        assert!(rendered.contains("services (3)"));
+        // Only the hosts that resolved count as hosts.
+        assert!(rendered.contains("2 resolved"));
+        assert!(rendered.contains("3 occurrence(s)"));
+
+        // No child's TXT data is presented as the type's.
+        assert!(!rendered.contains("TXT records"), "{rendered}");
+        assert!(!rendered.contains("linux"), "{rendered}");
+    }
+
+    #[test]
+    fn logical_service_details_show_shared_txt_and_flag_values_that_differ() {
+        // Two occurrences of one service that disagree about their TXT data.
+        let mut wired = service_on(
+            "alpha",
+            "_ssh._tcp",
+            "alpha.local",
+            22,
+            &[("model", "rpi5"), ("iface", "eth0")],
+        );
+        wired.addresses = vec!["10.0.0.1".parse().unwrap()];
+        let wired = wired.with_occurrence(Some(OccurrenceId(NonZeroU32::new(1).unwrap())));
+        let mut wireless = service_on(
+            "alpha",
+            "_ssh._tcp",
+            "alpha.local",
+            22,
+            &[("model", "rpi5"), ("iface", "wlan0")],
+        );
+        wireless.addresses = vec!["10.0.0.2".parse().unwrap()];
+        let wireless = wireless.with_occurrence(Some(OccurrenceId(NonZeroU32::new(2).unwrap())));
+
+        let app = browsing(GroupingMode::LogicalService, &[wired, wireless]);
+        assert_eq!(app.visible_groups.len(), 1);
+
+        let rendered = buffer_text(&render_buffer(&app, 180, 36));
+
+        // The value both occurrences agree on is the service's.
+        assert!(rendered.contains("rpi5"), "{rendered}");
+        // The value they disagree on is nobody's: neither is shown as the
+        // service's, and the disagreement is stated instead.
+        assert!(rendered.contains("differs per occurrence"), "{rendered}");
+        assert!(!rendered.contains("eth0"), "{rendered}");
+        assert!(!rendered.contains("wlan0"), "{rendered}");
+
+        // The addresses that differ appear per occurrence.
+        assert!(rendered.contains("occurrences (2)"));
+        assert!(rendered.contains("10.0.0.1"), "{rendered}");
+        assert!(rendered.contains("10.0.0.2"), "{rendered}");
+    }
+
+    #[test]
+    fn an_unresolved_host_row_renders_as_unresolved_not_as_a_host() {
+        let app = browsing(
+            GroupingMode::Host,
+            &[Entry::new("ghost", "_ipp._tcp", "local")],
+        );
+
+        let rendered = buffer_text(&render_buffer(&app, 180, 36));
+
+        assert!(rendered.contains("<unresolved host>"), "{rendered}");
+        assert!(rendered.contains("not resolved yet"), "{rendered}");
+        assert!(rendered.contains("services (1)"));
+    }
+
+    #[test]
+    fn every_view_renders_with_nothing_discovered() {
+        for mode in GroupingMode::TABS {
+            let mut app = test_app("local");
+            app.filter.grouping = mode;
+
+            let rendered = buffer_text(&render_buffer(&app, 120, 24));
+
+            let expected = if mode == GroupingMode::Command {
+                "no commands configured"
+            } else {
+                "listening for mDNS services"
+            };
+            assert!(rendered.contains(expected), "{mode:?}: {rendered}");
+        }
+    }
+
+    #[test]
+    fn tab_counts_are_rendered_from_the_apps_row_counts() {
+        let mut app = browsing(GroupingMode::LogicalService, &[]);
+        app.tab_counts = [4, 3, 2, 1];
+
+        let rendered = buffer_text(&render_buffer(&app, 120, 24));
+
+        assert!(rendered.contains("services 4"), "{rendered}");
+        assert!(rendered.contains("hosts 3"));
+        assert!(rendered.contains("types 2"));
+        assert!(rendered.contains("commands 1"));
     }
 
     #[test]

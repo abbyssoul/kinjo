@@ -116,6 +116,11 @@ help = ["?"]
 `tab_next` and `tab_prev` switch the active top-panel view tab
 (services / hosts / types / commands), wrapping around the ends.
 
+`same_host` narrows the list to the selected row's host. It needs a row with a
+single host, so it applies in the services and hosts tabs; the types and
+commands tabs report it unavailable rather than guessing a host from one of a
+row's children. An active host filter can be cleared from any tab.
+
 `refresh` restarts service discovery from scratch: the list empties and
 repopulates as the fresh browse reports services, exactly like app startup.
 Filters and the active view are kept.

@@ -15,8 +15,10 @@ mod zeroconf;
 use std::sync::mpsc;
 
 pub use entry::{
-    Entry, EntryGroup, EntryId, GroupingMode, OccurrenceId, Registration, decode_dns_sd_escapes,
-    group_entries,
+    BrowseMode, ChildService, Entry, EntryGroup, EntryGroupId, EntryId, GroupFacts, GroupingMode,
+    HostAggregate, HostKey, LogicalService, OccurrenceId, Registration, RowHost, RowServiceType,
+    ServiceTypeAggregate, TxtValue, UNRESOLVED_HOST_LABEL, browse_groups, browse_row_count,
+    decode_dns_sd_escapes,
 };
 
 /// The mDNS/DNS-SD library used to discover services.
