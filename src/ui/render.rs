@@ -12,7 +12,7 @@ use ratatui::{
 };
 
 use crate::{
-    discovery::{Entry, EntryGroup, GroupingMode},
+    discovery::{Entry, EntryGroup, GroupingMode, SessionState},
     plumber::MatchResult,
 };
 
@@ -211,6 +211,21 @@ fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
             )),
             Line::from(Span::styled(
                 "  press esc to clear search, t to adjust types",
+                Style::default().fg(FG_DIM),
+            )),
+        ]
+    } else if let SessionState::Failed(failure) = app.session.state() {
+        // Discovery is over. A spinner and "listening…" here would be a lie
+        // about a browse that is not running, and would leave the user waiting
+        // for services that can never arrive.
+        vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                display::text(&format!("  {}", failure.headline())),
+                Style::default().fg(WARN),
+            )),
+            Line::from(Span::styled(
+                display::text(&format!("  {}", failure.cause)),
                 Style::default().fg(FG_DIM),
             )),
         ]
@@ -1177,12 +1192,10 @@ fn build_list_items<T>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
-
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
     use crate::{
-        discovery::{DiscoveryBackend, group_entries},
+        discovery::{DiscoveryBackend, DiscoverySession, group_entries},
         plumber::{ActionMode, CommandAction, CommandConfig, Matcher},
         ui::{
             app::App,
@@ -1202,7 +1215,6 @@ mod tests {
     }
 
     fn test_app(domain: &str) -> App {
-        let (_tx, rx) = mpsc::channel();
         App::new(
             Cli {
                 domain: domain.to_string(),
@@ -1214,7 +1226,7 @@ mod tests {
             },
             Matcher::default(),
             KeyBindings::default(),
-            rx,
+            DiscoverySession::inert(),
         )
     }
 
@@ -1234,6 +1246,39 @@ mod tests {
             output.push('\n');
         }
         output
+    }
+
+    /// An empty list while a browse is running is a quiet network, and saying
+    /// so is honest.
+    #[test]
+    fn an_empty_list_on_a_live_session_says_it_is_listening() {
+        let app = test_app("local");
+
+        let text = buffer_text(&render_buffer(&app, 100, 24));
+
+        assert!(text.contains("listening for mDNS services on local"));
+    }
+
+    /// The same empty list after discovery has failed must not claim to be
+    /// listening: nothing is browsing, so no service can ever arrive, and the
+    /// user would wait forever for one.
+    #[test]
+    fn an_empty_list_on_a_failed_session_reports_the_failure_not_listening() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = test_app("local");
+        app.session = DiscoverySession::detached(rx);
+        // The producer goes away; polling is what notices.
+        drop(tx);
+        app.session.poll();
+
+        let text = buffer_text(&render_buffer(&app, 100, 24));
+
+        assert!(
+            !text.contains("listening for mDNS services"),
+            "a dead browse must not be rendered as a live one: {text}"
+        );
+        assert!(text.contains("discovery stopped"));
+        assert!(text.contains("the browse ended unexpectedly"));
     }
 
     #[test]

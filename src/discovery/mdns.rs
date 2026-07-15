@@ -12,7 +12,8 @@ use mdns_sd_discovery::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::worker::{DiscoveryWorker, RuntimeFlavor};
+use super::session::DiscoverySession;
+use super::worker::{BrowseOutcome, DiscoveryWorker, RuntimeFlavor};
 use super::{DiscoveryConfig, DiscoveryEvent, Entry, EntryId, OccurrenceId, Registration};
 
 /// How often known services are re-confirmed with a one-shot resolve.
@@ -134,8 +135,8 @@ impl LivenessTracker {
 
 /// Start the mDNS/Avahi discovery backend: it browses the link for DNS-SD
 /// services via the `mdns-sd-discovery` crate and streams them as
-/// [`DiscoveryEvent`]s. Reports a [`DiscoveryEvent::Status`] and emits no
-/// entries when the browse cannot be started.
+/// [`DiscoveryEvent`]s. A browse that cannot be started emits no entries and
+/// reports a [`BrowseOutcome::Startup`] carrying the cause.
 ///
 /// Unlike the `zeroconf` backend, `mdns-sd-discovery` exposes the native
 /// DNS-SD service-type enumeration meta-query, so a single browser discovers
@@ -143,8 +144,9 @@ impl LivenessTracker {
 /// list of types in parallel. The probe futures are not `Send` on every
 /// platform (Windows holds raw pointers across awaits), so the loop runs on a
 /// current-thread runtime and drives them itself.
-pub(super) fn start(config: &DiscoveryConfig) -> DiscoveryWorker {
-    DiscoveryWorker::spawn(config, RuntimeFlavor::CurrentThread, browse_loop)
+pub(super) fn start(config: &DiscoveryConfig) -> DiscoverySession {
+    let (worker, rx) = DiscoveryWorker::spawn(config, RuntimeFlavor::CurrentThread, browse_loop);
+    DiscoverySession::from_worker(rx, worker)
 }
 
 async fn browse_loop(
@@ -152,7 +154,7 @@ async fn browse_loop(
     service_type_filter: Option<String>,
     tx: mpsc::Sender<DiscoveryEvent>,
     shutdown: CancellationToken,
-) {
+) -> BrowseOutcome {
     let mut builder = ServiceBrowserBuilder::new();
     if let Some(service_type) = &service_type_filter {
         builder.service_type(service_type);
@@ -165,11 +167,13 @@ async fn browse_loop(
 
     let mut browser = match builder.browse().await {
         Ok(browser) => browser,
+        // The cause is returned rather than sent as a `Status`: a startup
+        // error must outlive the status line, and the session turns this into
+        // a persistent failure state.
         Err(err) => {
-            let _ = tx.send(DiscoveryEvent::Status(format!(
+            return BrowseOutcome::Startup(format!(
                 "mDNS discovery unavailable ({err}); try --fake-discovery for sample records, or refresh to retry"
-            )));
-            return;
+            ));
         }
     };
 
@@ -185,9 +189,11 @@ async fn browse_loop(
     let mut probe_timer = tokio::time::interval(PROBE_INTERVAL);
     probe_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // Dropping `browser` when this loop returns stops the underlying native
+    // browse operation.
     loop {
         tokio::select! {
-            _ = shutdown.cancelled() => break,
+            _ = shutdown.cancelled() => break BrowseOutcome::Cancelled,
             _ = probe_timer.tick() => {
                 let keys = tracker.probe_keys();
                 if keys.is_empty() {
@@ -196,10 +202,10 @@ async fn browse_loop(
                 // A probe cycle is bounded by PROBE_TIMEOUT, but stay
                 // responsive to shutdown while it runs.
                 tokio::select! {
-                    _ = shutdown.cancelled() => break,
+                    _ = shutdown.cancelled() => break BrowseOutcome::Cancelled,
                     results = probe_services(keys) => {
                         if !apply_probe_results(results, &mut tracker, &tx) {
-                            break;
+                            break BrowseOutcome::Stopped;
                         }
                     }
                 }
@@ -208,17 +214,20 @@ async fn browse_loop(
                 Some(Ok(event)) => {
                     track_event(&event, &mut tracker);
                     if !emit_event(event, &tx) {
-                        break;
+                        break BrowseOutcome::Stopped;
                     }
                 }
+                // A single browse error is not the end of the browse: the
+                // browser keeps running, so this stays a transient status.
                 Some(Err(err)) => {
                     let _ = tx.send(DiscoveryEvent::Status(format!("mDNS browse error: {err}")));
                 }
-                None => break,
+                // The browser's stream ended on its own: discovery is over and
+                // the caller must not be told it is still listening.
+                None => break BrowseOutcome::Stopped,
             }
         }
     }
-    // Dropping `browser` stops the underlying native browse operation.
 }
 
 /// Keeps the liveness tracker in sync with what the browser reports.

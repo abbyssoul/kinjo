@@ -58,10 +58,21 @@ cargo install kinjo --features zeroconf
 kinjo --backend zeroconf
 ```
 
-When a `--service-type` is given, only that type is browsed. If mDNS discovery is
-unavailable, the list stays empty and the status line explains why; it never
-falls back to sample records. Pass `--fake-discovery` for sample records on
-demand, or refresh to retry real discovery.
+When a `--service-type` is given, only that type is browsed.
+
+Discovery never falls back to sample records. If mDNS discovery is unavailable,
+the list stays empty and the status line explains why. If a running browse stops
+unexpectedly, `kinjo` says so and clears the list rather than leaving stale
+entries on screen: mDNS is edge-triggered, so once the browse is gone nothing can
+report that a listed service has since disappeared, and a command launched at one
+could be pointed at a host that is no longer there. Either way the failure and its
+cause stay on screen rather than scrolling past — discovery is not retried
+automatically. Refresh (`r`) restarts it, and is the recovery action from a
+failure.
+
+Pass `--fake-discovery` for sample records on demand. Those samples are a short,
+finite stream; when it ends the status line reports normal completion and the
+samples remain listed.
 
 ## Privacy
 
@@ -71,8 +82,8 @@ does and does not do with that access:
 - **No telemetry.** `kinjo` does not phone home, collect analytics, or send
   usage data anywhere. There is no update checker and no crash reporter.
 - **No proactive scanning.** `kinjo` never port-scans or probes hosts on its
-  own initiative. All discovery is delegated to a pluggable backend behind the
-  `Discovery` trait (see [Architecture](#architecture)), and every backend
+  own initiative. All discovery is delegated to a pluggable backend behind a
+  discovery session (see [Architecture](#architecture)), and every backend
   speaks only the standard mDNS/DNS-SD protocol — it surfaces services that
   are already being announced on the link, nothing more.
 - **Discovered data stays local.** Services found on the network are shown in
@@ -198,11 +209,14 @@ reused independently:
 
 1. **Discovery** (`src/discovery/`) — the producer of *entries*. An entry is a
    discovered record described entirely by its attributes (name, type, host,
-   address, port, TXT, …). A backend implements the `Discovery` trait and emits
-   `Entry` values; `Entry` is the only contract the rest of the program depends
-   on. The mDNS/Avahi backend is the default, with a built-in sample backend for
-   `--fake-discovery` — but you could drop in a different DNS-SD source, a static
-   file, or an SSDP/UPnP browser without touching anything else.
+   address, port, TXT, …); `Entry` is the only contract the rest of the program
+   depends on. Starting discovery hands back a `DiscoverySession`: one value
+   owning the running adapter, its events, its state, and its shutdown, so the
+   caller cannot hold a receiver whose producer has silently died, and dropping
+   it stops the browse. Adapters vary behind that session — the mDNS/Avahi
+   backend is the default, with a built-in sample backend for `--fake-discovery`
+   — and you could drop in a different DNS-SD source, a static file, or an
+   SSDP/UPnP browser without touching anything else.
 2. **Plumber** (`src/plumber/`) — the rules engine. A serializable collection of
    command rules (the TOML command files) is matched against entries by their
    attributes; multiple rules can match one entry, and a matching rule can be

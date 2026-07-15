@@ -6,7 +6,8 @@ use zeroconf_tokio::{
     BrowserEvent, MdnsBrowser, MdnsBrowserAsync, ServiceDiscovery, ServiceRemoval, ServiceType,
 };
 
-use super::worker::{DiscoveryWorker, RuntimeFlavor};
+use super::session::DiscoverySession;
+use super::worker::{BrowseOutcome, DiscoveryWorker, RuntimeFlavor};
 use super::{DiscoveryConfig, DiscoveryEvent, Entry, Registration};
 
 /// DNS-SD service types browsed when the user does not pass `--service-type`.
@@ -40,22 +41,23 @@ const DEFAULT_SERVICE_TYPES: &[&str] = &[
 
 /// Start the mDNS/Avahi discovery backend built on the `zeroconf` crate: it
 /// sweeps the link for DNS-SD services and streams them as [`DiscoveryEvent`]s.
-/// Reports a [`DiscoveryEvent::Status`] and emits no entries when no browser
-/// can be started.
+/// When no browser can be started it emits no entries and reports a
+/// [`BrowseOutcome::Startup`] carrying the cause.
 ///
 /// Unlike the [`mdns`](super::mdns) backend, `zeroconf` wraps the native
 /// Avahi/Bonjour APIs which browse one concrete service type at a time, so this
 /// backend sweeps [`DEFAULT_SERVICE_TYPES`] in parallel (on a multi-threaded
 /// runtime) when no filter is given.
-pub(super) fn start(config: &DiscoveryConfig) -> DiscoveryWorker {
+pub(super) fn start(config: &DiscoveryConfig) -> DiscoverySession {
     let service_types = resolve_service_types(config.service_type.as_deref());
-    DiscoveryWorker::spawn(
+    let (worker, rx) = DiscoveryWorker::spawn(
         config,
         RuntimeFlavor::MultiThread,
         move |domain, service_type_filter, tx, shutdown| {
             browse_loop(service_types, domain, service_type_filter, tx, shutdown)
         },
-    )
+    );
+    DiscoverySession::from_worker(rx, worker)
 }
 
 async fn browse_loop(
@@ -64,7 +66,7 @@ async fn browse_loop(
     _service_type_filter: Option<String>,
     tx: mpsc::Sender<DiscoveryEvent>,
     shutdown: CancellationToken,
-) {
+) -> BrowseOutcome {
     let mut workers = Vec::new();
     for service_type in service_types {
         let label = format_service_type(&service_type);
@@ -89,12 +91,14 @@ async fn browse_loop(
         }
     }
 
+    // Not one service type could be browsed: the adapter never started. The
+    // cause is returned rather than sent as a `Status`, so it becomes a
+    // persistent failure state instead of a status line the next event erases.
     if workers.is_empty() {
-        let _ = tx.send(DiscoveryEvent::Status(
+        return BrowseOutcome::Startup(
             "mDNS discovery unavailable; try --fake-discovery for sample records, or refresh to retry"
                 .to_string(),
-        ));
-        return;
+        );
     }
 
     let _ = tx.send(DiscoveryEvent::Status(format!(
@@ -104,6 +108,15 @@ async fn browse_loop(
 
     for worker in workers {
         let _ = worker.await;
+    }
+
+    // Every per-type browser finished. That is either the shutdown they all
+    // select on, or the browsers ending by themselves — which means discovery
+    // is over and nothing further will arrive.
+    if shutdown.is_cancelled() {
+        BrowseOutcome::Cancelled
+    } else {
+        BrowseOutcome::Stopped
     }
 }
 
@@ -243,15 +256,73 @@ mod tests {
 
     /// No configured service type can start a browser (simulated here with an
     /// empty type list, deterministic regardless of Avahi availability): the
-    /// loop must report only a `Status`, never fabricate an entry.
+    /// loop must report a startup failure with its cause and never fabricate an
+    /// entry. A user whose Avahi is down must not be handed sample devices they
+    /// could act on.
     #[tokio::test]
-    async fn no_started_workers_emits_status_only_no_upsert() {
+    async fn no_started_workers_is_a_startup_failure_with_no_upsert() {
         let (tx, rx) = mpsc::channel();
         let shutdown = CancellationToken::new();
 
-        browse_loop(Vec::new(), "local".to_string(), None, tx, shutdown).await;
+        let outcome = browse_loop(Vec::new(), "local".to_string(), None, tx, shutdown).await;
 
+        match outcome {
+            BrowseOutcome::Startup(cause) => {
+                assert!(cause.contains("mDNS discovery unavailable"));
+                assert!(cause.contains("refresh to retry"));
+            }
+            other => panic!("expected a startup failure, got {other:?}"),
+        }
         let events: Vec<_> = rx.try_iter().collect();
-        assert!(matches!(events.as_slice(), [DiscoveryEvent::Status(_)]));
+        assert!(
+            events.is_empty(),
+            "a failed zeroconf start must emit no events at all, and above all no sample Upsert: {events:?}"
+        );
+    }
+
+    /// The whole `zeroconf` session, not just its loop: a failed start must
+    /// surface as a typed failure carrying the cause, with no sample records.
+    #[test]
+    fn a_failed_zeroconf_session_reports_a_typed_failure_and_no_samples() {
+        use crate::discovery::{FailureKind, SessionPoll, SessionState};
+
+        // An unparseable service type would fall back to the default sweep, so
+        // drive the no-browser case through the loop the session runs.
+        let (worker, rx) = DiscoveryWorker::spawn(
+            &DiscoveryConfig {
+                fake: false,
+                backend: crate::discovery::DiscoveryBackend::Zeroconf,
+                domain: "local".to_string(),
+                service_type: None,
+            },
+            RuntimeFlavor::MultiThread,
+            move |domain, service_type_filter, tx, shutdown| {
+                browse_loop(Vec::new(), domain, service_type_filter, tx, shutdown)
+            },
+        );
+        let mut session = DiscoverySession::from_worker(rx, worker);
+
+        let mut events = Vec::new();
+        let state = loop {
+            match session.poll() {
+                SessionPoll::Event(event) => events.push(event),
+                SessionPoll::Idle => std::thread::yield_now(),
+                SessionPoll::Ended(state) => break state,
+            }
+        };
+
+        match state {
+            SessionState::Failed(failure) => {
+                assert_eq!(failure.kind, FailureKind::Startup);
+                assert!(failure.cause.contains("mDNS discovery unavailable"));
+            }
+            other => panic!("expected a failed session, got {other:?}"),
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, DiscoveryEvent::Upsert(_))),
+            "no sample Upsert may reach the UI on a real adapter failure"
+        );
     }
 }

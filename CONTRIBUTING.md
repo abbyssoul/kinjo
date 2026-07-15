@@ -108,8 +108,8 @@ CI runs a short soak on every push/PR and a longer one on a weekly schedule
 
 ## Project Layout
 
-- `src/discovery/`: the discovery layer — produces `Entry` values behind the
-  `Discovery` trait (mDNS and fake backends).
+- `src/discovery/`: the discovery layer — produces `Entry` values from a
+  `DiscoverySession` that owns the running adapter (mDNS and fake backends).
 - `src/plumber/`: the rules engine — command-file parsing, matching, and
   execution behind the `RuleEngine` trait.
 - `src/ui/`: CLI parsing, config/keymap loading, app state, and rendering.

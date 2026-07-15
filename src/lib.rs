@@ -1,7 +1,7 @@
 //! kinjo is built from three deliberately decoupled parts:
 //!
-//! - [`discovery`] produces *entries* (mDNS today, swappable behind the
-//!   [`discovery::Discovery`] trait),
+//! - [`discovery`] produces *entries* (mDNS today), handing the caller a
+//!   [`discovery::DiscoverySession`] that owns the running adapter,
 //! - [`plumber`] is the rules engine that matches entries and runs commands
 //!   (behind the [`plumber::RuleEngine`] trait),
 //! - [`ui`] ties them together for a person at the terminal.
@@ -37,12 +37,13 @@ pub fn run() -> Result<()> {
     }
 
     let keybindings = ui::config::load_keybindings()?;
-    let mut discovery = discovery::start(&cli.discovery_config());
-    let discovery_rx = discovery.events();
+    // One value carries the running adapter and its events, so composition has
+    // nothing to take apart and reattach.
+    let session = discovery::start(&cli.discovery_config());
 
-    let mut app = App::new(cli, matcher, keybindings, discovery_rx)
-        // The app owns the backend so its refresh command can restart it.
-        .with_discovery(discovery, Box::new(discovery::start))
+    let mut app = App::new(cli, matcher, keybindings, session)
+        // The factory lets the app's refresh command start a replacement session.
+        .with_discovery_factory(Box::new(discovery::start))
         .with_config_loader(Box::new(|cli| {
             ui::config::load_matcher(cli)
                 .map(|(matcher, warnings)| (Box::new(matcher) as Box<dyn RuleEngine>, warnings))
@@ -58,8 +59,8 @@ pub fn run() -> Result<()> {
     }
     let exec_action = ratatui::run(|terminal| app.run(terminal))?;
 
-    // The app owns the discovery backend; dropping it stops the browse worker
-    // before a potential exec hand-off replaces the process.
+    // The app owns the discovery session; dropping it cancels and joins the
+    // browse worker before a potential exec hand-off replaces the process.
     drop(app);
 
     // The status line is transient; repeat skipped-config details somewhere
