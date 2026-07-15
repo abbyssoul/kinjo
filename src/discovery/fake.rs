@@ -1,48 +1,62 @@
-use std::{sync::mpsc, thread, time::Duration};
+use std::{sync::mpsc, time::Duration};
 
-use super::{Discovery, DiscoveryConfig, DiscoveryEvent, Entry};
+use tokio_util::sync::CancellationToken;
 
-/// Built-in sample-records discovery backend. Used for demos and the
-/// explicit `--fake-discovery` flag.
-pub struct FakeDiscovery {
-    receiver: Option<mpsc::Receiver<DiscoveryEvent>>,
+use super::session::DiscoverySession;
+use super::worker::{BrowseOutcome, DiscoveryWorker, RuntimeFlavor};
+use super::{DiscoveryConfig, DiscoveryEvent, Entry};
+
+/// Pause between sample records, so the list populates visibly rather than
+/// appearing all at once.
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(150);
+
+/// Start the built-in sample-records backend. Reached only when the user asks
+/// for it with `--fake-discovery`: a real adapter's failure never falls back
+/// here, because a plausible `192.168.1.x` endpoint the user did not ask for is
+/// an actionable lie.
+///
+/// The sample stream is finite. It runs on the same worker scaffold as the real
+/// adapters so that it is cancellable mid-stream and dropping its session stops
+/// it, and so that running out of samples is reported as a normal
+/// [`BrowseOutcome::Complete`] rather than as a discovery failure.
+pub(super) fn start(config: &DiscoveryConfig) -> DiscoverySession {
+    let (worker, rx) = DiscoveryWorker::spawn(config, RuntimeFlavor::CurrentThread, sample_loop);
+    DiscoverySession::from_worker(rx, worker)
 }
 
-impl FakeDiscovery {
-    pub fn start(config: &DiscoveryConfig) -> Self {
-        let (tx, rx) = mpsc::channel();
-        spawn(config.domain.clone(), config.service_type.clone(), tx);
-        Self { receiver: Some(rx) }
-    }
-}
-
-impl Discovery for FakeDiscovery {
-    fn events(&mut self) -> mpsc::Receiver<DiscoveryEvent> {
-        self.receiver
-            .take()
-            .expect("discovery receiver can only be taken once")
-    }
-}
-
-/// Stream the sample records over `tx`.
-pub(super) fn spawn(
+/// Stream the sample records, pausing between them and staying responsive to
+/// cancellation while paused.
+async fn sample_loop(
     domain: String,
     service_type_filter: Option<String>,
     tx: mpsc::Sender<DiscoveryEvent>,
-) {
-    thread::spawn(move || {
-        let _ = tx.send(DiscoveryEvent::Status(
+    shutdown: CancellationToken,
+) -> BrowseOutcome {
+    if tx
+        .send(DiscoveryEvent::Status(
             "using sample discovery records".to_string(),
-        ));
-        let mut records = fake_records(&domain);
-        if let Some(service_type) = service_type_filter {
-            records.retain(|record| record.service_type == service_type);
+        ))
+        .is_err()
+    {
+        return BrowseOutcome::Stopped;
+    }
+
+    let mut records = fake_records(&domain);
+    if let Some(service_type) = service_type_filter {
+        records.retain(|record| record.service_type == service_type);
+    }
+
+    for record in records {
+        if tx.send(DiscoveryEvent::Upsert(record)).is_err() {
+            return BrowseOutcome::Stopped;
         }
-        for record in records {
-            let _ = tx.send(DiscoveryEvent::Upsert(record));
-            thread::sleep(Duration::from_millis(150));
+        tokio::select! {
+            _ = shutdown.cancelled() => return BrowseOutcome::Cancelled,
+            _ = tokio::time::sleep(SAMPLE_INTERVAL) => {}
         }
-    });
+    }
+
+    BrowseOutcome::Complete
 }
 
 fn fake_records(domain: &str) -> Vec<Entry> {
@@ -94,10 +108,20 @@ mod tests {
         assert_eq!(ssh[0].addresses.len(), 2);
     }
 
-    #[test]
-    fn spawn_streams_status_then_filtered_records() {
+    #[tokio::test]
+    async fn the_sample_loop_streams_status_then_filtered_records_and_completes() {
         let (tx, rx) = mpsc::channel();
-        spawn("local".to_string(), Some("_ssh._tcp".to_string()), tx);
+
+        let outcome = sample_loop(
+            "local".to_string(),
+            Some("_ssh._tcp".to_string()),
+            tx,
+            CancellationToken::new(),
+        )
+        .await;
+
+        // Running out of samples is a normal completion, not a failure.
+        assert_eq!(outcome, BrowseOutcome::Complete);
 
         let mut statuses = 0;
         let mut upserts = Vec::new();
@@ -116,5 +140,40 @@ mod tests {
                 .iter()
                 .all(|record| record.service_type == "_ssh._tcp")
         );
+    }
+
+    /// Cancellation must be honoured while the stream is sleeping between
+    /// records, not only between sends: otherwise dropping a session would
+    /// block for the rest of the samples.
+    #[tokio::test]
+    async fn the_sample_loop_stops_when_cancelled_mid_stream() {
+        let (tx, rx) = mpsc::channel();
+        let shutdown = CancellationToken::new();
+        // Cancelled up front: the loop must bail out at its first pause.
+        shutdown.cancel();
+
+        let outcome = sample_loop("local".to_string(), None, tx, shutdown).await;
+
+        assert_eq!(outcome, BrowseOutcome::Cancelled);
+        let upserts = rx
+            .iter()
+            .filter(|event| matches!(event, DiscoveryEvent::Upsert(_)))
+            .count();
+        assert_eq!(
+            upserts, 1,
+            "the loop stops at its first pause, having sent one record"
+        );
+    }
+
+    /// A receiver that has gone away ends the loop instead of streaming into a
+    /// channel nobody reads.
+    #[tokio::test]
+    async fn the_sample_loop_stops_when_the_receiver_is_gone() {
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+
+        let outcome = sample_loop("local".to_string(), None, tx, CancellationToken::new()).await;
+
+        assert_eq!(outcome, BrowseOutcome::Stopped);
     }
 }

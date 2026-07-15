@@ -2,22 +2,31 @@
 //!
 //! A discovery backend streams [`DiscoveryEvent`]s as entries appear, disappear,
 //! or status changes. [`Entry`] is the contract type shared with the rest of the
-//! program — swapping in a different backend (e.g. a non-mDNS DNS-SD source)
-//! only requires implementing [`Discovery`] and producing `Entry` values.
+//! program.
+//!
+//! [`start`] hands back a [`DiscoverySession`]: the owned lifetime of a running
+//! adapter. The session is the whole interface — events, state, and shutdown —
+//! so callers never hold a receiver whose producer they cannot see, and never
+//! mistake a dead adapter for a quiet network.
+//!
+//! The adapter seam lives *inside* this module, at the browse loop: `mdns-sd`,
+//! `zeroconf`, and the explicit fake genuinely differ in how they browse, but
+//! they do not differ in how a caller runs and stops them. That is why there is
+//! one concrete session type rather than a trait over receivers.
 
 mod entry;
 mod fake;
 mod mdns;
+mod session;
 mod worker;
 #[cfg(feature = "zeroconf")]
 mod zeroconf;
-
-use std::sync::mpsc;
 
 pub use entry::{
     Entry, EntryGroup, EntryId, GroupingMode, OccurrenceId, Registration, decode_dns_sd_escapes,
     group_entries,
 };
+pub use session::{DiscoveryFailure, DiscoverySession, FailureKind, SessionPoll, SessionState};
 
 /// The mDNS/DNS-SD library used to discover services.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -67,20 +76,20 @@ pub struct DiscoveryConfig {
     pub service_type: Option<String>,
 }
 
-/// A swappable source of [`DiscoveryEvent`]s.
-pub trait Discovery {
-    /// Take the event receiver. Callable once.
-    fn events(&mut self) -> mpsc::Receiver<DiscoveryEvent>;
-}
-
-/// Construct the discovery backend selected by `config`.
-pub fn start(config: &DiscoveryConfig) -> Box<dyn Discovery> {
+/// Start the discovery adapter selected by `config` and return the session that
+/// owns it. Dropping the session stops the adapter.
+///
+/// Sample records come back only when `config.fake` is set. A real adapter that
+/// fails reports a [`SessionState::Failed`] and emits no entries: fabricating
+/// plausible LAN endpoints out of a failure would let a user act on a device
+/// that does not exist.
+pub fn start(config: &DiscoveryConfig) -> DiscoverySession {
     if config.fake {
-        return Box::new(fake::FakeDiscovery::start(config));
+        return fake::start(config);
     }
     match config.backend {
-        DiscoveryBackend::MdnsSd => Box::new(mdns::start(config)),
+        DiscoveryBackend::MdnsSd => mdns::start(config),
         #[cfg(feature = "zeroconf")]
-        DiscoveryBackend::Zeroconf => Box::new(zeroconf::start(config)),
+        DiscoveryBackend::Zeroconf => zeroconf::start(config),
     }
 }

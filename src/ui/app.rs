@@ -4,7 +4,6 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
-        mpsc,
     },
     time::Duration,
 };
@@ -20,8 +19,8 @@ use ratatui::{
 
 use crate::{
     discovery::{
-        Discovery, DiscoveryConfig, DiscoveryEvent, Entry, EntryGroup, EntryId, GroupingMode,
-        group_entries,
+        DiscoveryConfig, DiscoveryEvent, DiscoverySession, Entry, EntryGroup, EntryId,
+        GroupingMode, SessionPoll, SessionState, group_entries,
     },
     plumber::{self, ActionMode, CommandConfig, MatchResult, PreparedCommand, RuleEngine},
 };
@@ -32,8 +31,8 @@ use super::{cli::Cli, filter::FilterState, keymap::KeyBindings, render};
 /// composition root so the app stays decoupled from config-file I/O.
 pub type ConfigLoader = Box<dyn Fn(&Cli) -> Result<(Box<dyn RuleEngine>, Vec<String>)>>;
 
-/// Starts a replacement discovery backend for a service-list refresh.
-pub type DiscoveryFactory = Box<dyn Fn(&DiscoveryConfig) -> Box<dyn Discovery>>;
+/// Starts a replacement discovery session for a service-list refresh.
+pub type DiscoveryFactory = Box<dyn Fn(&DiscoveryConfig) -> DiscoverySession>;
 
 /// One row of the "group by command" view: a configured command together with
 /// the distinct logical services it matches.
@@ -58,7 +57,10 @@ pub struct App {
     pub cli: Cli,
     pub matcher: Box<dyn RuleEngine>,
     pub keybindings: KeyBindings,
-    pub discovery_rx: mpsc::Receiver<DiscoveryEvent>,
+    /// The running discovery session: its events, its state, and its shutdown.
+    /// One value, so the receiver and the adapter behind it cannot drift apart;
+    /// dropping or replacing it stops the producer.
+    pub session: DiscoverySession,
     pub records: BTreeMap<EntryId, Entry>,
     pub filter: FilterState,
     pub visible_groups: Vec<EntryGroup>,
@@ -77,10 +79,7 @@ pub struct App {
     pub reload_requested: Arc<AtomicBool>,
     /// Reloads command configs on request; reload is unavailable when unset.
     pub config_loader: Option<ConfigLoader>,
-    /// The running discovery backend. Owned by the app so the refresh command
-    /// can stop it and start a replacement; dropping it stops the browse.
-    pub discovery: Option<Box<dyn Discovery>>,
-    /// Starts a replacement discovery backend; refresh is unavailable when unset.
+    /// Starts a replacement discovery session; refresh is unavailable when unset.
     pub discovery_factory: Option<DiscoveryFactory>,
     /// Per-group action matches, parallel to `visible_groups`. Computed once
     /// per recompute so rendering and invocation share one result instead of
@@ -112,7 +111,7 @@ impl App {
         cli: Cli,
         matcher: impl RuleEngine + 'static,
         keybindings: KeyBindings,
-        discovery_rx: mpsc::Receiver<DiscoveryEvent>,
+        session: DiscoverySession,
     ) -> Self {
         let status = format!(
             "domain: {} | commands: {} | waiting for services",
@@ -123,7 +122,7 @@ impl App {
             cli,
             matcher: Box::new(matcher),
             keybindings,
-            discovery_rx,
+            session,
             records: BTreeMap::new(),
             filter: FilterState::default(),
             visible_groups: Vec::new(),
@@ -138,7 +137,6 @@ impl App {
             should_quit: false,
             reload_requested: Arc::new(AtomicBool::new(false)),
             config_loader: None,
-            discovery: None,
             discovery_factory: None,
             group_matches: Vec::new(),
             service_types: Vec::new(),
@@ -153,14 +151,9 @@ impl App {
         }
     }
 
-    /// Attach the running discovery backend and a factory for replacements,
-    /// enabling the refresh command.
-    pub fn with_discovery(
-        mut self,
-        backend: Box<dyn Discovery>,
-        factory: DiscoveryFactory,
-    ) -> Self {
-        self.discovery = Some(backend);
+    /// Attach a factory for replacement discovery sessions, enabling the
+    /// refresh command. The running session itself comes from [`App::new`].
+    pub fn with_discovery_factory(mut self, factory: DiscoveryFactory) -> Self {
         self.discovery_factory = Some(factory);
         self
     }
@@ -203,7 +196,17 @@ impl App {
 
     fn drain_discovery(&mut self) {
         let mut changed = false;
-        while let Ok(event) = self.discovery_rx.try_recv() {
+        loop {
+            let event = match self.session.poll() {
+                SessionPoll::Event(event) => event,
+                SessionPoll::Idle => break,
+                // The producer is gone. Reported once, so this reacts to the
+                // ending rather than re-applying it on every tick.
+                SessionPoll::Ended(state) => {
+                    changed |= self.apply_session_end(&state);
+                    break;
+                }
+            };
             match event {
                 DiscoveryEvent::Upsert(record) => {
                     let id = record.id();
@@ -234,6 +237,42 @@ impl App {
         }
         if changed {
             self.recompute_visible();
+        }
+    }
+
+    /// React to discovery ending, once.
+    ///
+    /// A real adapter's records are only worth showing while a live browse is
+    /// confirming them: mDNS is edge-triggered, so once the producer is gone
+    /// nothing will ever retract a service that has since died. Keeping the
+    /// list up while labelling it current would invite the user to launch a
+    /// command at a host that may no longer be there, so a failure clears it.
+    ///
+    /// A finite fake stream completing is the opposite case: it is the normal,
+    /// expected ending, it never claimed to be watching the network, and its
+    /// samples stay exactly as valid as they were. Returns whether the visible
+    /// list needs recomputing.
+    fn apply_session_end(&mut self, state: &SessionState) -> bool {
+        match state {
+            // Cannot be reached: the session only reports an ending once it has
+            // left `Listening`.
+            SessionState::Listening => false,
+            SessionState::Complete => {
+                self.status = format!(
+                    "sample discovery complete | {} record(s)",
+                    self.records.len()
+                );
+                false
+            }
+            SessionState::Failed(failure) => {
+                // Pickers were computed from records that are about to go.
+                self.close_pickers();
+                let had_records = !self.records.is_empty();
+                self.records.clear();
+                // Set last: the cause must be what the user is left looking at.
+                self.status = failure.message();
+                had_records
+            }
         }
     }
 
@@ -774,13 +813,15 @@ impl App {
             self.status = "refresh is not available".to_string();
             return;
         };
-        // Stop the old backend (cancel + join its worker) before starting the
-        // replacement, so two browsers never feed the list at once.
-        self.discovery = None;
-        let mut backend = factory(&self.cli.discovery_config());
-        self.discovery_rx = backend.events();
-        self.discovery = Some(backend);
+        // Stop the old producer (cancel + join) before starting the
+        // replacement, so two browsers never feed the link at once.
+        self.session.shutdown();
+        let replacement = factory(&self.cli.discovery_config());
 
+        // Only now that a replacement exists do the old session and its records
+        // go. The old session's receiver is dropped with it, so its events can
+        // never arrive on the new list — old and new cannot mix.
+        self.session = replacement;
         self.records.clear();
         self.close_pickers();
         self.selected = 0;
@@ -898,7 +939,12 @@ mod tests {
     #[test]
     fn resolved_service_replaces_pending_record() {
         let (tx, rx) = mpsc::channel();
-        let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
+        let mut app = App::new(
+            test_cli(),
+            Matcher::default(),
+            KeyBindings::default(),
+            DiscoverySession::detached(rx),
+        );
 
         let pending = Entry::new("workstation", "_ssh._tcp", "local");
         let mut resolved = Entry::new("workstation", "_ssh._tcp", "local");
@@ -944,7 +990,12 @@ mode = "execute"
         let matcher = builder.build();
 
         let (tx, rx) = mpsc::channel();
-        let mut app = App::new(test_cli(), matcher, KeyBindings::default(), rx);
+        let mut app = App::new(
+            test_cli(),
+            matcher,
+            KeyBindings::default(),
+            DiscoverySession::detached(rx),
+        );
 
         let mut alpha = Entry::new("alpha", "_ssh._tcp", "local");
         alpha.hostname = Some("alpha.local".to_string());
@@ -973,7 +1024,12 @@ mode = "execute"
     #[test]
     fn multiple_resolved_addresses_collapse_onto_one_service() {
         let (tx, rx) = mpsc::channel();
-        let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
+        let mut app = App::new(
+            test_cli(),
+            Matcher::default(),
+            KeyBindings::default(),
+            DiscoverySession::detached(rx),
+        );
 
         let mut service = Entry::new("workstation", "_ssh._tcp", "local");
         service.hostname = Some("workstation.local".to_string());
@@ -1040,8 +1096,14 @@ mode = "execute"
     }
 
     fn app_with(matcher: Matcher, records: Vec<Entry>) -> App {
-        let (_tx, rx) = mpsc::channel();
-        let mut app = App::new(test_cli(), matcher, KeyBindings::default(), rx);
+        // Inert: these tests are about what the app does with records it
+        // already has, not about the session producing or ending them.
+        let mut app = App::new(
+            test_cli(),
+            matcher,
+            KeyBindings::default(),
+            DiscoverySession::inert(),
+        );
         for record in records {
             app.records.insert(record.id(), record);
         }
@@ -1421,7 +1483,12 @@ mode = "execute"
     #[test]
     fn removing_one_occurrence_preserves_its_sibling() {
         let (tx, rx) = mpsc::channel();
-        let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
+        let mut app = App::new(
+            test_cli(),
+            Matcher::default(),
+            KeyBindings::default(),
+            DiscoverySession::detached(rx),
+        );
 
         tx.send(DiscoveryEvent::Upsert(on_interface("alpha", "10.0.0.1", 1)))
             .unwrap();
@@ -1449,7 +1516,12 @@ mode = "execute"
     #[test]
     fn registration_removal_clears_every_occurrence() {
         let (tx, rx) = mpsc::channel();
-        let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
+        let mut app = App::new(
+            test_cli(),
+            Matcher::default(),
+            KeyBindings::default(),
+            DiscoverySession::detached(rx),
+        );
 
         tx.send(DiscoveryEvent::Upsert(on_interface("alpha", "10.0.0.1", 1)))
             .unwrap();
@@ -1481,7 +1553,12 @@ mode = "execute"
     #[test]
     fn removing_an_unknown_occurrence_leaves_the_registration_alone() {
         let (tx, rx) = mpsc::channel();
-        let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
+        let mut app = App::new(
+            test_cli(),
+            Matcher::default(),
+            KeyBindings::default(),
+            DiscoverySession::detached(rx),
+        );
 
         tx.send(DiscoveryEvent::Upsert(on_interface("alpha", "10.0.0.1", 1)))
             .unwrap();
@@ -1501,7 +1578,12 @@ mode = "execute"
     #[test]
     fn upserting_an_occurrence_replaces_it_across_endpoint_and_txt_changes() {
         let (tx, rx) = mpsc::channel();
-        let mut app = App::new(test_cli(), Matcher::default(), KeyBindings::default(), rx);
+        let mut app = App::new(
+            test_cli(),
+            Matcher::default(),
+            KeyBindings::default(),
+            DiscoverySession::detached(rx),
+        );
 
         tx.send(DiscoveryEvent::Upsert(on_interface("alpha", "10.0.0.1", 1)))
             .unwrap();
@@ -1558,31 +1640,9 @@ mode = "execute"
 
     use color_eyre::eyre::eyre;
 
-    /// A [`Discovery`] double: events come from a plain channel, and dropping
-    /// it (as refresh does to the old backend) is observable via a flag.
-    struct ChannelDiscovery {
-        receiver: Option<mpsc::Receiver<DiscoveryEvent>>,
-        dropped: Option<Arc<AtomicBool>>,
-    }
-
-    impl Discovery for ChannelDiscovery {
-        fn events(&mut self) -> mpsc::Receiver<DiscoveryEvent> {
-            self.receiver
-                .take()
-                .expect("discovery receiver can only be taken once")
-        }
-    }
-
-    impl Drop for ChannelDiscovery {
-        fn drop(&mut self) {
-            if let Some(flag) = &self.dropped {
-                flag.store(true, Ordering::Relaxed);
-            }
-        }
-    }
-
-    /// A factory whose spawned backends' senders are captured, so a test can
-    /// feed events through whichever backend a refresh started.
+    /// A factory whose spawned sessions' senders are captured, so a test can
+    /// feed events through whichever session a refresh started — and prove that
+    /// events sent to a superseded one never arrive.
     fn channel_factory() -> (
         DiscoveryFactory,
         Arc<Mutex<Vec<mpsc::Sender<DiscoveryEvent>>>>,
@@ -1594,10 +1654,7 @@ mode = "execute"
             Box::new(move |_config: &DiscoveryConfig| {
                 let (tx, rx) = mpsc::channel();
                 spawned.lock().unwrap().push(tx);
-                Box::new(ChannelDiscovery {
-                    receiver: Some(rx),
-                    dropped: None,
-                }) as Box<dyn Discovery>
+                DiscoverySession::detached(rx)
             })
         };
         (factory, spawned)
@@ -1605,31 +1662,23 @@ mode = "execute"
 
     #[test]
     fn refresh_restarts_discovery_and_repopulates_like_startup() {
-        let old_backend_dropped = Arc::new(AtomicBool::new(false));
         let (factory, spawned) = channel_factory();
         let mut app = app_with(
             Matcher::default(),
             vec![ssh("alpha", "10.0.0.1"), ssh("beta", "10.0.0.2")],
         )
-        .with_discovery(
-            Box::new(ChannelDiscovery {
-                receiver: None,
-                dropped: Some(old_backend_dropped.clone()),
-            }),
-            factory,
-        );
+        .with_discovery_factory(factory);
         assert_eq!(app.visible_groups.len(), 2);
 
         send(&mut app, KeyCode::Char('r'));
 
-        // The old browse is stopped, the list is empty, and a new backend runs.
-        assert!(old_backend_dropped.load(Ordering::Relaxed));
+        // The list is empty and a new session runs.
         assert!(app.records.is_empty());
         assert!(app.visible_groups.is_empty());
         assert!(app.status.contains("refresh"));
         assert_eq!(spawned.lock().unwrap().len(), 1);
 
-        // Events from the replacement backend repopulate the list.
+        // Events from the replacement session repopulate the list.
         spawned.lock().unwrap()[0]
             .send(DiscoveryEvent::Upsert(ssh("gamma", "10.0.0.3")))
             .unwrap();
@@ -1645,13 +1694,7 @@ mode = "execute"
             Matcher::default(),
             vec![ssh("alpha", "10.0.0.1"), ssh("beta", "10.0.0.2")],
         )
-        .with_discovery(
-            Box::new(ChannelDiscovery {
-                receiver: None,
-                dropped: None,
-            }),
-            factory,
-        );
+        .with_discovery_factory(factory);
         send(&mut app, KeyCode::Down);
         app.details_scroll = 3;
         app.filter.text_query = "bet".to_string();
@@ -1674,6 +1717,222 @@ mode = "execute"
 
         assert!(app.status.contains("refresh is not available"));
         assert_eq!(app.records.len(), 1, "records must not be lost");
+    }
+
+    // ── discovery session lifecycle ─────────────────────────────────────────
+
+    /// An app whose session is driven by the returned sender. Dropping the
+    /// sender is a producer going away, exactly as a real adapter's does.
+    fn app_with_session(
+        matcher: Matcher,
+        records: Vec<Entry>,
+    ) -> (App, mpsc::Sender<DiscoveryEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(
+            test_cli(),
+            matcher,
+            KeyBindings::default(),
+            DiscoverySession::detached(rx),
+        );
+        for record in records {
+            app.records.insert(record.id(), record);
+        }
+        app.recompute_visible();
+        (app, tx)
+    }
+
+    /// The core of this task: a producer going away must not read as "no new
+    /// events". mDNS is edge-triggered, so a dead browse can never retract a
+    /// service that has since gone; keeping the list would invite the user to
+    /// launch a command at a host that may not be there.
+    #[test]
+    fn a_real_disconnect_clears_records_and_reports_a_persistent_failure() {
+        let (mut app, tx) = app_with_session(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+        assert_eq!(app.visible_groups.len(), 1);
+
+        drop(tx);
+        app.drain_discovery();
+
+        assert!(app.records.is_empty(), "unverifiable records must not stay");
+        assert!(app.visible_groups.is_empty());
+        assert!(matches!(app.session.state(), SessionState::Failed(_)));
+        assert!(
+            !app.session.state().is_listening(),
+            "the app must stop implying it is listening"
+        );
+        assert!(app.status.contains("discovery stopped"));
+    }
+
+    /// The same verdict with nothing discovered yet: the empty list must be
+    /// explained as a failure rather than left looking like a quiet network.
+    #[test]
+    fn a_real_disconnect_with_no_records_still_reports_a_failure() {
+        let (mut app, tx) = app_with_session(Matcher::default(), Vec::new());
+
+        drop(tx);
+        app.drain_discovery();
+
+        assert!(matches!(app.session.state(), SessionState::Failed(_)));
+        assert!(app.status.contains("discovery stopped"));
+    }
+
+    /// A startup error's cause must survive: it is carried by the failure, not
+    /// left on a status line for the next event to erase.
+    #[test]
+    fn a_startup_failure_keeps_its_cause_text_across_later_drains() {
+        let (mut app, tx) = app_with_session(Matcher::default(), Vec::new());
+        tx.send(DiscoveryEvent::Status(
+            "mDNS discovery unavailable (no such device); try --fake-discovery for sample records, or refresh to retry"
+                .to_string(),
+        ))
+        .unwrap();
+        drop(tx);
+
+        app.drain_discovery();
+        let reported = app.status.clone();
+
+        // Ticking on does not decay the verdict back into silence.
+        for _ in 0..5 {
+            app.drain_discovery();
+        }
+        assert_eq!(app.status, reported, "the failure must be persistent");
+        assert!(app.status.contains("discovery stopped"));
+        assert!(matches!(app.session.state(), SessionState::Failed(_)));
+    }
+
+    /// A picker's entries were computed from records the failure just
+    /// invalidated; leaving it open would let the user act on them.
+    #[test]
+    fn a_real_disconnect_closes_a_derived_picker() {
+        let (mut app, tx) =
+            app_with_session(matcher_from(&[SSH, PING]), vec![ssh("alpha", "10.0.0.1")]);
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::ActionPicker);
+
+        drop(tx);
+        app.drain_discovery();
+
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.records.is_empty());
+    }
+
+    /// Explicit fake discovery: running out of samples is the normal ending of
+    /// a finite stream, so the samples stay and nothing is reported as broken.
+    #[test]
+    fn finite_fake_completion_keeps_its_samples_and_reports_completion() {
+        let mut cli = test_cli();
+        cli.fake_discovery = true;
+        // One sample record keeps the stream short.
+        cli.service_type = Some("_ssh._tcp".to_string());
+        let session = crate::discovery::start(&cli.discovery_config());
+        let mut app = App::new(cli, Matcher::default(), KeyBindings::default(), session);
+
+        // Drain until the stream ends, as the event loop would.
+        while app.session.state().is_listening() {
+            app.drain_discovery();
+            std::thread::yield_now();
+        }
+
+        assert_eq!(*app.session.state(), SessionState::Complete);
+        assert_eq!(
+            app.records.len(),
+            1,
+            "a finished sample stream keeps its records"
+        );
+        assert!(app.status.contains("complete"));
+        assert!(
+            !app.status.contains("failed") && !app.status.contains("stopped"),
+            "finishing a finite stream is not a failure: {}",
+            app.status
+        );
+    }
+
+    /// Refresh is the recovery action: it must work *from* a failed session.
+    #[test]
+    fn refresh_recovers_from_a_failed_session() {
+        let (factory, spawned) = channel_factory();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(
+            test_cli(),
+            Matcher::default(),
+            KeyBindings::default(),
+            DiscoverySession::detached(rx),
+        )
+        .with_discovery_factory(factory);
+
+        drop(tx);
+        app.drain_discovery();
+        assert!(matches!(app.session.state(), SessionState::Failed(_)));
+
+        send(&mut app, KeyCode::Char('r'));
+
+        assert!(
+            app.session.state().is_listening(),
+            "refresh must recover a failed session"
+        );
+        spawned.lock().unwrap()[0]
+            .send(DiscoveryEvent::Upsert(ssh("gamma", "10.0.0.3")))
+            .unwrap();
+        app.drain_discovery();
+        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.visible_groups[0].label, "gamma");
+    }
+
+    /// The session owns its receiver, so a replaced session's events cannot
+    /// reach the new list — old and new can never mix.
+    #[test]
+    fn events_from_a_replaced_session_never_reach_the_new_list() {
+        let (factory, spawned) = channel_factory();
+        let (old_tx, rx) = mpsc::channel();
+        let mut app = App::new(
+            test_cli(),
+            Matcher::default(),
+            KeyBindings::default(),
+            DiscoverySession::detached(rx),
+        )
+        .with_discovery_factory(factory);
+
+        send(&mut app, KeyCode::Char('r'));
+
+        // The superseded producer tries to keep feeding the list. It cannot:
+        // the old session was dropped and took its receiver with it, so the
+        // send has nowhere to land. The guarantee is structural, not a rule
+        // the drain loop has to remember.
+        assert!(
+            old_tx
+                .send(DiscoveryEvent::Upsert(ssh("stale", "10.0.0.9")))
+                .is_err(),
+            "a replaced session's receiver must be gone with it"
+        );
+        spawned.lock().unwrap()[0]
+            .send(DiscoveryEvent::Upsert(ssh("fresh", "10.0.0.1")))
+            .unwrap();
+        app.drain_discovery();
+
+        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(
+            app.visible_groups[0].label, "fresh",
+            "only the current session's events may populate the list"
+        );
+    }
+
+    /// A refresh whose new session then fails must not leave the pre-refresh
+    /// records on screen labelled as current.
+    #[test]
+    fn a_refresh_that_fails_does_not_retain_the_old_records() {
+        let (factory, spawned) = channel_factory();
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")])
+            .with_discovery_factory(factory);
+        assert_eq!(app.visible_groups.len(), 1);
+
+        send(&mut app, KeyCode::Char('r'));
+        // The replacement session's producer dies immediately.
+        spawned.lock().unwrap().clear();
+        app.drain_discovery();
+
+        assert!(app.records.is_empty());
+        assert!(app.visible_groups.is_empty());
+        assert!(matches!(app.session.state(), SessionState::Failed(_)));
     }
 
     #[test]
