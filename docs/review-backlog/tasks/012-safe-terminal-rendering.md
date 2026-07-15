@@ -4,12 +4,12 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `ready` |
+| Status | `done` |
 | Priority | `P0` |
 | Workstream | UI / Safety |
 | Depends on | — |
 | Likely conflicts | 010, 011, 013, 014 |
-| Owner | Unclaimed |
+| Owner | Codex (`main`) |
 
 ## Why This Matters
 
@@ -79,13 +79,13 @@ raw network value, while every renderer receives an inert display representation
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] No untrusted/dynamic control character reaches the rendered buffer raw.
-- [ ] Controls are represented visibly and consistently.
-- [ ] Raw Entry/config values remain unchanged for matching and execution.
-- [ ] Wide and combining Unicode align according to terminal columns.
-- [ ] Narrow/zero-width areas remain panic-free.
-- [ ] A source audit finds no dynamic render path bypassing safe display conversion.
-- [ ] Full validation passes.
+- [x] No untrusted/dynamic control character reaches the rendered buffer raw.
+- [x] Controls are represented visibly and consistently.
+- [x] Raw Entry/config values remain unchanged for matching and execution.
+- [x] Wide and combining Unicode align according to terminal columns.
+- [x] Narrow/zero-width areas remain panic-free.
+- [x] A source audit finds no dynamic render path bypassing safe display conversion.
+- [x] Full validation passes.
 
 ## Required Tests
 
@@ -108,8 +108,21 @@ cargo test --locked --all-targets --all-features
 
 ## Completion Record
 
-- **Implemented:**
-- **Tests added/updated:**
-- **Documentation updated:**
-- **Validation evidence:**
-- **Follow-ups:**
+- **Implemented:** Added `ui::display::text` as the display seam: it preserves
+  printable Unicode and renders C0, DEL, and C1 controls as visible `\\xNN`
+  escapes. Routed discovered fields, CLI domain, status/search text, command
+  metadata, composite endpoints, chips, titles, and popup content through that
+  seam before Ratatui truncation/alignment. Replaced scalar-count padding with
+  `Span::width()` terminal-column measurements and saturating arithmetic.
+- **Tests added/updated:** Added exact control-escape coverage and final
+  `TestBackend` regressions for discovery/TXT data, domain/status/search text,
+  command metadata, unchanged raw matching values, CJK/emoji/combining text,
+  escaped-control alignment, and a one-column terminal.
+- **Documentation updated:** Marked task 012 done in this record and the backlog
+  index.
+- **Validation evidence:** `cargo test --locked ui::render` (11 passed),
+  `cargo test --locked discovery::entry` (26 passed), `cargo fmt -- --check`,
+  `cargo clippy --locked --all-targets --all-features -- -D warnings`,
+  `cargo test --locked --all-targets` (184 passed), and
+  `cargo test --locked --all-targets --all-features` (189 passed).
+- **Follow-ups:** None.

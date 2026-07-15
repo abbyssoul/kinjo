@@ -8,6 +8,7 @@
 pub mod app;
 pub mod cli;
 pub mod config;
+pub(crate) mod display;
 pub mod filter;
 pub mod keymap;
 pub mod render;

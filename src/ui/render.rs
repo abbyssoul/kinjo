@@ -16,7 +16,10 @@ use crate::{
     plumber::MatchResult,
 };
 
-use super::app::{App, AppMode, CommandGroup};
+use super::{
+    app::{App, AppMode, CommandGroup},
+    display,
+};
 
 // ── palette ──────────────────────────────────────────────────────────────
 const ACCENT: Color = Color::Rgb(0x7a, 0xa2, 0xf7); // soft blue
@@ -93,7 +96,10 @@ fn render_top_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
 
     let mut spans = vec![
-        Span::styled(format!(" {spinner} "), Style::default().fg(GOOD)),
+        Span::styled(
+            display::text(&format!(" {spinner} ")),
+            Style::default().fg(GOOD),
+        ),
         Span::styled(
             "kinjo  ",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -111,13 +117,13 @@ fn render_top_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         } else {
             Style::default().fg(FG_DIM)
         };
-        spans.push(Span::styled(text, style));
+        spans.push(Span::styled(display::text(&text), style));
         spans.push(Span::raw(" "));
     }
 
     // right-aligned domain chip
     let domain = Span::styled(
-        format!("  {}  ", app.cli.domain),
+        display::text(&format!("  {}  ", app.cli.domain)),
         Style::default()
             .fg(BG_BAR)
             .bg(ACCENT)
@@ -152,7 +158,7 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ));
     } else {
         spans.push(Span::styled(
-            app.filter.text_query.clone(),
+            display::text(&app.filter.text_query),
             Style::default().fg(Color::White),
         ));
         if searching && (app.ticks / 4).is_multiple_of(2) {
@@ -183,7 +189,7 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn chip(text: &str, color: Color) -> Span<'static> {
     Span::styled(
-        text.to_string(),
+        display::text(text),
         Style::default()
             .fg(BG_BAR)
             .bg(color)
@@ -212,10 +218,10 @@ fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
         vec![
             Line::from(""),
             Line::from(Span::styled(
-                format!(
+                display::text(&format!(
                     "  {spinner} listening for mDNS services on {}…",
                     app.cli.domain
-                ),
+                )),
                 Style::default().fg(FG_DIM),
             )),
         ]
@@ -272,7 +278,7 @@ fn service_row(group: &EntryGroup, selected: bool, matches: usize) -> Row<'stati
     let n = group.instances.len();
     let count = if n > 1 {
         Span::styled(
-            format!("×{n}"),
+            display::text(&format!("×{n}")),
             base.fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )
     } else {
@@ -282,7 +288,7 @@ fn service_row(group: &EntryGroup, selected: bool, matches: usize) -> Row<'stati
     // matching-commands badge
     let matches_cell = if matches > 0 {
         Span::styled(
-            format!("★{matches}"),
+            display::text(&format!("★{matches}")),
             base.fg(STAR).add_modifier(Modifier::BOLD),
         )
     } else {
@@ -293,14 +299,14 @@ fn service_row(group: &EntryGroup, selected: bool, matches: usize) -> Row<'stati
 
     Row::new(vec![
         Cell::from(Line::from(vec![gutter, Span::styled("●", base.fg(color))])),
-        Cell::from(Span::styled(group.label.clone(), name_style)),
+        Cell::from(Span::styled(display::text(&group.label), name_style)),
         Cell::from(Span::styled(
-            short_type(&group.service_type),
+            display::text(&short_type(&group.service_type)),
             base.fg(color),
         )),
         Cell::from(count),
         Cell::from(matches_cell),
-        Cell::from(Span::styled(host.to_string(), base.fg(FG_DIM))),
+        Cell::from(Span::styled(display::text(host), base.fg(FG_DIM))),
     ])
     .style(base)
 }
@@ -329,7 +335,7 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut rows: Vec<Row> = vec![Row::new(vec![
         Cell::from(Span::styled(" ●", Style::default().fg(color))),
         Cell::from(Span::styled(
-            group.label.clone(),
+            display::text(&group.label),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -356,10 +362,13 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         rows.push(section_row("TXT records"));
         for (key, value) in group.txt.iter() {
             rows.push(Row::new(vec![
-                Cell::from(Span::styled(format!(" {key}"), Style::default().fg(WARN))),
+                Cell::from(Span::styled(
+                    display::text(&format!(" {key}")),
+                    Style::default().fg(WARN),
+                )),
                 Cell::from(Line::from(vec![
                     Span::styled("= ", Style::default().fg(ACCENT_DIM)),
-                    Span::styled(value.clone(), Style::default().fg(Color::White)),
+                    Span::styled(display::text(value), Style::default().fg(Color::White)),
                 ])),
             ]));
         }
@@ -383,9 +392,12 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 ),
             ])),
             Cell::from(Line::from(vec![
-                Span::styled(instance_endpoint(record), Style::default().fg(Color::White)),
                 Span::styled(
-                    format!("  {}s", record.last_seen.elapsed().as_secs()),
+                    display::text(&instance_endpoint(record)),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    display::text(&format!("  {}s", record.last_seen.elapsed().as_secs())),
                     Style::default().fg(FG_DIM),
                 ),
             ])),
@@ -425,13 +437,15 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn field_row(label: &str, value: &str, value_color: Color) -> Row<'static> {
+    let label = display::text(label);
+    let padding = 7usize.saturating_sub(Span::raw(label.as_str()).width());
     Row::new(vec![
         Cell::from(Span::styled(
-            format!("{label:>7} "),
+            format!("{}{label} ", " ".repeat(padding)),
             Style::default().fg(FG_DIM),
         )),
         Cell::from(Span::styled(
-            value.to_string(),
+            display::text(value),
             Style::default().fg(value_color),
         )),
     ])
@@ -441,7 +455,7 @@ fn section_row(title: &str) -> Row<'static> {
     Row::new(vec![
         Cell::from(""),
         Cell::from(Span::styled(
-            title.to_string(),
+            display::text(title),
             Style::default()
                 .fg(ACCENT)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
@@ -463,17 +477,17 @@ fn action_row(action: &MatchResult) -> Row<'static> {
         .unwrap_or("");
     let mode = action.command.action.mode.to_string();
     let mut spans = vec![Span::styled(
-        action.command.name.clone(),
+        display::text(&action.command.name),
         Style::default().fg(GOOD).add_modifier(Modifier::BOLD),
     )];
     if !description.is_empty() {
         spans.push(Span::styled(
-            format!(" — {description}"),
+            display::text(&format!(" — {description}")),
             Style::default().fg(Color::White),
         ));
     }
     spans.push(Span::styled(
-        format!("  [{mode}]"),
+        display::text(&format!("  [{mode}]")),
         Style::default().fg(ACCENT_DIM),
     ));
     Row::new(vec![
@@ -526,7 +540,7 @@ fn command_row(group: &CommandGroup, selected: bool) -> Row<'static> {
 
     let count_cell = if active {
         Span::styled(
-            format!("★{count} svc"),
+            display::text(&format!("★{count} svc")),
             base.fg(STAR).add_modifier(Modifier::BOLD),
         )
     } else {
@@ -545,9 +559,9 @@ fn command_row(group: &CommandGroup, selected: bool) -> Row<'static> {
             gutter,
             Span::styled("●", base.fg(if active { STAR } else { ACCENT_DIM })),
         ])),
-        Cell::from(Span::styled(group.command.name.clone(), name_style)),
+        Cell::from(Span::styled(display::text(&group.command.name), name_style)),
         Cell::from(count_cell),
-        Cell::from(Span::styled(description.to_string(), base.fg(FG_DIM))),
+        Cell::from(Span::styled(display::text(description), base.fg(FG_DIM))),
     ])
     .style(base)
 }
@@ -574,7 +588,7 @@ fn render_command_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut rows: Vec<Row> = vec![Row::new(vec![
         Cell::from(Span::styled(" ★", Style::default().fg(STAR))),
         Cell::from(Span::styled(
-            command.name.clone(),
+            display::text(&command.name),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -620,8 +634,14 @@ fn render_command_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     ),
                 ])),
                 Cell::from(Line::from(vec![
-                    Span::styled(service.label.clone(), Style::default().fg(Color::White)),
-                    Span::styled(format!("  {host}"), Style::default().fg(FG_DIM)),
+                    Span::styled(
+                        display::text(&service.label),
+                        Style::default().fg(Color::White),
+                    ),
+                    Span::styled(
+                        display::text(&format!("  {host}")),
+                        Style::default().fg(FG_DIM),
+                    ),
                 ])),
             ]));
         }
@@ -677,7 +697,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     // right-aligned status message
     let status = Span::styled(
-        format!("  {} ", app.status),
+        display::text(&format!("  {} ", app.status)),
         Style::default().fg(ACCENT_DIM),
     );
     push_right_aligned(&mut spans, vec![status], area.width);
@@ -711,7 +731,7 @@ fn render_type_filter(frame: &mut Frame<'_>, app: &App) {
                     gutter_span(selected),
                     check,
                     Span::styled(" ● ", base.fg(category_color(service_type))),
-                    Span::styled(service_type.clone(), base.fg(Color::White)),
+                    Span::styled(display::text(service_type), base.fg(Color::White)),
                 ])
             },
         )
@@ -743,10 +763,13 @@ fn render_action_picker(frame: &mut Frame<'_>, app: &App) {
                 gutter_span(selected),
                 Span::styled("★ ", base.fg(STAR)),
                 Span::styled(
-                    action.command.name.clone(),
+                    display::text(&action.command.name),
                     base.fg(GOOD).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!(" — {description}"), base.fg(Color::White)),
+                Span::styled(
+                    display::text(&format!(" — {description}")),
+                    base.fg(Color::White),
+                ),
             ];
             if needs {
                 spans.push(Span::styled("  ⊙ choose instance", base.fg(WARN)));
@@ -774,7 +797,10 @@ fn render_instance_picker(frame: &mut Frame<'_>, app: &App) {
         Line::from(vec![
             gutter_span(selected),
             Span::styled("● ", base.fg(category_color(&record.service_type))),
-            Span::styled(instance_endpoint(record), base.fg(Color::White)),
+            Span::styled(
+                display::text(&instance_endpoint(record)),
+                base.fg(Color::White),
+            ),
         ])
     });
     render_popup(
@@ -799,8 +825,8 @@ fn render_service_picker(frame: &mut Frame<'_>, app: &App) {
             Line::from(vec![
                 gutter_span(selected),
                 Span::styled("● ", base.fg(category_color(&service.service_type))),
-                Span::styled(service.label.clone(), base.fg(Color::White)),
-                Span::styled(format!("  {host}"), base.fg(FG_DIM)),
+                Span::styled(display::text(&service.label), base.fg(Color::White)),
+                Span::styled(display::text(&format!("  {host}")), base.fg(FG_DIM)),
             ])
         },
     );
@@ -833,9 +859,11 @@ fn render_help(frame: &mut Frame<'_>) {
     ];
     let mut lines = vec![Line::from("")];
     for (key, label) in rows {
+        let key = display::text(key);
+        let padding = 8usize.saturating_sub(Span::raw(key.as_str()).width());
         lines.push(Line::from(vec![
             Span::styled(
-                format!("   {key:<8}"),
+                format!("   {key}{}", " ".repeat(padding)),
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::styled(label.to_string(), Style::default().fg(Color::White)),
@@ -873,11 +901,11 @@ fn render_popup<W>(
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(ACCENT))
         .title(Span::styled(
-            title.to_string(),
+            display::text(title),
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            format!(" {hint} "),
+            display::text(&format!(" {hint} ")),
             Style::default().fg(FG_DIM),
         ));
     let inner = block.inner(area);
@@ -1041,7 +1069,7 @@ fn selection_style(selected: bool) -> Style {
 /// `width`-wide bar, padding the gap with spaces. Used by the top/filter/footer
 /// status bars.
 fn push_right_aligned<'a>(spans: &mut Vec<Span<'a>>, right: Vec<Span<'a>>, width: u16) {
-    let len = |list: &[Span]| -> usize { list.iter().map(|s| s.content.chars().count()).sum() };
+    let len = |list: &[Span]| -> usize { list.iter().map(Span::width).sum() };
     let pad = (width as usize)
         .saturating_sub(len(spans))
         .saturating_sub(len(&right));
@@ -1053,7 +1081,7 @@ fn push_right_aligned<'a>(spans: &mut Vec<Span<'a>>, right: Vec<Span<'a>>, width
 /// list is non-empty. Shared by the service and command list panels.
 fn list_title(label: &str, total: usize, selected: usize, inner_h: usize) -> Line<'static> {
     let mut spans = vec![Span::styled(
-        label.to_string(),
+        display::text(label),
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )];
     if total > 0 {
@@ -1149,6 +1177,21 @@ fn build_list_items<T>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+
+    use crate::{
+        discovery::{DiscoveryBackend, group_entries},
+        plumber::{ActionMode, CommandAction, CommandConfig, Matcher},
+        ui::{
+            app::App,
+            cli::{Cli, CliCommand},
+            filter::fuzzy_match,
+            keymap::KeyBindings,
+        },
+    };
+
     use super::*;
 
     fn line_text(line: &Line<'_>) -> String {
@@ -1156,6 +1199,41 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    fn test_app(domain: &str) -> App {
+        let (_tx, rx) = mpsc::channel();
+        App::new(
+            Cli {
+                domain: domain.to_string(),
+                config_dirs: Vec::new(),
+                service_type: None,
+                fake_discovery: false,
+                backend: DiscoveryBackend::MdnsSd,
+                command: CliCommand::Run,
+            },
+            Matcher::default(),
+            KeyBindings::default(),
+            rx,
+        )
+    }
+
+    fn render_buffer(app: &App, width: u16, height: u16) -> Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_text(buffer: &Buffer) -> String {
+        let mut output = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                output.push_str(buffer[(x, y)].symbol());
+            }
+            output.push('\n');
+        }
+        output
     }
 
     #[test]
@@ -1207,9 +1285,17 @@ mod tests {
         let mut spans = vec![Span::raw("left")];
         push_right_aligned(&mut spans, vec![Span::raw("right")], 20);
 
-        let width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-        assert_eq!(width, 20);
-        assert!(line_text(&Line::from(spans)).starts_with("left"));
+        let line = Line::from(spans);
+        assert_eq!(line.width(), 20);
+        assert!(line_text(&line).starts_with("left"));
+    }
+
+    #[test]
+    fn push_right_aligned_uses_terminal_columns_for_unicode() {
+        let mut spans = vec![Span::raw(display::text("界e\u{301}🙂\u{1b}"))];
+        push_right_aligned(&mut spans, vec![Span::raw(display::text("終\u{7}"))], 24);
+
+        assert_eq!(Line::from(spans).width(), 24);
     }
 
     #[test]
@@ -1230,5 +1316,106 @@ mod tests {
         let text = line_text(&populated);
         assert!(text.starts_with("Services"));
         assert!(text.contains("1-10/42"));
+    }
+
+    #[test]
+    fn render_escapes_untrusted_controls_without_mutating_raw_values() {
+        let raw_name = "svc\u{1b}[2J\u{7}\r\n\t\u{7f}\u{85}終";
+        let raw_domain = "entry\ndomain";
+        let raw_host = "host\u{1b}.local";
+        let raw_txt_key = "key\t";
+        let raw_txt_value = "value\u{7}\r\n\u{7f}\u{85}";
+
+        let mut entry = Entry::new(raw_name, "_ssh._tcp", raw_domain);
+        entry.hostname = Some(raw_host.to_string());
+        entry.port = Some(22);
+        entry
+            .txt
+            .insert(raw_txt_key.to_string(), raw_txt_value.to_string());
+
+        let mut app = test_app("cli\u{1b}\ndomain");
+        app.status = "status\u{7}\r\u{85}".to_string();
+        app.mode = AppMode::Search;
+        app.filter.text_query = "query\t\u{7f}".to_string();
+        app.service_types = vec![entry.service_type.clone()];
+        app.visible_groups = group_entries(&[entry.clone()], GroupingMode::LogicalService);
+        app.group_matches = vec![Vec::new()];
+        app.records.insert(entry.id(), entry.clone());
+
+        let buffer = render_buffer(&app, 180, 36);
+        let rendered = buffer_text(&buffer);
+
+        assert!(rendered.contains("svc\\x1B[2J\\x07\\x0D\\x0A\\x09\\x7F\\x85終"));
+        assert!(rendered.contains("entry\\x0Adomain"));
+        assert!(rendered.contains("host\\x1B.local"));
+        assert!(rendered.contains("key\\x09"));
+        assert!(rendered.contains("value\\x07\\x0D\\x0A\\x7F\\x85"));
+        assert!(rendered.contains("cli\\x1B\\x0Adomain"));
+        assert!(rendered.contains("status\\x07\\x0D\\x85"));
+        assert!(rendered.contains("query\\x09\\x7F"));
+        assert!(
+            !buffer
+                .content()
+                .iter()
+                .flat_map(|cell| cell.symbol().chars())
+                .any(char::is_control)
+        );
+
+        let stored = app.records.values().next().unwrap();
+        assert_eq!(stored.name, raw_name);
+        assert_eq!(stored.domain, raw_domain);
+        assert_eq!(stored.hostname.as_deref(), Some(raw_host));
+        assert_eq!(
+            stored.txt.get(raw_txt_key).map(String::as_str),
+            Some(raw_txt_value)
+        );
+        assert!(fuzzy_match(&stored.searchable_text(), "svc\u{1b}[2J"));
+    }
+
+    #[test]
+    fn render_escapes_dynamic_command_metadata() {
+        let command = CommandConfig {
+            name: "inspect\u{1b}".to_string(),
+            description: Some("description\nline".to_string()),
+            requirements: vec!["binary\tname".to_string()],
+            predicates: Vec::new(),
+            action: CommandAction {
+                description: None,
+                command: "tool\r--flag\u{85}".to_string(),
+                mode: ActionMode::Fork,
+            },
+        };
+        let mut app = test_app("local");
+        app.filter.grouping = GroupingMode::Command;
+        app.command_groups = vec![CommandGroup {
+            command,
+            services: Vec::new(),
+        }];
+
+        let buffer = render_buffer(&app, 140, 24);
+        let rendered = buffer_text(&buffer);
+
+        assert!(rendered.contains("inspect\\x1B"));
+        assert!(rendered.contains("description\\x0Aline"));
+        assert!(rendered.contains("binary\\x09name"));
+        assert!(rendered.contains("tool\\x0D--flag\\x85"));
+        assert!(
+            !buffer
+                .content()
+                .iter()
+                .flat_map(|cell| cell.symbol().chars())
+                .any(char::is_control)
+        );
+    }
+
+    #[test]
+    fn escaped_text_is_panic_free_in_a_very_narrow_terminal() {
+        let mut app = test_app("domain\u{1b}[2J-that-is-wider-than-the-screen");
+        app.status = "status\u{7}\nthat-is-also-too-wide".to_string();
+
+        let buffer = render_buffer(&app, 1, 4);
+
+        assert_eq!(buffer.area.width, 1);
+        assert_eq!(buffer.area.height, 4);
     }
 }

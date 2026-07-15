@@ -33,18 +33,18 @@ Status values:
 
 | ID | Priority | Status | Task | Depends on | Likely conflicts |
 |---|---|---|---|---|---|
-| 001 | P0 | ready | [Discovery occurrence identity](tasks/001-discovery-occurrence-identity.md) | — | 002, 006, 008, 010, 014, 015 |
-| 002 | P0 | blocked | [Discovery session and failure semantics](tasks/002-discovery-session-and-failure-semantics.md) | 001, 016 | 003, 008, 015 |
+| 001 | P0 | done | [Discovery occurrence identity](tasks/001-discovery-occurrence-identity.md) | — | 002, 006, 008, 010, 014, 015 |
+| 002 | P0 | in-progress | [Discovery session and failure semantics](tasks/002-discovery-session-and-failure-semantics.md) | 001, 016 | 003, 008, 015 |
 | 003 | P0 | blocked | [Discovery option validation](tasks/003-discovery-option-validation.md) | 002 | 009, 015 |
-| 004 | P0 | ready | [Address-predicate correctness](tasks/004-address-predicate-correctness.md) | — | 005, 006 |
+| 004 | P0 | in-progress | [Address-predicate correctness](tasks/004-address-predicate-correctness.md) | — | 005, 006 |
 | 005 | P1 | blocked | [Compiled command rules](tasks/005-compiled-command-rules.md) | 004 | 006, 007, 015 |
 | 006 | P0 | blocked | [Grouped action targeting](tasks/006-grouped-action-targeting.md) | 005 | 007, 008, 010 |
 | 007 | P1 | blocked | [Transactional config reload](tasks/007-transactional-config-reload.md) | 005 | 006, 015 |
 | 008 | P0 | blocked | [Stale picker revalidation](tasks/008-stale-picker-revalidation.md) | 001, 002, 006 | 010, 011, 014, 015 |
 | 009 | P1 | ready | [CLI config-directory handling](tasks/009-cli-config-directory-handling.md) | — | 003 |
-| 010 | P1 | blocked | [Mode-aware aggregate views](tasks/010-mode-aware-aggregate-views.md) | 001 | 006, 008, 011, 012, 013, 014, 015 |
+| 010 | P1 | in-progress | [Mode-aware aggregate views](tasks/010-mode-aware-aggregate-views.md) | 001 | 006, 008, 011, 012, 013, 014, 015 |
 | 011 | P1 | blocked | [Scrollable pickers](tasks/011-scrollable-pickers.md) | 008, 010 | 012, 013, 014, 015 |
-| 012 | P0 | ready | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014 |
+| 012 | P0 | done | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014 |
 | 013 | P1 | ready | [Keybindings and search consistency](tasks/013-keybindings-and-search-consistency.md) | — | 011, 012, 014 |
 | 014 | P2 | blocked | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015 |
 | 015 | P2 | blocked | [App and RuleEngine refactoring](tasks/015-app-and-rule-engine-refactoring.md) | 001–014, 016 | all prior tasks; run last |
