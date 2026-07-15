@@ -11,7 +11,6 @@ use mdns_sd_discovery::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::fake;
 use super::worker::{DiscoveryWorker, RuntimeFlavor};
 use super::{DiscoveryConfig, DiscoveryEvent, Entry, EntryId};
 
@@ -99,8 +98,8 @@ impl LivenessTracker {
 
 /// Start the mDNS/Avahi discovery backend: it browses the link for DNS-SD
 /// services via the `mdns-sd-discovery` crate and streams them as
-/// [`DiscoveryEvent`]s. Falls back to the [`fake`] backend when the browse
-/// cannot be started.
+/// [`DiscoveryEvent`]s. Reports a [`DiscoveryEvent::Status`] and emits no
+/// entries when the browse cannot be started.
 ///
 /// Unlike the `zeroconf` backend, `mdns-sd-discovery` exposes the native
 /// DNS-SD service-type enumeration meta-query, so a single browser discovers
@@ -132,9 +131,8 @@ async fn browse_loop(
         Ok(browser) => browser,
         Err(err) => {
             let _ = tx.send(DiscoveryEvent::Status(format!(
-                "mDNS discovery unavailable ({err}); using sample records"
+                "mDNS discovery unavailable ({err}); try --fake-discovery for sample records, or refresh to retry"
             )));
-            fake::spawn(domain, service_type_filter, tx);
             return;
         }
     };

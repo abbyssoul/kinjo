@@ -2,8 +2,8 @@ use std::{sync::mpsc, thread, time::Duration};
 
 use super::{Discovery, DiscoveryConfig, DiscoveryEvent, Entry};
 
-/// Built-in sample-records discovery backend. Used for demos, the
-/// `--fake-discovery` flag, and as the mDNS backend's fallback.
+/// Built-in sample-records discovery backend. Used for demos and the
+/// explicit `--fake-discovery` flag.
 pub struct FakeDiscovery {
     receiver: Option<mpsc::Receiver<DiscoveryEvent>>,
 }
@@ -24,8 +24,7 @@ impl Discovery for FakeDiscovery {
     }
 }
 
-/// Stream the sample records over `tx`. Shared with the mDNS backend, which
-/// falls back to it when no browser can be started.
+/// Stream the sample records over `tx`.
 pub(super) fn spawn(
     domain: String,
     service_type_filter: Option<String>,

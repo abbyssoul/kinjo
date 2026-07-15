@@ -6,7 +6,6 @@ use zeroconf_tokio::{
     BrowserEvent, MdnsBrowser, MdnsBrowserAsync, ServiceDiscovery, ServiceRemoval, ServiceType,
 };
 
-use super::fake;
 use super::worker::{DiscoveryWorker, RuntimeFlavor};
 use super::{DiscoveryConfig, DiscoveryEvent, Entry, EntryId};
 
@@ -41,7 +40,8 @@ const DEFAULT_SERVICE_TYPES: &[&str] = &[
 
 /// Start the mDNS/Avahi discovery backend built on the `zeroconf` crate: it
 /// sweeps the link for DNS-SD services and streams them as [`DiscoveryEvent`]s.
-/// Falls back to the [`fake`] backend when no browser can be started.
+/// Reports a [`DiscoveryEvent::Status`] and emits no entries when no browser
+/// can be started.
 ///
 /// Unlike the [`mdns`](super::mdns) backend, `zeroconf` wraps the native
 /// Avahi/Bonjour APIs which browse one concrete service type at a time, so this
@@ -60,8 +60,8 @@ pub(super) fn start(config: &DiscoveryConfig) -> DiscoveryWorker {
 
 async fn browse_loop(
     service_types: Vec<ServiceType>,
-    domain: String,
-    service_type_filter: Option<String>,
+    _domain: String,
+    _service_type_filter: Option<String>,
     tx: mpsc::Sender<DiscoveryEvent>,
     shutdown: CancellationToken,
 ) {
@@ -91,9 +91,9 @@ async fn browse_loop(
 
     if workers.is_empty() {
         let _ = tx.send(DiscoveryEvent::Status(
-            "mDNS discovery unavailable; using sample records".to_string(),
+            "mDNS discovery unavailable; try --fake-discovery for sample records, or refresh to retry"
+                .to_string(),
         ));
-        fake::spawn(domain, service_type_filter, tx);
         return;
     }
 
@@ -211,5 +211,19 @@ mod tests {
     fn unparseable_filter_falls_back_to_default_sweep() {
         let types = resolve_service_types(Some("not a service type"));
         assert_eq!(types.len(), DEFAULT_SERVICE_TYPES.len());
+    }
+
+    /// No configured service type can start a browser (simulated here with an
+    /// empty type list, deterministic regardless of Avahi availability): the
+    /// loop must report only a `Status`, never fabricate an entry.
+    #[tokio::test]
+    async fn no_started_workers_emits_status_only_no_upsert() {
+        let (tx, rx) = mpsc::channel();
+        let shutdown = CancellationToken::new();
+
+        browse_loop(Vec::new(), "local".to_string(), None, tx, shutdown).await;
+
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(matches!(events.as_slice(), [DiscoveryEvent::Status(_)]));
     }
 }

@@ -59,7 +59,9 @@ kinjo --backend zeroconf
 ```
 
 When a `--service-type` is given, only that type is browsed. If mDNS discovery is
-unavailable, it falls back to sample records so the UI remains usable.
+unavailable, the list stays empty and the status line explains why; it never
+falls back to sample records. Pass `--fake-discovery` for sample records on
+demand, or refresh to retry real discovery.
 
 ## Privacy
 
