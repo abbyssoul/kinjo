@@ -24,12 +24,39 @@ fields: if candidates prepare different argument vectors, the user chooses.
 
 ## Evidence
 
-- `src/plumber/mod.rs:77-83`: `needs_instance` is derived from limited field checks.
-- `src/plumber/mod.rs:104-119`: only address/port are considered instance-specific.
-- `src/ui/app.rs:679-692`: when `needs_instance` is false, the first matching
-  record is executed.
+- `src/plumber/mod.rs:97-102`: `needs_instance` is derived from limited field checks.
+- `src/plumber/mod.rs:104-110`, `205-207`: only address/port are considered
+  instance-specific.
+- `src/ui/app.rs:747`: when `needs_instance` is false, the first matching record
+  is executed.
 - `src/discovery/entry.rs:269-301`: host/service-type groups may contain
   heterogeneous entries while scalar fields come from the first child.
+
+Re-verified after tasks 004 and 010 landed (line numbers above updated):
+
+- The defect stands and was independently rediscovered by both the 004 and 010
+  agents: `needs_instance` still keys off template/predicate *fields* rather than
+  whether candidates prepare distinct argv, so a rule with no instance-specific
+  field (`ssh {hostname}`) matching several children still runs the first child
+  with no picker. This contradicts CONTEXT's "if multiple candidates prepare
+  distinct argument vectors, the user must choose a target."
+- Task 010 makes it **easier to hit**: aggregate rows now legitimately present
+  heterogeneous children, so more real selections reach this path. 010 routed its
+  own invocation test around the defect via an address-templating rule rather than
+  broadening scope — that test is a candidate to retarget once this task lands.
+- The last evidence bullet is **obsolete**: task 010 removed first-child scalar
+  copying (`GroupFacts` has one variant per mode, so an aggregate has no
+  service-type/port/TXT field to read). The heterogeneity it describes is still
+  real; the "scalars from the first child" mechanism is gone.
+- Task 004 narrowed the blast radius: address predicates are now conjunctive per
+  candidate, so `matches_group` yields only addresses satisfying the whole rule.
+  Distinct-argv counting replaces `needs_instance`, it does not have to re-derive
+  which addresses are valid.
+- 004 also noted a rule with an `address` predicate but no `{address}`/`{port}`
+  template still reports `needs_instance` and can expand to several candidates
+  preparing **identical** argv — a redundant picker. That is the inverse of this
+  task's other half ("identical prepared commands may collapse") and the same
+  distinct-argv counting should resolve both.
 
 Concrete reproduction for a regression test: group two `_ssh._tcp` entries on
 different hosts in `GroupingMode::ServiceType`; invoke `ssh {hostname}`. Current
