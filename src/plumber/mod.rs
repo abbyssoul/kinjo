@@ -68,8 +68,7 @@ impl Matcher {
                 let matching_records: Vec<Entry> = group
                     .instances
                     .iter()
-                    .filter(|record| command.matches_record(record))
-                    .flat_map(|record| command.candidate_instances(record))
+                    .flat_map(|record| command.candidates(record))
                     .collect();
                 if matching_records.is_empty() {
                     return None;
@@ -95,12 +94,6 @@ impl Matcher {
 }
 
 impl CommandConfig {
-    fn matches_record(&self, record: &Entry) -> bool {
-        self.predicates
-            .iter()
-            .all(|predicate| predicate.matches(record))
-    }
-
     pub fn needs_instance(&self) -> bool {
         self.predicates
             .iter()
@@ -116,37 +109,54 @@ impl CommandConfig {
     /// addresses (it matches on `address` or templates `{address}`).
     fn uses_address(&self) -> bool {
         self.action.command.contains("{address}")
-            || self.predicates.iter().any(|p| p.field == "address")
+            || self.predicates.iter().any(|p| is_address_field(&p.field))
     }
 
-    /// Expands a matched service into the per-instance candidates the command
-    /// can act on. A service carries all of its addresses on one entry; when the
-    /// command distinguishes addresses, each (matching) address becomes its own
-    /// single-address candidate so the instance picker can offer them. Otherwise
-    /// the service stays a single candidate.
-    fn candidate_instances(&self, record: &Entry) -> Vec<Entry> {
-        if !self.uses_address() || record.addresses.len() <= 1 {
+    /// The concrete candidates of `record` that satisfy this command's *whole*
+    /// rule, in the record's existing address order. Empty when the record does
+    /// not match, so "does this rule match?" and "what can it act on?" are one
+    /// question that cannot be answered two different ways.
+    ///
+    /// Address predicates are a conjunction over a single concrete address: an
+    /// address is a candidate only if it satisfies *every* address predicate.
+    /// Two predicates can therefore never be satisfied by two different
+    /// addresses. Non-address predicates are evaluated against the record.
+    fn candidates(&self, record: &Entry) -> Vec<Entry> {
+        if !self.non_address_predicates_match(record) {
+            return Vec::new();
+        }
+        if !self.uses_address() {
+            // The command cannot tell the addresses apart, so the service stays
+            // one candidate carrying all of them.
             return vec![record.clone()];
         }
-        let matching: Vec<IpAddr> = record
+        // The rule needs one concrete address: either a predicate constrains it
+        // or the template interpolates it. Without a satisfying address (an
+        // entry that has none included) there is no executable candidate, so the
+        // action is not offered at all rather than deferred to a preparation
+        // error. With no address predicate every address qualifies, and the
+        // instance picker disambiguates.
+        record
             .addresses
             .iter()
-            .copied()
             .filter(|addr| self.address_predicates_match(addr))
-            .collect();
-        let addresses = if matching.is_empty() {
-            record.addresses.clone()
-        } else {
-            matching
-        };
-        addresses
-            .into_iter()
             .map(|addr| {
                 let mut candidate = record.clone();
-                candidate.addresses = vec![addr];
+                candidate.addresses = vec![*addr];
                 candidate
             })
             .collect()
+    }
+
+    /// Whether `record` satisfies every predicate on a field other than
+    /// `address`. Address predicates are excluded because they are only
+    /// meaningful against one concrete address; [`Self::candidates`] applies
+    /// them per address.
+    fn non_address_predicates_match(&self, record: &Entry) -> bool {
+        self.predicates
+            .iter()
+            .filter(|predicate| !is_address_field(&predicate.field))
+            .all(|predicate| predicate.matches(record))
     }
 
     /// Whether `addr` satisfies every `address` predicate on this command (so it
@@ -156,21 +166,25 @@ impl CommandConfig {
         let value = addr.to_string();
         self.predicates
             .iter()
-            .filter(|p| p.field == "address")
+            .filter(|p| is_address_field(&p.field))
             .all(|p| p.predicate.matches_value(&value))
     }
 }
 
 impl FieldPredicate {
+    /// Whether `record`'s value for this predicate's field satisfies it.
+    ///
+    /// Only valid for non-address fields. An `address` predicate must be
+    /// evaluated against one concrete address via
+    /// [`CommandConfig::address_predicates_match`]: `Entry::field("address")`
+    /// reports only the primary address, and testing each predicate against a
+    /// record independently would let two predicates be satisfied by two
+    /// different addresses.
     fn matches(&self, record: &Entry) -> bool {
-        // A service may advertise several addresses; match if ANY satisfies the
-        // predicate, then `candidate_instances` narrows to the matching ones.
-        if self.field == "address" {
-            return record
-                .addresses
-                .iter()
-                .any(|addr| self.predicate.matches_value(&addr.to_string()));
-        }
+        debug_assert!(
+            !is_address_field(&self.field),
+            "address predicates are evaluated per concrete address, not per record"
+        );
         let Some(value) = record.field(&self.field) else {
             return false;
         };
@@ -189,7 +203,14 @@ impl Predicate {
 }
 
 fn is_instance_field(field: &str) -> bool {
-    matches!(field, "address" | "port")
+    is_address_field(field) || field == "port"
+}
+
+/// The match field naming a service's IP address. Address predicates are the one
+/// field evaluated per concrete address rather than per record, so the spelling
+/// is defined once here.
+fn is_address_field(field: &str) -> bool {
+    field == "address"
 }
 
 /// Engine that matches discovered entry groups against the loaded rules. The
@@ -640,6 +661,229 @@ mode = "execute"
             .collect();
         assert!(addresses.contains(&"192.168.50.244".to_string()));
         assert!(addresses.contains(&"192.168.50.245".to_string()));
+    }
+
+    /// Builds a matcher holding one rule, through the real loading interface.
+    fn matcher_with(source: &str) -> Matcher {
+        let mut builder = MatcherBuilder::new();
+        builder.add_str("address-rule", source).unwrap();
+        builder.build()
+    }
+
+    /// One `_workstation._tcp` service advertising `addresses`, as the single
+    /// logical-service group the matcher is asked about.
+    fn workstation_group(addresses: &[&str]) -> EntryGroup {
+        let mut record = Entry::new("host", "_workstation._tcp", "local");
+        record.hostname = Some("host.local".to_string());
+        record.addresses = addresses
+            .iter()
+            .map(|address| address.parse().unwrap())
+            .collect();
+        record.port = Some(9);
+        crate::discovery::group_entries(&[record], crate::discovery::GroupingMode::LogicalService)
+            .remove(0)
+    }
+
+    /// The concrete address each offered candidate would act on, in order.
+    fn candidate_addresses(matches: &[MatchResult]) -> Vec<String> {
+        matches
+            .iter()
+            .flat_map(|result| &result.matching_records)
+            .map(|record| {
+                let [address] = record.addresses.as_slice() else {
+                    panic!("candidate must carry exactly one concrete address");
+                };
+                address.to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn address_predicates_satisfied_by_different_addresses_do_not_match() {
+        // `contains "10."` is satisfied only by the IPv4 address and `regex ":"`
+        // only by the IPv6 one. No single address satisfies the whole rule, so
+        // the command must not be offered against either.
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "dual-stack"
+
+[match.service_type]
+equals = "_workstation._tcp"
+
+[match.address]
+contains = "10."
+regex = ":"
+
+[action]
+command = "ping {address}"
+mode = "execute"
+"#,
+        );
+        let group = workstation_group(&["10.0.0.1", "2001:db8::1"]);
+
+        assert!(matcher.matches_group(&group).is_empty());
+    }
+
+    #[test]
+    fn address_predicates_are_conjunctive_over_one_address() {
+        // Only 10.0.0.99 satisfies both predicates: 10.0.0.1 fails the regex and
+        // 192.168.1.5 fails the `contains`.
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "conjunctive"
+
+[match.service_type]
+equals = "_workstation._tcp"
+
+[match.address]
+contains = "10."
+regex = "\\.99$"
+
+[action]
+command = "ping {address}"
+mode = "execute"
+"#,
+        );
+        let group = workstation_group(&["10.0.0.1", "192.168.1.5", "10.0.0.99"]);
+
+        let matches = matcher.matches_group(&group);
+
+        assert_eq!(candidate_addresses(&matches), vec!["10.0.0.99".to_string()]);
+    }
+
+    #[test]
+    fn address_template_without_predicates_expands_every_address_in_order() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "any-address"
+
+[match.service_type]
+equals = "_workstation._tcp"
+
+[action]
+command = "ping {address}"
+mode = "execute"
+"#,
+        );
+        let group = workstation_group(&["10.0.0.1", "192.168.1.5", "2001:db8::1"]);
+
+        let matches = matcher.matches_group(&group);
+
+        // Every address is a candidate for the user to disambiguate, in the
+        // entry's existing order.
+        assert_eq!(
+            candidate_addresses(&matches),
+            vec![
+                "10.0.0.1".to_string(),
+                "192.168.1.5".to_string(),
+                "2001:db8::1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn entry_without_address_does_not_satisfy_an_address_predicate() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "by-address"
+
+[match.service_type]
+equals = "_workstation._tcp"
+
+[match.address]
+contains = "10."
+
+[action]
+command = "ping {address}"
+mode = "execute"
+"#,
+        );
+
+        assert!(matcher.matches_group(&workstation_group(&[])).is_empty());
+    }
+
+    #[test]
+    fn entry_without_address_offers_no_candidate_for_an_address_template() {
+        // No address predicate constrains the rule, but the template needs a
+        // concrete address. An unresolved entry has none, so the action is not
+        // offered rather than failing later during preparation.
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "any-address"
+
+[match.service_type]
+equals = "_workstation._tcp"
+
+[action]
+command = "ping {address}"
+mode = "execute"
+"#,
+        );
+
+        assert!(matcher.matches_group(&workstation_group(&[])).is_empty());
+    }
+
+    #[test]
+    fn address_predicate_still_matches_a_single_satisfying_address() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "by-address"
+
+[match.service_type]
+equals = "_workstation._tcp"
+
+[match.address]
+contains = "10."
+
+[action]
+command = "ping {address}"
+mode = "execute"
+"#,
+        );
+
+        let matches = matcher.matches_group(&workstation_group(&["10.0.0.1"]));
+        assert_eq!(candidate_addresses(&matches), vec!["10.0.0.1".to_string()]);
+
+        // ...and rejects a lone address that violates it, rather than falling
+        // back to offering it anyway.
+        assert!(
+            matcher
+                .matches_group(&workstation_group(&["192.168.1.5"]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn commands_without_address_use_keep_all_addresses_on_one_candidate() {
+        // The rule cannot tell the addresses apart, so the service stays a
+        // single candidate carrying every address.
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "by-host"
+
+[match.service_type]
+equals = "_workstation._tcp"
+
+[action]
+command = "ssh {hostname}"
+mode = "execute"
+"#,
+        );
+        let group = workstation_group(&["10.0.0.1", "192.168.1.5"]);
+
+        let matches = matcher.matches_group(&group);
+
+        assert_eq!(matches.len(), 1);
+        assert!(!matches[0].needs_instance);
+        assert_eq!(matches[0].matching_records.len(), 1);
+        assert_eq!(matches[0].matching_records[0].addresses.len(), 2);
     }
 
     #[test]

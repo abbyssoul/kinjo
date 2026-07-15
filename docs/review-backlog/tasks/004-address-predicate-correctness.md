@@ -4,12 +4,12 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `ready` |
+| Status | `done` |
 | Priority | `P0` |
 | Workstream | Command rules |
 | Depends on | — |
 | Likely conflicts | 005, 006 |
-| Owner | Unclaimed |
+| Owner | agent-a7769bd1fe322fb1e |
 
 ## Why This Matters
 
@@ -70,12 +70,12 @@ The command must not be offered.
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] Mutually incompatible address predicates yield no match.
-- [ ] Multiple compatible predicates yield only satisfying addresses.
-- [ ] `{address}` without address predicates expands every available address.
-- [ ] No-address entries fail address-dependent rules cleanly.
-- [ ] Existing single-address and multi-address behavior remains covered.
-- [ ] Full validation passes.
+- [x] Mutually incompatible address predicates yield no match.
+- [x] Multiple compatible predicates yield only satisfying addresses.
+- [x] `{address}` without address predicates expands every available address.
+- [x] No-address entries fail address-dependent rules cleanly.
+- [x] Existing single-address and multi-address behavior remains covered.
+- [x] Full validation passes.
 
 ## Required Tests
 
@@ -97,8 +97,60 @@ cargo test --locked --all-targets --all-features
 
 ## Completion Record
 
-- **Implemented:**
-- **Tests added/updated:**
-- **Documentation updated:**
-- **Validation evidence:**
+- **Implemented:** Evidence re-verified against `dd872b7`; all three anchors were
+  still accurate at the quoted lines. Merged matching and candidate expansion
+  into one operation in `src/plumber/mod.rs` so they cannot drift:
+  - `Matcher::matches_group` no longer filters by `matches_record` and then
+    separately expands; it only flat-maps `CommandConfig::candidates`.
+  - New `CommandConfig::candidates` is the single answer to "which concrete
+    candidates satisfy the whole rule?". It checks non-address predicates
+    against the record, returns the record unchanged when the command cannot
+    distinguish addresses, and otherwise returns one single-address candidate
+    per address satisfying *every* address predicate, in the entry's existing
+    order. `matches_record`/`candidate_instances` are gone.
+  - Removed the all-address fallback: an empty candidate set now means "no
+    match", so an address violating the predicates can no longer be executed.
+  - Removed the `record.addresses.len() <= 1` short-circuit, which let a
+    `{address}` rule offer an address-less entry and defer to a preparation
+    error. Such rules are now simply not offered.
+  - `FieldPredicate::matches` no longer special-cases `address` with `any(...)`
+    (the root of the disagreement); it is documented as non-address-only and
+    holds a `debug_assert!`. Address field spelling is centralised in a new
+    `is_address_field`, which `is_instance_field` now reuses.
+  - Non-address predicate semantics and the public `MatchResult`/`RuleEngine`
+    interface are unchanged, so no UI change was required.
+- **Tests added/updated:** 7 tests added in `src/plumber/mod.rs` `tests`, all
+  driving the real `MatcherBuilder` → `Matcher::matches_group` interface (no
+  test-only seam), with `matcher_with`/`workstation_group`/`candidate_addresses`
+  helpers: `address_predicates_satisfied_by_different_addresses_do_not_match`
+  (the dual-stack `10.` + `:` case from the task),
+  `address_predicates_are_conjunctive_over_one_address`,
+  `address_template_without_predicates_expands_every_address_in_order`,
+  `entry_without_address_does_not_satisfy_an_address_predicate`,
+  `entry_without_address_offers_no_candidate_for_an_address_template`,
+  `address_predicate_still_matches_a_single_satisfying_address`,
+  `commands_without_address_use_keep_all_addresses_on_one_candidate`. The
+  regressions were confirmed to fail (2 failures) against the pre-fix fallback
+  before the fix was restored. `prepare_command` fuzz properties were reviewed
+  and left unchanged: the target only exercises `exec::prepare`/`CommandAction`,
+  whose inputs and interface this task does not touch.
+- **Documentation updated:** `docs/actions.md` — documented that all
+  `[match.address]` predicates apply to the same single address (with the
+  unsatisfiable dual-stack example), and that an `{address}` command offers only
+  satisfying addresses and is not offered at all for an unresolved entry.
+- **Validation evidence:** Full gate passed on this worktree.
+  - `cargo fmt -- --check`: clean.
+  - `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
+  - `cargo test --locked --all-targets`: 191 passed, 0 failed (184 before this
+    change: +7).
+  - `cargo test --locked --all-targets --all-features`: 196 passed, 0 failed
+    (189 before: +7).
+  - Note: the baseline in `CONTEXT.md` (163/166) predates tasks 001/002/012/016.
 - **Follow-ups:**
+  - Out of scope here (task 006 owns it): a rule with an `address` predicate but
+    no `{address}`/`{port}` in its template still reports `needs_instance` and
+    can expand to several candidates that prepare *identical* argv, producing a
+    redundant instance picker. This is the "identical prepared commands may
+    collapse" decision in `CONTEXT.md`; behaviour was preserved as-is.
+  - Task 005 can now compile the address predicate conjunction at load time; the
+    per-address evaluation is already isolated in `address_predicates_match`.

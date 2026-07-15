@@ -113,6 +113,18 @@ Supported fields:
 - `port`
 - `txt.<key>`
 
+A service may advertise several addresses. Every `[match.address]` predicate is
+applied to the *same* single address, so a command matches only if one concrete
+address satisfies all of them at once, and it can then only run against such an
+address. Predicates that no single address can satisfy together — for example
+`contains = "10."` and `regex = ":"` on a dual-stack host — match nothing:
+
+```toml
+[match.address]
+contains = "10."
+regex = "\\.99$"    # only an address matching BOTH is offered
+```
+
 Example matching a service type and a TXT record:
 
 ```toml
@@ -155,6 +167,12 @@ Common placeholders:
 If a command uses instance-specific fields such as `{address}` or `{port}`, and
 the selected row contains multiple service instances, `kinjo` asks which
 instance to use before running the command.
+
+A command using `{address}` needs one concrete address. With no
+`[match.address]` predicate, every advertised address is offered for selection;
+with predicates, only the addresses satisfying all of them are. A service whose
+addresses are not (yet) resolved offers no such command at all, rather than
+failing once it is run.
 
 Commands are split into an argument vector by `kinjo`; they are not passed
 through a shell. Quote arguments that may contain spaces:
