@@ -4,12 +4,12 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `ready` |
+| Status | `done` |
 | Priority | `P0` |
 | Workstream | Terminal safety / Composition |
 | Depends on | 012 |
 | Likely conflicts | 007, 009, 015 |
-| Owner | Unclaimed |
+| Owner | `/root/implement_task_020` (`agent/task-020`) |
 
 ## Why This Matters
 
@@ -106,15 +106,15 @@ Re-validated on 2026-07-16:
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] No dynamic control character reaches any Kinjo-owned stdout/stderr path raw.
-- [ ] Config warnings and complete error reports are safe and retain their causes.
-- [ ] `list-commands` escapes every dynamic field and aligns by display columns.
-- [ ] A discovered control character in argv zero cannot escape through a failed
+- [x] No dynamic control character reaches any Kinjo-owned stdout/stderr path raw.
+- [x] Config warnings and complete error reports are safe and retain their causes.
+- [x] `list-commands` escapes every dynamic field and aligns by display columns.
+- [x] A discovered control character in argv zero cannot escape through a failed
       hand-off report.
-- [ ] Successful execution receives byte-for-byte-equivalent raw argv values.
-- [ ] Child output behavior is unchanged.
-- [ ] A source audit finds no direct dynamic terminal output bypass.
-- [ ] Full validation passes.
+- [x] Successful execution receives byte-for-byte-equivalent raw argv values.
+- [x] Child output behavior is unchanged.
+- [x] A source audit finds no direct dynamic terminal output bypass.
+- [x] Full validation passes.
 
 ## Required Tests
 
@@ -145,8 +145,34 @@ cargo test --locked --all-targets --all-features
 
 ## Completion Record
 
-- **Implemented:**
-- **Tests added/updated:**
-- **Documentation updated:**
-- **Validation evidence:**
-- **Follow-ups:**
+- **Implemented:** Moved task 012's escaping into the dependency-neutral
+  `terminal` module and added Unicode display-width measurement there. The
+  composition root now owns explicit stdout/stderr writers and exit codes. The
+  binary uses `process_main() -> ExitCode`, while the source-compatible public
+  `run() -> color_eyre::eyre::Result<()>` wrapper returns only a static summary
+  after detailed diagnostics have crossed the safe writer boundary;
+  configuration warnings, Clap diagnostics, structured discovery-option usage
+  errors, `list-commands`, and complete eyre cause chains all cross the safe
+  boundary exactly once. `list-commands` sizes its columns after escaping.
+  Stored metadata, discovery errors, `Entry` values, and prepared argv remain
+  raw. The executor and child stdio paths were not changed.
+- **Tests added/updated:** Added nine writer/process regression tests covering
+  C0, DEL/C1, ESC, BEL, CR/LF, tab, CJK, emoji, combining text, Clap stdout vs
+  stderr and exit codes, structured discovery usage errors, multi-cause eyre
+  reports, display-column alignment, and a placeholder-derived unsafe argv-zero
+  failure and the separate library/binary entrypoint signatures. Updated CLI
+  semantic-error assertions to use the new structured `DiscoveryUsageError`
+  while preserving their flag/remedy expectations.
+- **Documentation updated:** Marked task 020 done in this task and the backlog
+  index. No command-file or keybinding interface changed, so no user
+  configuration documentation required an update.
+- **Validation evidence:** On 2026-07-16, `cargo test --locked terminal`,
+  `cargo test --locked plumber::exec`, and `cargo test --locked ui::render`
+  passed; `cargo run --locked -- list-commands --config-dir actions` rendered
+  five aligned rules; `cargo fmt -- --check` passed; all-target/all-feature
+  Clippy passed with `-D warnings`; default all-target tests passed 329/329 and
+  all-feature all-target tests passed 344/344. A source audit found no dynamic
+  direct-output macro, Clap `.exit()`, or returned-report bypass in `src/`.
+- **Follow-ups:** Tasks 009 and 019 touch the CLI/composition surface and must
+  preserve the non-exiting parse path plus the explicit safe process-output
+  boundary when they are implemented.

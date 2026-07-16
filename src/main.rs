@@ -1,6 +1,6 @@
 //! Thin binary entry point. All logic lives in the `kinjo` library so it can
-//! be reused and fuzzed; see [`kinjo::run`].
+//! be reused and fuzzed; see [`kinjo::process_main`].
 
-fn main() -> color_eyre::eyre::Result<()> {
-    kinjo::run()
+fn main() -> std::process::ExitCode {
+    kinjo::process_main()
 }

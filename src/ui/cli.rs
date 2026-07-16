@@ -20,6 +20,32 @@ pub enum CliCommand {
     ListCommands,
 }
 
+/// A discovery option rejected after Clap has parsed its raw value.
+///
+/// The flag and domain error stay structured and unescaped until the process
+/// output boundary renders them alongside Clap's usage text.
+#[derive(Debug)]
+pub struct DiscoveryUsageError {
+    flag: &'static str,
+    source: DiscoveryOptionError,
+}
+
+impl std::fmt::Display for DiscoveryUsageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "invalid value for `{}`: {}",
+            self.flag, self.source
+        )
+    }
+}
+
+impl std::error::Error for DiscoveryUsageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 impl Cli {
     /// Project the CLI options onto the inputs the discovery layer needs, so
     /// discovery stays decoupled from CLI parsing. The result is a *request*;
@@ -36,35 +62,28 @@ impl Cli {
     /// The validated discovery inputs, or the usage error explaining why these
     /// options cannot be honored.
     ///
-    /// Discovery owns the semantics — what a service type may look like, which
-    /// backend can browse which domain — and this only dresses its verdict as a
-    /// clap error, so the message names the flag the user typed and reads like
-    /// every other usage error rather than a panic or an eyre report.
+    /// Discovery owns the semantics — what a service type may look like and
+    /// which backend can browse which domain. The composition root retains the
+    /// structured error so it can safely dress the verdict as a usage error at
+    /// the final terminal boundary.
     ///
     /// Deliberately not called during [`parse_from`]: `list-commands` never
     /// browses anything, and must not be refused over an option it will not use.
-    pub fn discovery_options(&self) -> Result<DiscoveryOptions, clap::Error> {
-        self.discovery_config().validate().map_err(|err| {
-            let flag = match &err {
+    pub fn discovery_options(&self) -> Result<DiscoveryOptions, DiscoveryUsageError> {
+        self.discovery_config().validate().map_err(|source| {
+            let flag = match &source {
                 DiscoveryOptionError::ServiceType { .. } => "--service-type",
                 // The domain is what cannot be honored; the message goes on to
                 // explain that `--backend` is the other way out.
                 DiscoveryOptionError::UnsupportedDomain { .. } => "--domain",
             };
-            command().error(
-                ErrorKind::InvalidValue,
-                format!("invalid value for `{flag}`: {err}"),
-            )
+            DiscoveryUsageError { flag, source }
         })
     }
 }
 
-/// Parse the process arguments. On a usage error (unknown flag, bad subcommand,
-/// invalid value) clap renders a friendly message — with usage hints — to stderr
-/// and exits, rather than surfacing a `color_eyre` report with code locations.
-/// `--help`/`--version` likewise print and exit through the same path.
-pub fn parse() -> Cli {
-    parse_from(std::env::args_os()).unwrap_or_else(|err| err.exit())
+pub(crate) fn usage() -> String {
+    command().render_usage().to_string()
 }
 
 pub fn parse_from<I, T>(args: I) -> Result<Cli, clap::Error>
@@ -334,11 +353,6 @@ mod tests {
 
             let err = cli.discovery_options().unwrap_err();
 
-            assert_eq!(
-                err.kind(),
-                ErrorKind::InvalidValue,
-                "`{bad}` must be refused"
-            );
             let message = err.to_string();
             assert!(message.contains("--service-type"), "{message}");
             assert!(message.contains(bad), "{message}");
@@ -388,7 +402,6 @@ mod tests {
 
         let err = cli.discovery_options().unwrap_err();
 
-        assert_eq!(err.kind(), ErrorKind::InvalidValue);
         let message = err.to_string();
         assert!(message.contains("--domain"), "{message}");
         assert!(message.contains("corp"), "{message}");

@@ -52,7 +52,7 @@ Status values:
 | 017 | P2 | done | [Fake backend heterogeneous SSH row](tasks/017-fake-backend-heterogeneous-ssh-row.md) | 006 | — |
 | 018 | P2 | blocked | [TUI smoke test in CI](tasks/018-tui-smoke-test-in-ci.md) | 017, 019 | 015 |
 | 019 | P2 | ready | [Fake as a selectable backend](tasks/019-fake-as-a-selectable-backend.md) | 017 | — |
-| 020 | P0 | ready | [Safe process-owned terminal output](tasks/020-safe-process-terminal-output.md) | 012 | 007, 009, 015 |
+| 020 | P0 | done | [Safe process-owned terminal output](tasks/020-safe-process-terminal-output.md) | 012 | 007, 009, 015 |
 | 021 | P2 | blocked | [Session-aware activity indicator](tasks/021-session-aware-activity-indicator.md) | 002, 010, 014 | 014, 015 |
 
 Priority meanings:

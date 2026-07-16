@@ -44,3 +44,4 @@ tokio-util = "0.7.18"
 mdns-sd-discovery = "0.2.1"
 zeroconf-tokio = { version = "0.3.2", optional = true }
 toml = "1.1.2"
+unicode-width = "0.2.2"

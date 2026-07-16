@@ -1239,6 +1239,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "unicode-width",
  "zeroconf-tokio",
 ]
 
