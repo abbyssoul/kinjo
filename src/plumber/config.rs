@@ -11,7 +11,10 @@ use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
 use serde_derive::Deserialize;
 
-use super::{ActionMode, CommandAction, CommandConfig, FieldPredicate, Matcher, Predicate};
+use super::{
+    ActionMode, CommandAction, CommandConfig, FieldPredicate, Matcher, Predicate, Requirement,
+    is_supported_field,
+};
 
 #[derive(Debug, Default)]
 pub struct MatcherBuilder {
@@ -32,8 +35,13 @@ impl MatcherBuilder {
         self.layer += 1;
     }
 
+    /// Compile one command file into a validated rule and add it to this layer.
+    ///
+    /// Every failure is attributed to `source_name` here, at the one boundary
+    /// that knows it, so a warning from a lenient startup always tells the user
+    /// which file to go and fix.
     pub fn add_str(&mut self, source_name: &str, source: &str) -> Result<()> {
-        let command = parse_command_config(source_name, source)?;
+        let command = parse_command_config(source).map_err(|err| eyre!("{source_name}: {err}"))?;
         match self.names.get(&command.name).copied() {
             Some((layer, _)) if layer == self.layer => {
                 return Err(eyre!(
@@ -58,7 +66,9 @@ impl MatcherBuilder {
     }
 
     pub fn add_file(&mut self, path: &Path) -> Result<()> {
-        let source = fs::read_to_string(path)?;
+        // An unreadable file is reported with its path too: a lenient startup
+        // turns this into a warning, and `cannot read` on its own names nothing.
+        let source = fs::read_to_string(path).map_err(|err| eyre!("{}: {err}", path.display()))?;
         self.add_str(&path.display().to_string(), &source)
     }
 
@@ -213,20 +223,37 @@ struct RawAction {
     mode: String,
 }
 
-fn parse_command_config(source_name: &str, source: &str) -> Result<CommandConfig> {
-    let raw: RawConfig = toml::from_str(source).map_err(|err| eyre!("{source_name}: {err}"))?;
+/// Compile the on-disk form of a command file into a validated rule.
+///
+/// Everything a rule can be wrong about is decided here: the mode, the match
+/// fields and their predicates, the requirement grammar, and the command
+/// template. A `CommandConfig` returned from this function is executable, so
+/// `list-commands` validating a file and the TUI offering it cannot disagree.
+fn parse_command_config(source: &str) -> Result<CommandConfig> {
+    let raw: RawConfig = toml::from_str(source)?;
+
+    if raw.metadata.name.is_empty() {
+        return Err(eyre!("`metadata.name` is empty"));
+    }
 
     let mode = match raw.action.mode.as_str() {
         "fork" => ActionMode::Fork,
         "execute" | "exec" => ActionMode::Execute,
-        value => return Err(eyre!("{source_name}: invalid action mode `{value}`")),
+        value => return Err(eyre!("invalid action mode `{value}`")),
     };
 
+    let requirements = raw
+        .metadata
+        .requirements
+        .iter()
+        .map(|entry| Requirement::parse(entry))
+        .collect::<Result<Vec<_>>>()?;
+
     let mut predicates = Vec::new();
-    collect_predicates(source_name, "", &raw.matchers, &mut predicates)?;
+    collect_predicates("", &raw.matchers, &mut predicates)?;
     if predicates.is_empty() {
         return Err(eyre!(
-            "{source_name}: command `{}` has no match predicates",
+            "command `{}` has no match predicates",
             raw.metadata.name
         ));
     }
@@ -234,13 +261,9 @@ fn parse_command_config(source_name: &str, source: &str) -> Result<CommandConfig
     Ok(CommandConfig {
         name: raw.metadata.name,
         description: raw.metadata.description,
-        requirements: raw.metadata.requirements,
+        requirements,
         predicates,
-        action: CommandAction {
-            description: raw.action.description,
-            command: raw.action.command,
-            mode,
-        },
+        action: CommandAction::compile(raw.action.description, raw.action.command, mode)?,
     })
 }
 
@@ -248,8 +271,12 @@ fn parse_command_config(source_name: &str, source: &str) -> Result<CommandConfig
 /// a [`FieldPredicate`] on the field named by the table path. Nested tables
 /// extend the field name with a dot (`[match.txt.path]` matches the `txt.path`
 /// service field).
+///
+/// The field a leaf names is checked against the rule vocabulary here. A rule
+/// matching on `service_typ` was previously accepted and then simply never
+/// matched anything, which looks exactly like a service that is not on the
+/// network — the one thing a discovery tool must not be ambiguous about.
 fn collect_predicates(
-    source_name: &str,
     field: &str,
     table: &toml::Table,
     predicates: &mut Vec<FieldPredicate>,
@@ -262,28 +289,36 @@ fn collect_predicates(
         };
         match value {
             toml::Value::Table(nested) => {
-                collect_predicates(source_name, &path, nested, predicates)?;
+                collect_predicates(&path, nested, predicates)?;
             }
             _ if field.is_empty() => {
                 return Err(eyre!(
-                    "{source_name}: match `{path}` must be a table like `[match.<field>]`"
+                    "match `{path}` must be a table like `[match.<field>]`"
                 ));
             }
             toml::Value::String(value) => {
+                if !is_supported_field(field) {
+                    return Err(eyre!(
+                        "unsupported match field `{field}`; supported fields are \
+                         name, service_type (or type), domain, hostname, address, \
+                         port, and txt.<key>"
+                    ));
+                }
                 let predicate = match key.as_str() {
                     "equals" => Predicate::Equals(value.clone()),
                     "contains" => Predicate::Contains(value.clone()),
-                    "regex" => Predicate::Regex(Regex::new(value).map_err(|err| {
-                        eyre!("{source_name}: invalid regex for `{path}`: {err}")
-                    })?),
-                    _ => return Err(eyre!("{source_name}: unsupported predicate `{path}`")),
+                    "regex" => Predicate::Regex(
+                        Regex::new(value)
+                            .map_err(|err| eyre!("invalid regex for `{path}`: {err}"))?,
+                    ),
+                    _ => return Err(eyre!("unsupported predicate `{path}`")),
                 };
                 predicates.push(FieldPredicate {
                     field: field.to_string(),
                     predicate,
                 });
             }
-            _ => return Err(eyre!("{source_name}: match `{path}` must be a string")),
+            _ => return Err(eyre!("match `{path}` must be a string")),
         }
     }
     Ok(())

@@ -4,7 +4,7 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `in-progress` |
+| Status | `done` |
 | Priority | `P1` |
 | Workstream | Command rules |
 | Depends on | 004 (`done`) |
@@ -99,16 +99,16 @@ startup, validation, reload, UI, and tests one source of truth.
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] `list-commands` rejects every unsupported field/placeholder and malformed
+- [x] `list-commands` rejects every unsupported field/placeholder and malformed
       template/requirement with source file and actionable context.
-- [ ] Lenient startup skips each invalid file and retains valid rules.
-- [ ] Valid quoted empty arguments are preserved exactly in prepared argv.
-- [ ] A discovered value containing spaces, quotes, separators, or braces cannot
+- [x] Lenient startup skips each invalid file and retains valid rules.
+- [x] Valid quoted empty arguments are preserved exactly in prepared argv.
+- [x] A discovered value containing spaces, quotes, separators, or braces cannot
       reshape argv.
-- [ ] UI no longer owns requirement/template preparation ordering.
-- [ ] `docs/actions.md` documents validation and quoting accurately.
-- [ ] Parser/prepare fuzz targets remain meaningful and pass their smoke runs.
-- [ ] Full validation passes.
+- [x] UI no longer owns requirement/template preparation ordering.
+- [x] `docs/actions.md` documents validation and quoting accurately.
+- [x] Parser/prepare fuzz targets remain meaningful and pass their smoke runs.
+- [x] Full validation passes.
 
 ## Required Tests
 
@@ -136,7 +136,98 @@ cargo test --locked --all-targets --all-features
 ## Completion Record
 
 - **Implemented:**
+  - New `src/plumber/template.rs`: `CommandTemplate`, the compiled argv *shape*
+    of an action. `compile` implements the exact token grammar (unquoted
+    whitespace separates; quotes are removed and contents preserved; adjacent
+    fragments form one argument; backslash escapes the next scalar inside and
+    outside quotes; dangling backslash and unterminated quote are invalid;
+    quoted empty arguments are preserved, including at the end) and the exact
+    placeholder grammar (`{field}`, `{{` → literal `{`, lone `}` literal,
+    empty/nested/unknown/unterminated invalid). Tokenizing and placeholder
+    parsing are one pass — separating them would make `\{name}` (an escaped
+    literal brace) indistinguishable from a placeholder.
+  - `plumber::is_supported_field` defines the rule vocabulary (`name`, `type`,
+    `service_type`, `domain`, `hostname`, `address`, `port`, non-empty
+    `txt.<key>`). Placed in `plumber`, not `discovery`, because it is the rule
+    language's vocabulary — and `src/discovery/**` belongs to task 003.
+  - `CommandAction` now holds a private compiled `template` and is constructible
+    only via `CommandAction::compile`, so an action that exists is one that can
+    be prepared. `command` is retained solely as display metadata (explicitly
+    permitted by the constraints); `prepare` never re-reads it.
+  - `Requirement::parse` implements the exact requirement grammar; rules store
+    `Vec<Requirement>`, never raw strings. `Display` round-trips the grammar so
+    the UI can render dependencies without keeping the raw text alongside.
+  - `CommandConfig::run` is the single execution operation: requirements →
+    prepare → mode → fork/handoff, returning `ActionOutcome::{Forked, Handoff}`.
+  - `CommandConfig::candidates` now also requires every non-address field the
+    template names to resolve, so a record missing one yields no candidate and
+    the action is not offered (rather than offered and then refused).
+  - `needs_instance`/`uses_address` are structural (`template.references(..)`)
+    instead of `contains("{address}")` on raw text, so a literal `{{address}}`
+    is no longer mistaken for an instance-specific template.
+  - Error attribution moved to the one boundary that knows the file
+    (`MatcherBuilder::add_str`), and `add_file` now names the path on read
+    failure — every lenient-startup warning names its source.
 - **Tests added/updated:**
-- **Documentation updated:**
+  - `src/plumber/template.rs`: 14 grammar tests covering every token and
+    placeholder rule above, plus `field_values_cannot_reshape_argv`.
+  - `src/plumber/exec.rs`: requirement grammar (valid forms, every rejected
+    suffix, extra commas, empty program, `Display` round-trip).
+  - `src/plumber/mod.rs`: 9 new load-time rejection cases (`service_typ`, bare
+    `txt`, empty name/command, whitespace-only command, unknown placeholder,
+    unterminated quote, malformed requirement) — each now also asserting the
+    error names its source; `type` alias + arbitrary `txt.<key>` accepted;
+    `supported_fields_resolve_against_a_populated_record` pins the vocabulary
+    against `Entry::field`; missing templated field/TXT key yields no candidate;
+    `run` hand-off/fork/requirement-block; injection barrier and quoted-empty
+    argv through the real loading interface; strict-vs-lenient with source paths
+    and "every invalid file warned".
+  - `src/ui/app.rs`: removed `BAD_TEMPLATE` — `echo {nonexistent_field}` can no
+    longer be loaded at all, which is the point of the task; the picker-closing
+    regression now uses the missing-binary rule, which still fails at run time.
+- **Documentation updated:** `docs/actions.md` — new Requirements section
+  (mandatory vs optional, PATH/executable lookup incl. `PATHEXT`, blocking
+  behaviour, checked per run not at load); Quoting/Escaping and Placeholders
+  sections stating the exact grammar; "Interpolation Is Safe"; an accurate
+  `list-commands` validator contract; lenient-startup wording.
+  - **Contradiction resolved** (evidence `docs/actions.md:83-85`): the docs said
+    requirements "are not installed or checked for you" while the runtime
+    blocked missing mandatory executables. Resolved in favour of the actual
+    intended behaviour — mandatory requirements *are* checked via PATH lookup
+    and block the action; optional ones never do; kinjo never installs anything.
+    Documented explicitly rather than left implicit.
 - **Validation evidence:**
+  - `cargo fmt -- --check`: clean.
+  - `cargo clippy --locked --all-targets --all-features -- -D warnings`: clean.
+  - `cargo test --locked --all-targets`: 256 passed (from 245).
+  - `cargo test --locked --all-targets --all-features`: 262 passed.
+  - `cargo run --locked -- list-commands --config-dir actions`: all 5 bundled
+    rules still validate and list.
+  - End-to-end strict rejection confirmed by hand: `service_typ` →
+    "unsupported match field `service_typ`; supported fields are …",
+    `{hostnam}` → "unknown service field `hostnam` in `ssh {hostnam}`",
+    `"browser, optinal"` → "unsupported suffix `optinal`" — each prefixed with
+    the offending file path, exit code 1.
+  - Fuzz smoke runs (nightly, 25s each), no crashes: `parse_command` 423,961
+    runs; `command_roundtrip` 83,070 runs; `prepare_command` 372,057 runs.
 - **Follow-ups:**
+  - **Task 015 — `RuleEngine` deletion test applied, seam confirmed shallow.**
+    Evidence: exactly one implementation (`impl RuleEngine for Matcher`,
+    `src/plumber/mod.rs:355`), whose three methods are pure pass-throughs to
+    `Matcher`'s inherent methods. Its only cost is indirection: `Box<dyn
+    RuleEngine>` in `App::matcher` and `ConfigLoader` (`src/ui/app.rs:32,58`),
+    plus four `as Box<dyn RuleEngine>` casts in tests and one in `src/lib.rs:49`.
+    Deleting the trait makes that complexity vanish with no behaviour lost —
+    a hypothetical seam by CONTEXT's definition. Not removed here: task 015 owns
+    it and this task's blast radius was already wide.
+  - **Pre-existing, out of scope:** `fuzz/fuzz_targets/discovery_entry.rs` does
+    not compile on `main` — it imports `kinjo::discovery::group_entries`, which
+    the merged discovery work renamed to `browse_groups`. Confirmed present
+    before this change (`git stash` check). The fuzz crate is not in the default
+    workspace, so the completion gate never catches it. Belongs to the discovery
+    workstream (task 003 owns `src/discovery/**`); worth its own small task so
+    CI's fuzz soak is not silently broken.
+  - `src/ui/render.rs` needed three unavoidable lines (a `Requirement` render
+    helper and two test-fixture constructions) because `requirements` changed
+    type and `CommandAction` gained a private field. Kept minimal and far from
+    the keybinding-hint code task 013 is editing.

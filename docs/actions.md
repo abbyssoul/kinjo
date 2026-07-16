@@ -61,6 +61,24 @@ To validate only specific directories:
 kinjo list-commands --config-dir ./commands
 ```
 
+`list-commands` is a real validator, not just a TOML syntax check. A command
+file is compiled the same way it is when the TUI loads it, so everything that
+could make a rule impossible to run is reported here rather than when someone
+selects the action:
+
+- an empty `metadata.name`, or an empty or whitespace-only `action.command`;
+- an unsupported `[match.<field>]` field or predicate kind, and an invalid regex;
+- an unknown, empty, nested, or unterminated `{placeholder}`;
+- an unterminated quote or a dangling backslash in `action.command`;
+- a malformed `requirements` entry.
+
+It fails on the first invalid file and names it. Anything `list-commands`
+accepts can be matched and prepared.
+
+Requirements are the one thing it does not check: whether a program is installed
+is a property of the machine, not of the file, and it is re-checked each time an
+action runs.
+
 ## File Format
 
 A command file has three parts:
@@ -80,17 +98,54 @@ command = "xdg-open http://{hostname}:{port}"
 mode = "fork"
 ```
 
-`metadata.name` is required and is the stable command identity used for overlay
-replacement. `metadata.description` and `metadata.requirements` are optional.
-Requirements are shown in the UI; they are not installed or checked for you.
+`metadata.name` is required, must not be empty, and is the stable command
+identity used for overlay replacement. `metadata.description` and
+`metadata.requirements` are optional; see [Requirements](#requirements).
 
-`action.command` is required. It is the shell command template to run for the
-selected service. `action.description` is optional and is shown in the action
-picker. `action.mode` is required and must be one of:
+`action.command` is required and must not be empty or whitespace only. It is the
+command template to run for the selected service — a template, not a shell
+command line; see [Command Templates](#command-templates). `action.description`
+is optional and is shown in the action picker. `action.mode` is required and
+must be one of:
 
 - `fork`: spawn the command and return to the TUI.
 - `execute`: restore the terminal and replace the TUI process with the command.
 - `exec`: alias for `execute`.
+
+## Requirements
+
+`metadata.requirements` lists the programs a command needs. Each entry is
+written in exactly one of two forms, after surrounding whitespace is trimmed:
+
+```toml
+requirements = ["xdg-open", "browser, optional"]
+```
+
+- `<program>` — **mandatory**. If it cannot be found, `kinjo` refuses to run the
+  action and reports it on the status line. Nothing is launched.
+- `<program>, optional` — **optional**. It is shown in the UI and never blocks
+  the action. Use it for a dependency the command can do without.
+
+The `, optional` marker is case-insensitive. Any other suffix, an extra comma,
+or an empty program name is a configuration error and the file is rejected. This
+is deliberately strict: a typo such as `"browser, optinal"` would otherwise be
+read as a *mandatory* requirement named `browser`, silently blocking the action
+it was meant to make optional.
+
+A program is looked up the same way the operating system would when starting it:
+
+- a name containing a path separator (`/usr/local/bin/tool`) is used as-is;
+- a bare name (`ssh`) is searched for in each `PATH` directory, and must resolve
+  to a file with an execute bit set. On Windows, `PATHEXT` extensions are tried
+  too, so `cmd` finds `cmd.exe`.
+
+Mandatory requirements are checked immediately before the action runs, not when
+the file is loaded, so installing a missing tool takes effect without restarting
+`kinjo`.
+
+`kinjo` never installs anything. Requirements describe what a command needs so
+that a missing dependency is reported clearly instead of surfacing as a failed
+launch; installing it is up to you.
 
 ## Matching Services
 
@@ -174,12 +229,52 @@ with predicates, only the addresses satisfying all of them are. A service whose
 addresses are not (yet) resolved offers no such command at all, rather than
 failing once it is run.
 
-Commands are split into an argument vector by `kinjo`; they are not passed
-through a shell. Quote arguments that may contain spaces:
+### Quoting and Escaping
+
+`action.command` is split into an argument vector by `kinjo` and handed straight
+to the operating system. It is **never passed through a shell**, so there is no
+expansion, no environment substitution, no pipelines (`|`), no redirection
+(`>`), and no command chaining (`&&`, `;`). Those characters have no special
+meaning; they are ordinary text.
+
+The full grammar:
+
+- Unquoted whitespace separates arguments.
+- Single (`'`) and double (`"`) quotes remove their delimiters and preserve
+  their contents. The other quote style is literal text inside them, so
+  `"it's"` is one argument: `it's`.
+- Adjacent quoted and unquoted fragments form **one** argument:
+  `user@"{hostname}":22` is a single argument.
+- A backslash escapes exactly the next character, inside or outside quotes:
+  `one\ arg` is one argument, and `\{` is a literal `{`.
+- A quoted empty string is a real, preserved argument: `cmd "" next` passes
+  three arguments, the middle one empty.
+- A dangling backslash at the end, or an unclosed quote, is an error.
 
 ```toml
 command = "ssh '{hostname}'"
 ```
+
+### Placeholders
+
+- `{field}` interpolates a supported service field.
+- `{{` emits a literal `{`.
+- A lone `}` is literal text, so `echo {hostname}}` ends with a `}`.
+- An empty (`{}`), nested (`{a{b}}`), unknown (`{nonexistent}`), or unterminated
+  (`{hostname`) placeholder is an error.
+
+### Interpolation Is Safe
+
+Argument boundaries are decided when the command file is loaded, before any
+service exists. A discovered value only ever fills in an argument, so it cannot
+add, remove, or split one — whatever it contains.
+
+Service names, hostnames, and TXT values come from devices on the network and
+are not trusted. A service advertising itself as
+`evil" && rm -rf / #` is passed through as one ordinary argument containing
+those exact characters. This is why quoting a placeholder is a readability
+choice rather than a safety one: `{hostname}` and `'{hostname}'` are equally
+safe.
 
 ## Examples
 
@@ -241,7 +336,9 @@ field expects an array of strings, such as `requirements`. Unknown sections,
 unknown metadata/action keys, and unknown predicate kinds are rejected with an
 error naming the offending file.
 
-When the TUI starts normally, a malformed command file is skipped with a
-warning (shown on the status line and printed on exit) so one bad file cannot
-prevent the app from starting. `kinjo list-commands` loads strictly and
-fails on the first invalid file — use it to validate your configuration.
+When the TUI starts normally, an invalid command file is skipped with a warning
+naming it (shown on the status line and printed on exit) so one bad file — for
+example in the shared system directory — cannot prevent the app from starting.
+Every invalid file is reported, not just the first, and the valid ones still
+load. `kinjo list-commands` loads strictly and fails on the first invalid file;
+use it to validate your configuration.

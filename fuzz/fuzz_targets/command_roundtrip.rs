@@ -5,9 +5,17 @@
 //! must load back with exactly the same values. Guards the loader against
 //! silently mangling command strings the way a hand-rolled parser once did;
 //! `parse_command` separately covers robustness against malformed bytes.
+//!
+//! Loading now *validates* as well as parses, so an arbitrary template or
+//! requirement may legitimately be rejected. That splits the oracle in two:
+//!
+//!  - accepted: every value the rule retains round-trips exactly, and the
+//!    compiled rule agrees with the text it was built from;
+//!  - rejected: the report names the source file, so a lenient startup warning
+//!    always tells a user which file to go and fix.
 
 use arbitrary::Arbitrary;
-use kinjo::plumber::{MatcherBuilder, Predicate};
+use kinjo::plumber::{MatcherBuilder, Predicate, Requirement};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
@@ -86,19 +94,30 @@ fuzz_target!(|input: Input| {
     };
 
     let mut builder = MatcherBuilder::new();
-    builder
-        .add_str("fuzz", &source)
-        .expect("a serialized command file must load");
+    if let Err(err) = builder.add_str("fuzz-source", &source) {
+        // Validation may reject this rule; it must still say where it came from.
+        assert!(
+            err.to_string().contains("fuzz-source"),
+            "a rejection must name its source file: {err}"
+        );
+        return;
+    }
+
     let matcher = builder.build();
     let command = &matcher.commands()[0];
 
     assert_eq!(command.name, input.name);
     assert_eq!(command.description, input.description);
-    assert_eq!(
-        command.requirements,
-        input.requirement.into_iter().collect::<Vec<_>>()
-    );
+    // The raw template is retained verbatim for display, byte for byte.
     assert_eq!(command.action.command, input.command);
+    // Requirements are stored parsed; the rule must hold exactly what the
+    // grammar says the entry means, with no text left to re-read.
+    let expected: Vec<Requirement> = input
+        .requirement
+        .iter()
+        .map(|raw| Requirement::parse(raw).expect("an accepted rule has valid requirements"))
+        .collect();
+    assert_eq!(command.requirements, expected);
     match &command.predicates[0].predicate {
         Predicate::Equals(value) => assert_eq!(value, &input.match_value),
         other => panic!("expected an equals predicate, got {other:?}"),

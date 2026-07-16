@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 
+use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
 
 use crate::discovery::{Entry, EntryGroup};
@@ -19,18 +20,78 @@ impl std::fmt::Display for ActionMode {
     }
 }
 
+/// What a rule leaves for the caller to do once it has run.
+///
+/// Which of the two happens is the rule's decision, made from its validated
+/// `mode`. Callers react to the outcome; they do not re-derive it.
+#[derive(Debug)]
+pub enum ActionOutcome {
+    /// The command was spawned and reaped in the background. The caller keeps
+    /// running as it was.
+    Forked,
+    /// The command must replace this process, which can only happen once the
+    /// caller has restored the terminal. Ownership of the prepared command
+    /// passes to the caller.
+    Handoff(PreparedCommand),
+}
+
+/// The validated action half of a command rule: what to run, how to run it, and
+/// how to describe it.
 #[derive(Debug, Clone)]
 pub struct CommandAction {
     pub description: Option<String>,
+    /// The template exactly as written in the command file. Retained only so the
+    /// UI can show a user the rule they wrote; [`Self::prepare`] never reads it.
     pub command: String,
     pub mode: ActionMode,
+    /// The executable form of `command`, compiled once at load time.
+    template: CommandTemplate,
 }
 
+impl CommandAction {
+    /// Compile `command` into a validated action, or explain why it is not a
+    /// runnable one. This is the only way to construct a [`CommandAction`], so
+    /// an action that exists is an action that can be prepared.
+    pub fn compile(description: Option<String>, command: String, mode: ActionMode) -> Result<Self> {
+        let template = CommandTemplate::compile(&command)?;
+        Ok(Self {
+            description,
+            command,
+            mode,
+            template,
+        })
+    }
+
+    /// Turn a chosen candidate into the exact argument vector to run.
+    ///
+    /// Interpolation happens strictly inside token boundaries decided at compile
+    /// time, so a discovered value — which arrives from an untrusted device on
+    /// the network — can fill an argument but never add, remove, or split one.
+    pub fn prepare(&self, candidate: &Entry) -> Result<PreparedCommand> {
+        let argv = self.template.render(candidate)?;
+        // Compilation rejects a literally-empty program name; a placeholder one
+        // can only be judged now that it has a value.
+        if argv[0].is_empty() {
+            return Err(eyre!("action command has an empty program name"));
+        }
+        Ok(PreparedCommand {
+            argv,
+            mode: self.mode,
+        })
+    }
+}
+
+/// A validated command rule: metadata to render, predicates to match, parsed
+/// requirements, and a compiled action.
+///
+/// Every value here has already been checked against the command-file grammar,
+/// so nothing downstream re-parses raw strings. Build one by loading a command
+/// file through [`MatcherBuilder`].
 #[derive(Debug, Clone)]
 pub struct CommandConfig {
     pub name: String,
     pub description: Option<String>,
-    pub requirements: Vec<String>,
+    pub requirements: Vec<Requirement>,
     pub predicates: Vec<FieldPredicate>,
     pub action: CommandAction,
 }
@@ -94,6 +155,30 @@ impl Matcher {
 }
 
 impl CommandConfig {
+    /// Run this rule against a chosen candidate.
+    ///
+    /// This is the whole execution decision in one place: check the rule's
+    /// dependencies, prepare the argument vector, then honour the validated mode
+    /// by either forking or handing the command back for exec. Callers do not
+    /// sequence those steps, and so cannot get the order wrong or skip one — an
+    /// earlier arrangement where the UI drove each step in turn let a caller
+    /// launch a command whose requirements were never checked.
+    ///
+    /// Errors are user-facing and describe the rule, not the mechanism.
+    pub fn run(&self, candidate: &Entry) -> Result<ActionOutcome> {
+        if let Some(missing) = exec::missing_requirement(&self.requirements) {
+            return Err(eyre!("needs `{missing}`, which is not installed"));
+        }
+        let prepared = self.action.prepare(candidate)?;
+        match prepared.mode {
+            ActionMode::Fork => {
+                exec::fork(&prepared)?;
+                Ok(ActionOutcome::Forked)
+            }
+            ActionMode::Execute => Ok(ActionOutcome::Handoff(prepared)),
+        }
+    }
+
     pub fn needs_instance(&self) -> bool {
         self.predicates
             .iter()
@@ -102,13 +187,13 @@ impl CommandConfig {
     }
 
     fn has_instance_specific_template(&self) -> bool {
-        self.action.command.contains("{address}") || self.action.command.contains("{port}")
+        self.action.template.references("address") || self.action.template.references("port")
     }
 
     /// Whether this command distinguishes between a service's individual
     /// addresses (it matches on `address` or templates `{address}`).
     fn uses_address(&self) -> bool {
-        self.action.command.contains("{address}")
+        self.action.template.references("address")
             || self.predicates.iter().any(|p| is_address_field(&p.field))
     }
 
@@ -122,7 +207,7 @@ impl CommandConfig {
     /// Two predicates can therefore never be satisfied by two different
     /// addresses. Non-address predicates are evaluated against the record.
     fn candidates(&self, record: &Entry) -> Vec<Entry> {
-        if !self.non_address_predicates_match(record) {
+        if !self.non_address_predicates_match(record) || !self.template_fields_resolve(record) {
             return Vec::new();
         }
         if !self.uses_address() {
@@ -146,6 +231,22 @@ impl CommandConfig {
                 candidate
             })
             .collect()
+    }
+
+    /// Whether every field this rule's template interpolates is one `record`
+    /// actually carries.
+    ///
+    /// A rule that cannot be rendered is not an action a user can take, so the
+    /// record yields no candidate and the action is never offered for it. The
+    /// alternative — offering it and failing once chosen — turns a knowable fact
+    /// into a dead end. `address` is excluded here because it is decided per
+    /// concrete address by [`Self::candidates`].
+    fn template_fields_resolve(&self, record: &Entry) -> bool {
+        self.action
+            .template
+            .fields()
+            .filter(|field| !is_address_field(field))
+            .all(|field| record.field(field).is_some())
     }
 
     /// Whether `record` satisfies every predicate on a field other than
@@ -202,6 +303,32 @@ impl Predicate {
     }
 }
 
+/// The service fields a rule may match on or interpolate.
+///
+/// This is the rule language's vocabulary, so it lives with the rules rather
+/// than with the discovery layer that answers the lookups. `type` is an accepted
+/// alias of `service_type`, and `txt.<key>` admits any non-empty TXT key, since
+/// devices invent their own. Anything else is a typo or a wish, and both are
+/// rejected at load time instead of silently never matching.
+///
+/// `supported_fields_resolve_against_a_populated_record` keeps this list honest
+/// against [`Entry::field`].
+pub(crate) fn is_supported_field(field: &str) -> bool {
+    const FIXED: [&str; 7] = [
+        "name",
+        "type",
+        "service_type",
+        "domain",
+        "hostname",
+        "address",
+        "port",
+    ];
+    FIXED.contains(&field)
+        || field
+            .strip_prefix("txt.")
+            .is_some_and(|key| !key.is_empty())
+}
+
 fn is_instance_field(field: &str) -> bool {
     is_address_field(field) || field == "port"
 }
@@ -242,8 +369,11 @@ impl RuleEngine for Matcher {
 mod config;
 pub use config::*;
 
+mod template;
+use template::CommandTemplate;
+
 pub mod exec;
-pub use exec::PreparedCommand;
+pub use exec::{PreparedCommand, Requirement};
 
 #[cfg(test)]
 mod tests {
@@ -381,9 +511,20 @@ mode = "fork"
 
         assert_eq!(command.name, "open-printer");
         assert_eq!(command.description.as_deref(), Some("Open printer admin"));
+        // Requirements are parsed at load time, so the rule holds the marker as
+        // a decided fact rather than as text to re-read on every invocation.
         assert_eq!(
             command.requirements,
-            vec!["xdg-open".to_string(), "browser, optional".to_string()]
+            vec![
+                Requirement {
+                    command: "xdg-open".to_string(),
+                    optional: false,
+                },
+                Requirement {
+                    command: "browser".to_string(),
+                    optional: true,
+                },
+            ]
         );
         assert_eq!(
             command.action.description.as_deref(),
@@ -887,6 +1028,274 @@ mode = "execute"
     }
 
     #[test]
+    fn supported_match_fields_and_aliases_load() {
+        // The `type` alias and an arbitrary TXT key are part of the rule
+        // vocabulary, so they must survive the field check that rejects
+        // `service_typ`.
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "aliases"
+
+[match.type]
+equals = "_ssh._tcp"
+
+[match.txt.anything-a-device-invented]
+contains = "x"
+
+[action]
+command = "echo {type} {txt.anything-a-device-invented}"
+mode = "execute"
+"#,
+        );
+
+        assert_eq!(matcher.command_count(), 1);
+        assert_eq!(matcher.commands()[0].predicates.len(), 2);
+    }
+
+    /// Every field the rule vocabulary admits must be one the discovery layer
+    /// can actually answer. The two lists are defined apart — `is_supported_field`
+    /// here, `Entry::field` in discovery — so this pins them together; a field
+    /// accepted at load but unresolvable at run would offer an action that can
+    /// never fire.
+    #[test]
+    fn supported_fields_resolve_against_a_populated_record() {
+        let mut record = Entry::new("alpha", "_ssh._tcp", "local");
+        record.hostname = Some("alpha.local".to_string());
+        record.addresses = vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 5))];
+        record.port = Some(22);
+        record.txt.insert("path".to_string(), "/admin".to_string());
+
+        for field in [
+            "name",
+            "type",
+            "service_type",
+            "domain",
+            "hostname",
+            "address",
+            "port",
+            "txt.path",
+        ] {
+            assert!(is_supported_field(field), "`{field}` must be supported");
+            assert!(
+                record.field(field).is_some(),
+                "supported field `{field}` must resolve"
+            );
+        }
+
+        for field in ["", "txt", "txt.", "service_typ", "unknown"] {
+            assert!(!is_supported_field(field), "`{field}` must be rejected");
+        }
+    }
+
+    #[test]
+    fn a_record_missing_a_templated_field_offers_no_candidate() {
+        // The rule matches the service type, but the record never resolved a
+        // hostname. Rendering would fail, so the action is not offered at all
+        // rather than presented and then refused.
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "ssh"
+
+[match.service_type]
+equals = "_workstation._tcp"
+
+[action]
+command = "ssh {hostname}"
+mode = "execute"
+"#,
+        );
+        let mut record = Entry::new("host", "_workstation._tcp", "local");
+        record.addresses = vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))];
+        let group = crate::discovery::browse_groups(
+            &[record],
+            crate::discovery::BrowseMode::LogicalService,
+        )
+        .remove(0);
+
+        assert!(matcher.matches_group(&group).is_empty());
+    }
+
+    #[test]
+    fn a_record_missing_a_templated_txt_key_offers_no_candidate() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "open-admin"
+
+[match.service_type]
+equals = "_http._tcp"
+
+[action]
+command = "xdg-open {txt.adminurl}"
+mode = "fork"
+"#,
+        );
+        let with_key = {
+            let mut record = Entry::new("nas", "_http._tcp", "local");
+            record
+                .txt
+                .insert("adminurl".to_string(), "http://nas/admin".to_string());
+            record
+        };
+        let without_key = Entry::new("other", "_http._tcp", "local");
+        let group = crate::discovery::browse_groups(
+            &[with_key, without_key],
+            crate::discovery::BrowseMode::ServiceType,
+        )
+        .remove(0);
+
+        let matches = matcher.matches_group(&group);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].matching_records.len(), 1);
+        assert_eq!(matches[0].matching_records[0].name, "nas");
+    }
+
+    /// The rule, not the caller, decides what running it means.
+    #[test]
+    fn run_hands_back_an_execute_command_without_spawning_it() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "ssh"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "ssh -p {port} '{hostname}'"
+mode = "execute"
+"#,
+        );
+        let mut record = Entry::new("alpha", "_ssh._tcp", "local");
+        record.hostname = Some("alpha.local".to_string());
+        record.port = Some(2222);
+
+        let outcome = matcher.commands()[0].run(&record).unwrap();
+
+        match outcome {
+            ActionOutcome::Handoff(prepared) => {
+                assert_eq!(prepared.argv, ["ssh", "-p", "2222", "alpha.local"]);
+                assert_eq!(prepared.mode, ActionMode::Execute);
+            }
+            other => panic!("expected a hand-off, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_forks_a_fork_mode_command() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "noop"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "true"
+mode = "fork"
+"#,
+        );
+        let record = Entry::new("alpha", "_ssh._tcp", "local");
+
+        // `true` exits 0 immediately; the rule forks it and reports that the
+        // caller has nothing left to do.
+        assert!(matches!(
+            matcher.commands()[0].run(&record).unwrap(),
+            ActionOutcome::Forked
+        ));
+    }
+
+    #[test]
+    fn run_refuses_before_launching_when_a_mandatory_requirement_is_absent() {
+        // The requirement gate belongs to the rule: a caller cannot forget it,
+        // and `false` must never be spawned.
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "needs-tool"
+requirements = ["kinjo-absent-tool-xyz", "kinjo-also-absent-xyz, optional"]
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "false"
+mode = "fork"
+"#,
+        );
+        let record = Entry::new("alpha", "_ssh._tcp", "local");
+
+        let err = matcher.commands()[0].run(&record).unwrap_err().to_string();
+
+        // The mandatory one is reported; the optional one is not.
+        assert!(err.contains("needs `kinjo-absent-tool-xyz`"), "{err}");
+        assert!(!err.contains("kinjo-also-absent-xyz"), "{err}");
+    }
+
+    #[test]
+    fn a_discovered_value_cannot_reshape_a_prepared_argv() {
+        // The injection barrier, through the loading interface a user's config
+        // actually travels: a hostile service name carrying separators, quotes,
+        // and braces fills exactly one argument.
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "notify"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "notify-send {name} tail"
+mode = "execute"
+"#,
+        );
+        let record = Entry::new(
+            r#"evil" 'x' {hostname} && rm -rf / #"#,
+            "_ssh._tcp",
+            "local",
+        );
+
+        let prepared = matcher.commands()[0].action.prepare(&record).unwrap();
+
+        assert_eq!(
+            prepared.argv,
+            [
+                "notify-send",
+                r#"evil" 'x' {hostname} && rm -rf / #"#,
+                "tail",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_quoted_empty_argument_survives_into_the_prepared_argv() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "empty-arg"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "cmd '' {hostname} \"\""
+mode = "execute"
+"#,
+        );
+        let mut record = Entry::new("alpha", "_ssh._tcp", "local");
+        record.hostname = Some("alpha.local".to_string());
+
+        let prepared = matcher.commands()[0].action.prepare(&record).unwrap();
+
+        assert_eq!(prepared.argv, ["cmd", "", "alpha.local", ""]);
+    }
+
+    #[test]
     fn lists_loaded_command_names() {
         let mut builder = MatcherBuilder::new();
         builder
@@ -1042,16 +1451,144 @@ mode = "execute"
 "#,
                 "unsupported predicate",
             ),
+            (
+                "misspelled-match-field",
+                r#"
+[metadata]
+name = "misspelled-match-field"
+
+[match.service_typ]
+equals = "_ssh._tcp"
+
+[action]
+command = "ssh"
+mode = "execute"
+"#,
+                "unsupported match field `service_typ`",
+            ),
+            (
+                "bare-txt-match-field",
+                r#"
+[metadata]
+name = "bare-txt"
+
+[match.txt]
+equals = "anything"
+
+[action]
+command = "ssh"
+mode = "execute"
+"#,
+                "unsupported match field `txt`",
+            ),
+            (
+                "empty-name",
+                r#"
+[metadata]
+name = ""
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "ssh"
+mode = "execute"
+"#,
+                "`metadata.name` is empty",
+            ),
+            (
+                "empty-command",
+                r#"
+[metadata]
+name = "empty-command"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = ""
+mode = "execute"
+"#,
+                "action command is empty",
+            ),
+            (
+                "whitespace-command",
+                r#"
+[metadata]
+name = "whitespace-command"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "   "
+mode = "execute"
+"#,
+                "action command is empty",
+            ),
+            (
+                "unknown-placeholder",
+                r#"
+[metadata]
+name = "unknown-placeholder"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "echo {nonexistent_field}"
+mode = "execute"
+"#,
+                "unknown service field `nonexistent_field`",
+            ),
+            (
+                "unterminated-quote",
+                r#"
+[metadata]
+name = "unterminated-quote"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "echo 'alpha"
+mode = "execute"
+"#,
+                "unterminated `'` quote",
+            ),
+            (
+                "malformed-requirement",
+                r#"
+[metadata]
+name = "malformed-requirement"
+requirements = ["browser, mandatory"]
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "ssh"
+mode = "execute"
+"#,
+                "unsupported suffix `mandatory`",
+            ),
         ];
 
         for (source_name, source, expected) in cases {
             let mut builder = MatcherBuilder::new();
-            let err = builder.add_str(source_name, source).unwrap_err();
+            let err = builder
+                .add_str(source_name, source)
+                .unwrap_err()
+                .to_string();
             assert!(
-                err.to_string().contains(expected),
-                "expected `{}` to contain `{}`",
-                err,
-                expected
+                err.contains(expected),
+                "expected `{err}` to contain `{expected}`"
+            );
+            // Every rejection names the file it came from: a warning a user
+            // cannot trace back to a file is not actionable.
+            assert!(
+                err.contains(source_name),
+                "expected `{err}` to name its source `{source_name}`"
             );
         }
     }
@@ -1241,6 +1778,71 @@ mode = "execute"
         assert_eq!(matcher.commands()[0].name, "good");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("bad.toml"));
+
+        remove(&dir);
+    }
+
+    /// A file that is valid TOML but not a valid rule is exactly the case the
+    /// old loader let through to fail at invocation. Strict loading (what
+    /// `list-commands` uses) must fail on it; lenient startup must skip it,
+    /// keep the good rules, and say which file it dropped.
+    #[test]
+    fn a_semantically_invalid_file_fails_strictly_and_warns_leniently() {
+        let dir = temp_dir("semantic-invalid");
+        fs::write(dir.join("good.toml"), command_toml("good", "true")).unwrap();
+        fs::write(
+            dir.join("unknown-field.toml"),
+            command_toml("unknown-field", "echo {nonexistent_field}"),
+        )
+        .unwrap();
+
+        let mut strict = MatcherBuilder::new();
+        let err = load_from_dirs(&mut strict, std::slice::from_ref(&dir))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unknown service field `nonexistent_field`"),
+            "{err}"
+        );
+        assert!(err.contains("unknown-field.toml"), "{err}");
+
+        let mut lenient = MatcherBuilder::new();
+        let warnings = load_from_dirs_lenient(&mut lenient, std::slice::from_ref(&dir));
+
+        let matcher = lenient.build();
+        assert_eq!(matcher.command_count(), 1);
+        assert_eq!(matcher.commands()[0].name, "good");
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("unknown-field.toml"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("unknown service field"),
+            "{}",
+            warnings[0]
+        );
+
+        remove(&dir);
+    }
+
+    /// Every invalid file is reported, not just the first: a user fixing their
+    /// configuration should see the whole list in one run.
+    #[test]
+    fn lenient_load_warns_about_every_invalid_file() {
+        let dir = temp_dir("many-invalid");
+        fs::write(dir.join("a-good.toml"), command_toml("good", "true")).unwrap();
+        fs::write(dir.join("b-bad.toml"), command_toml("b", "echo {bogus}")).unwrap();
+        fs::write(dir.join("c-bad.toml"), command_toml("c", "echo 'open")).unwrap();
+
+        let mut builder = MatcherBuilder::new();
+        let warnings = load_from_dirs_lenient(&mut builder, std::slice::from_ref(&dir));
+
+        assert_eq!(builder.build().command_count(), 1);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().any(|w| w.contains("b-bad.toml")));
+        assert!(warnings.iter().any(|w| w.contains("c-bad.toml")));
 
         remove(&dir);
     }

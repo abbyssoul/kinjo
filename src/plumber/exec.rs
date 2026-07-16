@@ -1,37 +1,24 @@
+//! Running a prepared command, and the dependencies a rule declares.
+//!
+//! Tokenizing and interpolating command templates lives in [`super::template`];
+//! by the time anything here runs, the argument vector is already decided.
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::discovery::Entry;
+use super::ActionMode;
 
-use super::{ActionMode, CommandAction};
-
+/// The final argument vector and the mode deciding how it reaches the operating
+/// system. Produced by [`super::CommandAction::prepare`].
 #[derive(Debug, Clone)]
 pub struct PreparedCommand {
     pub argv: Vec<String>,
     pub mode: ActionMode,
 }
 
-pub fn prepare(action: &CommandAction, record: &Entry) -> Result<PreparedCommand> {
-    // Split the template into arguments *before* interpolating, so a service
-    // field (which arrives from untrusted devices on the network) can only ever
-    // fill in an argument — quotes or whitespace in a value cannot add, remove,
-    // or reshape arguments.
-    let argv = split_command_line(&action.command)?
-        .iter()
-        .map(|token| interpolate(token, record))
-        .collect::<Result<Vec<_>>>()?;
-    if argv.is_empty() {
-        return Err(eyre!("action command expanded to an empty argv"));
-    }
-    Ok(PreparedCommand {
-        argv,
-        mode: action.mode,
-    })
-}
-
-pub fn fork(command: &PreparedCommand) -> Result<()> {
+pub(super) fn fork(command: &PreparedCommand) -> Result<()> {
     let mut child = Command::new(&command.argv[0])
         .args(&command.argv[1..])
         .stdin(Stdio::null())
@@ -86,34 +73,79 @@ fn spawn_error(program: &str, err: std::io::Error) -> color_eyre::eyre::Report {
     }
 }
 
-/// A declared dependency of a command, parsed from a `requirements` entry such
-/// as `"xdg-open"` or `"browser, optional"`.
+/// A validated dependency of a command rule, parsed from a `requirements` entry
+/// such as `"xdg-open"` or `"browser, optional"`.
+///
+/// Parsed once at load time: a rule holds `Requirement`s, never raw strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {
+    /// The program to look for. Never empty.
     pub command: String,
+    /// Whether the action still runs when `command` is absent.
     pub optional: bool,
 }
 
-/// Parse a single `requirements` entry. The optional `, optional` suffix marks a
-/// dependency whose absence should not block the action.
-pub fn parse_requirement(raw: &str) -> Requirement {
-    let mut parts = raw.splitn(2, ',');
-    let command = parts.next().unwrap_or("").trim().to_string();
-    let optional = parts
-        .next()
-        .is_some_and(|rest| rest.trim().eq_ignore_ascii_case("optional"));
-    Requirement { command, optional }
+impl Requirement {
+    /// Parse one `requirements` entry.
+    ///
+    /// The grammar, after trimming, is exactly `<program>` or
+    /// `<program>, optional`. Everything else is rejected rather than
+    /// interpreted generously: under the old lenient parse an entry like
+    /// `"browser, optinal"` silently meant *mandatory*, so a typo quietly turned
+    /// an optional dependency into one that blocks the action.
+    pub fn parse(raw: &str) -> Result<Self> {
+        let trimmed = raw.trim();
+        let mut parts = trimmed.split(',');
+        let command = parts.next().unwrap_or_default().trim();
+        if command.is_empty() {
+            return Err(eyre!("requirement `{raw}` has an empty program name"));
+        }
+        let Some(suffix) = parts.next() else {
+            return Ok(Self {
+                command: command.to_string(),
+                optional: false,
+            });
+        };
+        if parts.next().is_some() {
+            return Err(eyre!(
+                "requirement `{raw}` has more than one `,`; \
+                 write `<program>` or `<program>, optional`"
+            ));
+        }
+        if !suffix.trim().eq_ignore_ascii_case("optional") {
+            return Err(eyre!(
+                "requirement `{raw}` has an unsupported suffix `{}`; \
+                 the only supported suffix is `, optional`",
+                suffix.trim()
+            ));
+        }
+        Ok(Self {
+            command: command.to_string(),
+            optional: true,
+        })
+    }
 }
 
-/// Name of the first mandatory requirement that cannot be resolved on `PATH`,
-/// if any. Optional and blank requirements are ignored.
-pub fn missing_requirement(requirements: &[String]) -> Option<String> {
+impl std::fmt::Display for Requirement {
+    /// Renders back into the grammar it was parsed from, so the UI can show a
+    /// rule's dependencies without keeping the raw text alongside them.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.command)?;
+        if self.optional {
+            f.write_str(", optional")?;
+        }
+        Ok(())
+    }
+}
+
+/// Name of the first mandatory requirement that cannot be resolved on `PATH`, if
+/// any. Optional requirements are never reported: their absence is expected.
+pub(super) fn missing_requirement(requirements: &[Requirement]) -> Option<&str> {
     requirements
         .iter()
-        .map(|raw| parse_requirement(raw))
-        .filter(|req| !req.optional && !req.command.is_empty())
-        .find(|req| locate(&req.command).is_none())
-        .map(|req| req.command)
+        .filter(|requirement| !requirement.optional)
+        .find(|requirement| locate(&requirement.command).is_none())
+        .map(|requirement| requirement.command.as_str())
 }
 
 /// Resolve `program` the way the OS would when spawning it: an explicit path
@@ -167,315 +199,75 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-fn interpolate(template: &str, record: &Entry) -> Result<String> {
-    let mut output = String::new();
-    let mut chars = template.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '{' {
-            output.push(ch);
-            continue;
-        }
-        let mut field = String::new();
-        loop {
-            let Some(next) = chars.next() else {
-                return Err(eyre!("unterminated interpolation in `{template}`"));
-            };
-            if next == '}' {
-                break;
-            }
-            field.push(next);
-        }
-        let Some(value) = record.field(&field) else {
-            return Err(eyre!(
-                "service field `{field}` is unavailable for `{}`",
-                record.name
-            ));
-        };
-        output.push_str(&value);
-    }
-    Ok(output)
-}
-
-fn split_command_line(command: &str) -> Result<Vec<String>> {
-    let mut argv = Vec::new();
-    let mut current = String::new();
-    let mut chars = command.chars().peekable();
-    let mut quote: Option<char> = None;
-
-    while let Some(ch) = chars.next() {
-        match (quote, ch) {
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), '\\') => {
-                if let Some(next) = chars.next() {
-                    current.push(next);
-                }
-            }
-            (Some(_), c) => current.push(c),
-            (None, '"' | '\'') => quote = Some(ch),
-            (None, '\\') => {
-                if let Some(next) = chars.next() {
-                    current.push(next);
-                }
-            }
-            (None, c) if c.is_whitespace() => {
-                if !current.is_empty() {
-                    argv.push(std::mem::take(&mut current));
-                }
-            }
-            (None, c) => current.push(c),
-        }
-    }
-
-    if let Some(q) = quote {
-        return Err(eyre!("unterminated `{q}` quote in command"));
-    }
-    if !current.is_empty() {
-        argv.push(current);
-    }
-    Ok(argv)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plumber::ActionMode;
-    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
-    fn interpolates_and_splits() {
-        let mut record = Entry::new("alpha", "_ssh._tcp", "local");
-        record.hostname = Some("alpha.local".to_string());
-        let action = CommandAction {
-            description: None,
-            command: "ssh '{hostname}'".to_string(),
-            mode: ActionMode::Execute,
-        };
-        let prepared = prepare(&action, &record).unwrap();
-        assert_eq!(prepared.argv, vec!["ssh", "alpha.local"]);
-    }
-
-    #[test]
-    fn prepares_all_supported_service_fields() {
-        let mut record = Entry::new("Kitchen Printer", "_ipp._tcp", "local");
-        record.hostname = Some("printer.local".to_string());
-        record.addresses = vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20))];
-        record.port = Some(631);
-        record
-            .txt
-            .insert("path".to_string(), "/ipp/print".to_string());
-        let action = CommandAction {
-            description: None,
-            command: "open '{name}' {service_type} {domain} {hostname} {address} {port} {txt.path}"
-                .to_string(),
-            mode: ActionMode::Fork,
-        };
-
-        let prepared = prepare(&action, &record).unwrap();
-
-        assert_eq!(prepared.mode, ActionMode::Fork);
+    fn parse_accepts_a_bare_program_and_the_optional_suffix() {
         assert_eq!(
-            prepared.argv,
-            vec![
-                "open",
-                "Kitchen Printer",
-                "_ipp._tcp",
-                "local",
-                "printer.local",
-                "192.0.2.20",
-                "631",
-                "/ipp/print",
-            ]
-        );
-    }
-
-    #[test]
-    fn splits_quoted_and_escaped_arguments() {
-        let record = Entry::new("alpha", "_ssh._tcp", "local");
-        let action = CommandAction {
-            description: None,
-            command: r#"printf "two words" one\ arg 'single quoted' "\\""#.to_string(),
-            mode: ActionMode::Execute,
-        };
-
-        let prepared = prepare(&action, &record).unwrap();
-
-        assert_eq!(
-            prepared.argv,
-            vec!["printf", "two words", "one arg", "single quoted", "\\"]
-        );
-    }
-
-    #[test]
-    fn interpolated_values_cannot_inject_arguments() {
-        // Service fields arrive from untrusted devices on the network. Quotes
-        // and whitespace in a value must land inside one argument, never create
-        // new ones (e.g. an extra `-oProxyCommand=...` for ssh).
-        let mut record = Entry::new("alpha", "_ssh._tcp", "local");
-        record.hostname = Some("h.local' -oProxyCommand=evil '".to_string());
-        let action = CommandAction {
-            description: None,
-            command: "ssh {hostname}".to_string(),
-            mode: ActionMode::Execute,
-        };
-
-        let prepared = prepare(&action, &record).unwrap();
-
-        assert_eq!(prepared.argv, vec!["ssh", "h.local' -oProxyCommand=evil '"]);
-    }
-
-    #[test]
-    fn values_with_quotes_and_spaces_stay_single_arguments() {
-        // A legitimate name like `O'Brien Printer` must not break tokenizing.
-        let mut record = Entry::new("O'Brien Printer", "_ipp._tcp", "local");
-        record.hostname = Some("printer.local".to_string());
-        let action = CommandAction {
-            description: None,
-            command: "notify-send {name} {hostname}".to_string(),
-            mode: ActionMode::Fork,
-        };
-
-        let prepared = prepare(&action, &record).unwrap();
-
-        assert_eq!(
-            prepared.argv,
-            vec!["notify-send", "O'Brien Printer", "printer.local"]
-        );
-    }
-
-    #[test]
-    fn missing_interpolation_field_is_an_error() {
-        let record = Entry::new("alpha", "_ssh._tcp", "local");
-        let action = CommandAction {
-            description: None,
-            command: "ssh {hostname}".to_string(),
-            mode: ActionMode::Execute,
-        };
-
-        let err = prepare(&action, &record).unwrap_err();
-
-        assert!(err.to_string().contains("service field `hostname`"));
-        assert!(err.to_string().contains("alpha"));
-    }
-
-    #[test]
-    fn malformed_templates_and_quotes_are_errors() {
-        let record = Entry::new("alpha", "_ssh._tcp", "local");
-        let unterminated_interpolation = CommandAction {
-            description: None,
-            command: "echo {name".to_string(),
-            mode: ActionMode::Execute,
-        };
-        let unterminated_quote = CommandAction {
-            description: None,
-            command: "echo 'alpha".to_string(),
-            mode: ActionMode::Execute,
-        };
-
-        assert!(
-            prepare(&unterminated_interpolation, &record)
-                .unwrap_err()
-                .to_string()
-                .contains("unterminated interpolation")
-        );
-        assert!(
-            prepare(&unterminated_quote, &record)
-                .unwrap_err()
-                .to_string()
-                .contains("unterminated `'` quote")
-        );
-    }
-
-    #[test]
-    fn fork_spawns_a_real_process() {
-        let record = Entry::new("alpha", "_ssh._tcp", "local");
-        let action = CommandAction {
-            description: None,
-            command: "true".to_string(),
-            mode: ActionMode::Fork,
-        };
-
-        let prepared = prepare(&action, &record).unwrap();
-        assert_eq!(prepared.mode, ActionMode::Fork);
-        // `true` exits 0 immediately; forking it should succeed without error.
-        fork(&prepared).unwrap();
-    }
-
-    #[test]
-    fn fork_reports_a_missing_binary() {
-        let command = PreparedCommand {
-            argv: vec!["kinjo-no-such-binary-xyz".to_string()],
-            mode: ActionMode::Fork,
-        };
-
-        let err = fork(&command).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("command `kinjo-no-such-binary-xyz` not found")
-        );
-    }
-
-    #[test]
-    fn interpolates_txt_record_fields() {
-        let mut record = Entry::new("nas", "_http._tcp", "local");
-        record.hostname = Some("nas.local".to_string());
-        record.txt.insert("path".to_string(), "/admin".to_string());
-        let action = CommandAction {
-            description: None,
-            command: "xdg-open http://{hostname}{txt.path}".to_string(),
-            mode: ActionMode::Fork,
-        };
-
-        let prepared = prepare(&action, &record).unwrap();
-
-        assert_eq!(prepared.argv, vec!["xdg-open", "http://nas.local/admin"]);
-    }
-
-    #[test]
-    fn missing_txt_field_is_an_error() {
-        let record = Entry::new("nas", "_http._tcp", "local");
-        let action = CommandAction {
-            description: None,
-            command: "echo {txt.path}".to_string(),
-            mode: ActionMode::Fork,
-        };
-
-        let err = prepare(&action, &record).unwrap_err();
-
-        assert!(err.to_string().contains("service field `txt.path`"));
-    }
-
-    #[test]
-    fn empty_command_after_splitting_is_an_error() {
-        let record = Entry::new("alpha", "_ssh._tcp", "local");
-        let action = CommandAction {
-            description: None,
-            command: "   ".to_string(),
-            mode: ActionMode::Execute,
-        };
-
-        let err = prepare(&action, &record).unwrap_err();
-
-        assert!(err.to_string().contains("empty argv"));
-    }
-
-    #[test]
-    fn parse_requirement_detects_the_optional_marker() {
-        assert_eq!(
-            parse_requirement("xdg-open"),
+            Requirement::parse("xdg-open").unwrap(),
             Requirement {
                 command: "xdg-open".to_string(),
                 optional: false,
             }
         );
+        // Surrounding and inner whitespace is trimmed, and the marker is
+        // case-insensitive.
         assert_eq!(
-            parse_requirement("  browser ,  Optional "),
+            Requirement::parse("  browser ,  Optional ").unwrap(),
             Requirement {
                 command: "browser".to_string(),
                 optional: true,
             }
         );
-        // A trailing word other than `optional` is not treated as the marker.
-        assert!(!parse_requirement("foo, please").optional);
+    }
+
+    #[test]
+    fn parse_rejects_every_other_suffix_and_shape() {
+        // A trailing word that is not the marker used to be silently ignored,
+        // leaving the requirement mandatory. It is now a configuration error.
+        for raw in ["foo, please", "foo, optionally", "foo, optional!", "foo,"] {
+            assert!(Requirement::parse(raw).is_err(), "`{raw}` must be rejected");
+        }
+        assert!(
+            Requirement::parse("foo, optional, bar")
+                .unwrap_err()
+                .to_string()
+                .contains("more than one `,`")
+        );
+        assert!(
+            Requirement::parse("foo,,optional")
+                .unwrap_err()
+                .to_string()
+                .contains("more than one `,`")
+        );
+        assert!(
+            Requirement::parse("foo, please")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported suffix `please`")
+        );
+    }
+
+    #[test]
+    fn parse_rejects_an_empty_program_name() {
+        for raw in ["", "   ", ",", ", optional", "  , optional"] {
+            assert!(
+                Requirement::parse(raw)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("empty program name"),
+                "`{raw}` must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn display_round_trips_the_requirement_grammar() {
+        for raw in ["xdg-open", "browser, optional"] {
+            assert_eq!(Requirement::parse(raw).unwrap().to_string(), raw);
+        }
     }
 
     /// A command guaranteed to be on `PATH` for the current platform.
@@ -483,6 +275,12 @@ mod tests {
     const PRESENT_COMMAND: &str = "cmd.exe";
     #[cfg(not(windows))]
     const PRESENT_COMMAND: &str = "sh";
+
+    fn requirements(raw: &[&str]) -> Vec<Requirement> {
+        raw.iter()
+            .map(|entry| Requirement::parse(entry).expect("valid requirement"))
+            .collect()
+    }
 
     #[test]
     fn locate_resolves_absolute_paths_and_path_lookups() {
@@ -509,17 +307,28 @@ mod tests {
     #[test]
     fn missing_requirement_skips_optional_and_present_commands() {
         assert_eq!(missing_requirement(&[]), None);
-        assert_eq!(missing_requirement(&[PRESENT_COMMAND.to_string()]), None);
+        assert_eq!(missing_requirement(&requirements(&[PRESENT_COMMAND])), None);
         assert_eq!(
-            missing_requirement(&["definitely-absent-xyz, optional".to_string()]),
+            missing_requirement(&requirements(&["definitely-absent-xyz, optional"])),
             None
         );
         assert_eq!(
-            missing_requirement(&[
-                PRESENT_COMMAND.to_string(),
-                "definitely-absent-xyz".to_string()
-            ]),
-            Some("definitely-absent-xyz".to_string())
+            missing_requirement(&requirements(&[PRESENT_COMMAND, "definitely-absent-xyz"])),
+            Some("definitely-absent-xyz")
+        );
+    }
+
+    #[test]
+    fn fork_reports_a_missing_binary() {
+        let command = PreparedCommand {
+            argv: vec!["kinjo-no-such-binary-xyz".to_string()],
+            mode: ActionMode::Fork,
+        };
+
+        let err = fork(&command).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("command `kinjo-no-such-binary-xyz` not found")
         );
     }
 }

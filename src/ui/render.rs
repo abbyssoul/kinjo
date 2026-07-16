@@ -14,7 +14,7 @@ use crate::{
         ChildService, Entry, EntryGroup, GroupFacts, GroupingMode, HostAggregate, LogicalService,
         RowHost, RowServiceType, ServiceTypeAggregate, SessionState, TxtValue,
     },
-    plumber::MatchResult,
+    plumber::{MatchResult, Requirement},
 };
 
 use super::{
@@ -808,7 +808,13 @@ fn render_command_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     rows.push(field_row("mode", &command.action.mode.to_string(), FG_DIM));
     rows.push(field_row("run", &command.action.command, GOOD));
     if !command.requirements.is_empty() {
-        rows.push(field_row("needs", &command.requirements.join(", "), WARN));
+        let needs = command
+            .requirements
+            .iter()
+            .map(Requirement::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        rows.push(field_row("needs", &needs, WARN));
     }
 
     rows.push(blank_row());
@@ -1784,13 +1790,17 @@ mod tests {
         let command = CommandConfig {
             name: "inspect\u{1b}".to_string(),
             description: Some("description\nline".to_string()),
-            requirements: vec!["binary\tname".to_string()],
+            requirements: vec![Requirement {
+                command: "binary\tname".to_string(),
+                optional: false,
+            }],
             predicates: Vec::new(),
-            action: CommandAction {
-                description: None,
-                command: "tool\r--flag\u{85}".to_string(),
-                mode: ActionMode::Fork,
-            },
+            action: CommandAction::compile(
+                None,
+                "tool\r--flag\u{85}".to_string(),
+                ActionMode::Fork,
+            )
+            .unwrap(),
         };
         let mut app = test_app("local");
         app.filter.grouping = GroupingMode::Command;
