@@ -4,12 +4,12 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `ready` |
+| Status | `in-progress` |
 | Priority | `P1` |
 | Workstream | CLI / Configuration |
 | Depends on | — |
 | Likely conflicts | 003, 020 |
-| Owner | Unclaimed |
+| Owner | task-009 agent (branch `worktree-agent-aa89145600ebca200`) |
 
 ## Why This Matters
 
