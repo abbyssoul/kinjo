@@ -183,7 +183,7 @@ async fn browse_loop(
         // a persistent failure state.
         Err(err) => {
             return BrowseOutcome::Startup(format!(
-                "mDNS discovery unavailable ({err}); try --fake-discovery for sample records, or refresh to retry"
+                "mDNS discovery unavailable ({err}); try --backend fake in a build with the fake feature for sample records, or refresh to retry"
             ));
         }
     };

@@ -24,6 +24,9 @@ assets = [
 
 [features]
 default = []
+# Built-in sample records for development and deterministic TUI smoke tests
+# (`--backend fake`). Kept out of production builds unless explicitly enabled.
+fake = []
 # Alternative discovery backend wrapping the system Avahi/Bonjour stack via
 # `zeroconf-tokio` (`--backend zeroconf`). Needs the Avahi client headers on
 # Linux, hence off by default.

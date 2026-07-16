@@ -559,6 +559,23 @@ mode = "fork"
         assert!(stderr.contains("--help"), "{stderr:?}");
     }
 
+    /// Optional backend selection must stay inside the non-exiting parser and
+    /// explicit process-output boundary introduced by task 020.
+    #[cfg(not(feature = "fake"))]
+    #[test]
+    fn unavailable_fake_backend_reports_its_feature_through_the_process_boundary() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run_with_args(["kinjo", "--backend", "fake"], &mut stdout, &mut stderr);
+
+        assert_eq!(exit_code, 2);
+        assert!(stdout.is_empty());
+        let stderr = String::from_utf8(stderr).unwrap();
+        assert!(stderr.contains("--features fake"), "{stderr:?}");
+        assert!(stderr.contains("Usage: kinjo"), "{stderr:?}");
+    }
+
     #[test]
     fn public_entrypoint_signatures_keep_library_and_binary_contracts_separate() {
         let _: fn() -> color_eyre::eyre::Result<()> = run;

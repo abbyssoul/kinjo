@@ -9,7 +9,6 @@ pub struct Cli {
     pub domain: String,
     pub config_dirs: Vec<PathBuf>,
     pub service_type: Option<String>,
-    pub fake_discovery: bool,
     pub backend: DiscoveryBackend,
     pub command: CliCommand,
 }
@@ -52,7 +51,6 @@ impl Cli {
     /// [`discovery_options`](Self::discovery_options) is what can be started.
     pub fn discovery_config(&self) -> DiscoveryConfig {
         DiscoveryConfig {
-            fake: self.fake_discovery,
             backend: self.backend,
             domain: self.domain.clone(),
             service_type: self.service_type.clone(),
@@ -116,8 +114,19 @@ where
             .unwrap_or_else(|| "local".to_string()),
         config_dirs,
         service_type: matches.get_one::<String>("service-type").cloned(),
-        fake_discovery: matches.get_flag("fake-discovery"),
         backend: match matches.get_one::<String>("backend").map(String::as_str) {
+            #[cfg(feature = "fake")]
+            Some("fake") => DiscoveryBackend::Fake,
+            // Optional backend names remain recognized in every build so the
+            // error can explain the feature needed to obtain them.
+            #[cfg(not(feature = "fake"))]
+            Some("fake") => {
+                return Err(self::command().error(
+                    ErrorKind::InvalidValue,
+                    "the `fake` backend is not compiled into this build; \
+                     reinstall with `cargo install kinjo --features fake`",
+                ));
+            }
             #[cfg(feature = "zeroconf")]
             Some("zeroconf") => DiscoveryBackend::Zeroconf,
             // `zeroconf` stays a recognized value in every build so the CLI
@@ -181,22 +190,13 @@ fn command() -> Command {
                 .value_name("TYPE"),
         )
         .arg(
-            Arg::new("fake-discovery")
-                .long("fake-discovery")
-                .help("Use built-in sample records instead of mDNS discovery")
-                .action(ArgAction::SetTrue),
-        )
-        .arg(
             Arg::new("backend")
                 .long("backend")
-                .help(if cfg!(feature = "zeroconf") {
-                    "mDNS/DNS-SD discovery backend to use \
-                     (mdns-sd browses any domain; zeroconf only `local`)"
-                } else {
-                    "mDNS/DNS-SD discovery backend to use \
-                     (zeroconf requires a build with the `zeroconf` feature)"
-                })
-                .value_parser(["mdns-sd", "zeroconf"])
+                .help(
+                    "Discovery backend to use (`zeroconf` can browse only `local`; `fake` \
+                     and `zeroconf` require same-named Cargo features at build time)",
+                )
+                .value_parser(["mdns-sd", "fake", "zeroconf"])
                 .default_value("mdns-sd")
                 .value_name("BACKEND"),
         )
@@ -233,7 +233,6 @@ mod tests {
         assert_eq!(cli.domain, "local");
         assert!(cli.config_dirs.is_empty());
         assert_eq!(cli.service_type, None);
-        assert!(!cli.fake_discovery);
         assert_eq!(cli.backend, DiscoveryBackend::MdnsSd);
         assert_eq!(cli.command, CliCommand::Run);
     }
@@ -262,6 +261,54 @@ mod tests {
         assert!(parse_from(["kinjo", "--backend", "bonjour"]).is_err());
     }
 
+    /// Optional backends stay in the parser's vocabulary even when absent, so
+    /// selecting one explains how to obtain it instead of producing a bare
+    /// possible-values error.
+    #[cfg(not(feature = "fake"))]
+    #[test]
+    fn fake_backend_without_the_feature_explains_the_fix() {
+        let err = parse_from(["kinjo", "--backend", "fake"]).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+        assert!(err.to_string().contains("--features fake"));
+    }
+
+    #[cfg(feature = "fake")]
+    #[test]
+    fn parses_fake_backend_selection() {
+        let cli = parse_from(["kinjo", "--backend", "fake"]).unwrap();
+
+        assert_eq!(cli.backend.name(), "fake");
+    }
+
+    /// The legacy flag is removed outright: keeping an alias would leave two
+    /// independent spellings for the same backend and preserve the misleading
+    /// model this migration removes.
+    #[test]
+    fn rejects_the_removed_fake_discovery_flag() {
+        let err = parse_from(["kinjo", "--fake-discovery"]).unwrap_err();
+
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    /// Backend help must keep the capability limit established by task 003
+    /// alongside the feature-gate guidance added for optional backends.
+    #[test]
+    fn backend_help_names_the_zeroconf_domain_limit_and_optional_features() {
+        let err = parse_from(["kinjo", "--help"]).unwrap_err();
+        let help = err
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            help.contains("`zeroconf` can browse only `local`"),
+            "{help}"
+        );
+        assert!(help.contains("same-named Cargo features"), "{help}");
+    }
+
     #[test]
     fn parses_run_options_and_repeatable_config_dirs() {
         let cli = parse_from([
@@ -270,7 +317,6 @@ mod tests {
             "corp",
             "--service-type",
             "_ssh._tcp",
-            "--fake-discovery",
             "--config-dir",
             "team",
             "--config-dir",
@@ -284,7 +330,6 @@ mod tests {
             vec![PathBuf::from("team"), PathBuf::from("local")]
         );
         assert_eq!(cli.service_type, Some("_ssh._tcp".to_string()));
-        assert!(cli.fake_discovery);
         assert_eq!(cli.command, CliCommand::Run);
     }
 
@@ -431,24 +476,16 @@ mod tests {
 
     /// Explicit fake discovery exercises no real adapter, so a domain no real
     /// backend could browse is still fine for sample records.
-    #[cfg(feature = "zeroconf")]
+    #[cfg(feature = "fake")]
     #[test]
-    fn fake_discovery_accepts_a_domain_no_backend_supports() {
-        let cli = parse_from([
-            "kinjo",
-            "--backend",
-            "zeroconf",
-            "--domain",
-            "corp",
-            "--fake-discovery",
-        ])
-        .unwrap();
+    fn fake_backend_accepts_a_custom_domain() {
+        let cli = parse_from(["kinjo", "--backend", "fake", "--domain", "corp"]).unwrap();
 
         let options = cli
             .discovery_options()
-            .expect("fake bypasses capability checks");
+            .expect("the sample backend supports custom domains");
 
-        assert!(options.fake());
+        assert_eq!(options.backend(), DiscoveryBackend::Fake);
         assert_eq!(options.domain(), "corp");
     }
 

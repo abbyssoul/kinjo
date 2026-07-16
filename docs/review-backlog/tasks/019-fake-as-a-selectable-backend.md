@@ -4,12 +4,12 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `ready` |
+| Status | `done` |
 | Priority | `P2` |
 | Workstream | Discovery / CLI |
 | Depends on | 017 |
 | Likely conflicts | — |
-| Owner | Unclaimed |
+| Owner | `/root/implement_task_019` (`agent/task-019`) |
 
 ## Why This Matters
 
@@ -119,17 +119,17 @@ This is a maintainability and interface-honesty task, not a correctness fix. Tas
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] `--backend fake` selects sample discovery; `--backend` is the only way to
+- [x] `--backend fake` selects sample discovery; `--backend` is the only way to
       choose a backend.
-- [ ] The fake backend is feature-gated, and its default-ness is a recorded
+- [x] The fake backend is feature-gated, and its default-ness is a recorded
       decision rather than an accident.
-- [ ] Selecting an uncompiled backend fails with text naming the feature.
-- [ ] Fake still accepts any domain, still completes normally, and still cannot be
+- [x] Selecting an uncompiled backend fails with text naming the feature.
+- [x] Fake still accepts any domain, still completes normally, and still cannot be
       reached by a real backend's failure.
-- [ ] The feature matrix builds: default, `zeroconf`, fake on and off.
-- [ ] `scripts/drive-tui.sh`, README, and CONTRIBUTING use the new invocation.
-- [ ] The `--fake-discovery` removal or deprecation is documented.
-- [ ] Full validation passes.
+- [x] The feature matrix builds: default, `zeroconf`, fake on and off.
+- [x] `scripts/drive-tui.sh`, README, and CONTRIBUTING use the new invocation.
+- [x] The `--fake-discovery` removal or deprecation is documented.
+- [x] Full validation passes.
 
 ## Required Tests
 
@@ -145,11 +145,13 @@ This is a maintainability and interface-honesty task, not a correctness fix. Tas
 ## Validation
 
 ```sh
-cargo test --locked ui::cli
-cargo test --locked discovery
-cargo run --locked -- --backend fake --config-dir actions   # or the built feature
+cargo test --locked --features fake ui::cli
+cargo test --locked --features fake discovery
+cargo run --locked --features fake -- --backend fake --config-dir actions
 scripts/drive-tui.sh run 'Tab Tab Down Down Down Enter'
-cargo build --locked                       # default feature set
+cargo build --locked --no-default-features
+cargo build --locked --no-default-features --features fake
+cargo build --locked --no-default-features --features zeroconf
 cargo build --locked --all-features
 cargo fmt -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -159,8 +161,54 @@ cargo test --locked --all-targets --all-features
 
 ## Completion Record
 
-- **Implemented:**
-- **Tests added/updated:**
-- **Documentation updated:**
-- **Validation evidence:**
-- **Follow-ups:**
+- **Implemented:** Added `DiscoveryBackend::Fake` behind an off-by-default
+  `fake` Cargo feature and moved sample startup into the same exhaustive backend
+  dispatch as `mdns-sd` and `zeroconf`. `Cli`, `DiscoveryConfig`, and
+  `DiscoveryOptions` no longer carry a parallel fake boolean; the backend is
+  now the single source of truth. Optional backend names remain in Clap's
+  vocabulary in every build, so a fake-off binary returns exit code 2 with an
+  actionable `--features fake` remedy instead of a generic possible-values
+  error.
+
+  **Decision:** the feature is not in `default`, so normal release, Debian, and
+  Homebrew builds do not compile the sample generator or its actionable sample
+  endpoints. `--fake-discovery` was removed outright rather than kept as a
+  deprecated alias. Kinjo is pre-1.0, and an alias would preserve the two-selector
+  ambiguity this task exists to remove. The replacement is `--backend fake`.
+  The binary still uses task 020's `process_main()`/writer boundary,
+  non-exiting `parse_from`, and structured discovery usage errors; no Clap
+  `.exit()` or raw returned report was introduced.
+
+- **Tests added/updated:** Added CLI regressions for enabled and unavailable
+  fake selection, rejection of the retired flag, and help text that preserves
+  zeroconf's `local`-only limitation alongside both optional feature gates. A
+  process-boundary regression proves unavailable-backend diagnostics retain
+  exit code 2, usage context, and the task 020 writer path. Retargeted the
+  domain-capability tests
+  to `DiscoveryBackend::Fake`. Existing fake adapter, session-completion, and
+  task 017 heterogeneous-SSH app tests are explicitly gated with
+  `#[cfg(feature = "fake")]` and run in the fake-enabled matrix legs instead of
+  silently relying on a backend absent from the build.
+
+- **Documentation updated:** README and CONTRIBUTING document the Cargo feature,
+  backend selector, and driver behavior. `docs/release-notes.md` records the
+  breaking CLI migration, library API migration, and rationale.
+  `scripts/drive-tui.sh` now builds with `--features fake` and defaults to
+  `--backend fake --config-dir actions`. Prior backlog examples and real-backend
+  failure remedies use the final invocation.
+
+- **Validation evidence:** On 2026-07-16 the feature test matrix passed with no
+  failures: default/fake-off 322 tests, fake-only 334, zeroconf-only 335, and
+  fake+zeroconf/all-features 347. `cargo fmt -- --check`, default and
+  all-feature Clippy with `-D warnings`, and the full default/all-feature task
+  gate passed. The real 100×30 TUI was driven through
+  `scripts/drive-tui.sh run 'Tab Tab Down Down Down Enter'`: five sample records
+  rendered, the `_ssh._tcp` aggregate showed two hosts, and the instance picker
+  listed `raspberry-pi.local` plus the two-address `workstation.local`, preserving
+  task 017. A source audit found no operational `--fake-discovery`, parallel
+  fake boolean, Clap `.exit()`, or dynamic direct-output bypass; remaining old
+  flag text exists only in the removal regression, migration/release note, and
+  this task's historical rationale.
+
+- **Follow-ups:** Task 018 is now unblocked and can add CI smoke coverage against
+  the final `--backend fake` interface. No other follow-up identified.

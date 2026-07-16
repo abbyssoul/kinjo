@@ -194,7 +194,8 @@ cargo test --locked --all-targets --all-features
   - `cargo test --locked --all-targets --all-features`: 184 passed, 0 failed.
   - `cargo +nightly fuzz run discovery_entry -- -max_total_time=60`: 101,513 runs,
     no crashes — the identity property holds over the new occurrence dimension.
-  - Ran `kinjo --fake-discovery` on a sized pty: all four sample records render,
+  - Ran the sample backend on a sized pty (now `kinjo --backend fake`): all four
+    sample records render,
     including the unresolved placeholder, with no panic.
 - **Follow-ups:**
   - The zeroconf backend still cannot separate same-name occurrences across

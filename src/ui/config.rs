@@ -49,7 +49,6 @@ mod tests {
             domain: "local".to_string(),
             config_dirs,
             service_type: None,
-            fake_discovery: false,
             backend: crate::discovery::DiscoveryBackend::default(),
             command,
         }

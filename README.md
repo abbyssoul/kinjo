@@ -40,13 +40,13 @@ kinjo --domain example.local
 For development without a running Avahi setup:
 
 ```sh
-kinjo --fake-discovery
+cargo run --features fake -- --backend fake
 ```
 
 ### Discovery backends
 
 The app discovers services over mDNS/DNS-SD so no external CLI tools are
-required. Two discovery backends are available, selectable with `--backend`:
+required. Backends are selected exclusively with `--backend`:
 
 - `mdns-sd` (default): the `mdns-sd-discovery` crate. A single browser
   enumerates every service type on the link via the native DNS-SD meta-query.
@@ -55,12 +55,28 @@ required. Two discovery backends are available, selectable with `--backend`:
   on Linux. It browses one service type at a time, so a curated set of common
   types is swept in parallel when no `--service-type` is given. This backend is
   behind the off-by-default `zeroconf` cargo feature (it needs the Avahi client
-  headers to build, e.g. `libavahi-client-dev` on Debian/Ubuntu):
+  headers to build, e.g. `libavahi-client-dev` on Debian/Ubuntu).
+- `fake`: a finite built-in sample stream for development and deterministic UI
+  smoke tests. It is behind the off-by-default `fake` Cargo feature so release
+  binaries do not ship actionable sample endpoints unless explicitly requested.
 
 ```sh
 cargo install kinjo --features zeroconf
 kinjo --backend zeroconf
 ```
+
+Install or build with sample discovery explicitly:
+
+```sh
+cargo install kinjo --features fake
+kinjo --backend fake
+```
+
+Selecting an optional backend in a binary built without it fails with an error
+that names the Cargo feature to enable.
+
+`--fake-discovery` has been removed; replace it with `--backend fake`. See the
+[release notes](docs/release-notes.md) for the migration decision.
 
 **The `zeroconf` backend browses only the default `local` domain.** Its browser
 exposes no way to select a domain, so rather than accept `--domain` and quietly
@@ -112,9 +128,9 @@ cause stay on screen rather than scrolling past — discovery is not retried
 automatically. Refresh (`r`) restarts it, and is the recovery action from a
 failure.
 
-Pass `--fake-discovery` for sample records on demand. Those samples are a short,
-finite stream; when it ends the status line reports normal completion and the
-samples remain listed.
+Select `--backend fake` in a build with the `fake` feature for sample records on
+demand. Those samples are a short, finite stream; when it ends the status line
+reports normal completion and the samples remain listed.
 
 The sample set is chosen to exercise the behavior the real app has: a service
 reachable at several addresses, a service with no resolved host yet, and SSH on
@@ -137,7 +153,7 @@ does and does not do with that access:
   the terminal and used only to fill in the commands you configure. Nothing is
   uploaded or shared with anyone but you.
 
-The two discovery backends differ in how they reach the network:
+The two network discovery backends differ in how they reach the network:
 
 - `mdns-sd` (default) implements mDNS/DNS-SD itself: it sends standard
   multicast queries on the local link and listens for responses. It makes no
@@ -230,7 +246,7 @@ cargo build --locked
 Run from the source tree:
 
 ```sh
-cargo run -- --fake-discovery
+cargo run --features fake -- --backend fake
 ```
 
 Install the built binary into Cargo's bin directory:
@@ -244,7 +260,7 @@ cargo install --path .
 You can verify the UI without a running Avahi daemon:
 
 ```sh
-kinjo --fake-discovery
+cargo run --features fake -- --backend fake
 ```
 
 To browse real services on the default `local` domain:
@@ -289,7 +305,8 @@ reused independently:
    owning the running adapter, its events, its state, and its shutdown, so the
    caller cannot hold a receiver whose producer has silently died, and dropping
    it stops the browse. Adapters vary behind that session — the mDNS/Avahi
-   backend is the default, with a built-in sample backend for `--fake-discovery`
+   backend is the default, with a feature-gated built-in sample backend selected
+   by `--backend fake`
    — and you could drop in a different DNS-SD source, a static file, or an
    SSDP/UPnP browser without touching anything else. Discovery options are
    checked once at that seam: a `DiscoveryConfig` is a request, and validating

@@ -37,9 +37,10 @@
 #   KINJO_SETTLE    seconds to wait after a key batch (default: 0.6)
 #   KINJO_STARTUP   seconds to wait after start, for discovery (default: 2.5)
 #
-# The default arguments are `--fake-discovery --config-dir actions`: the sample
+# The default arguments are `--backend fake --config-dir actions`: the sample
 # backend plus the bundled rules, which is the reproducible way to exercise the
-# UI without a live network. Pass your own after `--` to override them.
+# UI without a live network. The driver builds with the off-by-default `fake`
+# feature. Pass your own after `--` to override the runtime arguments.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -50,7 +51,7 @@ ROWS="${KINJO_ROWS:-30}"
 SETTLE="${KINJO_SETTLE:-0.6}"
 STARTUP="${KINJO_STARTUP:-2.5}"
 BIN="target/debug/kinjo"
-DEFAULT_ARGS=(--fake-discovery --config-dir actions)
+DEFAULT_ARGS=(--backend fake --config-dir actions)
 
 die() {
     echo "drive-tui: $*" >&2
@@ -73,7 +74,7 @@ cmd_start() {
     fi
 
     command -v tmux >/dev/null || die "tmux is required"
-    cargo build --locked -q || die "build failed"
+    cargo build --locked -q --features fake || die "build failed"
     [[ -x "$BIN" ]] || die "no binary at $BIN"
 
     tmux kill-session -t "$SESSION" 2>/dev/null || true

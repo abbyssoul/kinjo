@@ -20,7 +20,8 @@ sudo apt-get install -y clang libavahi-client-dev libxcb-shape0-dev libxcb-xfixe
 ```
 
 For real mDNS discovery, the Avahi daemon must be available on the system. For
-UI and command development, you can run without Avahi by using fake discovery.
+UI and command development, you can run without Avahi by enabling the
+off-by-default `fake` feature and selecting that backend.
 
 ## Local Commands
 
@@ -51,7 +52,7 @@ cargo clippy --locked --all-targets -- -D warnings
 Run the TUI with sample records:
 
 ```sh
-cargo run -- --fake-discovery
+cargo run --features fake -- --backend fake
 ```
 
 Validate command configs:
@@ -85,10 +86,10 @@ scripts/drive-tui.sh run 'Tab Tab Down Down Down Enter'   # one shot
 scripts/drive-tui.sh --help                               # keys, options
 ```
 
-It defaults to `--fake-discovery --config-dir actions`: the sample backend plus
-the bundled rules, which is the reproducible way to exercise the UI. Pass other
-arguments after `--`. For a longer investigation, hold a session open and look
-between steps:
+It builds with the `fake` feature and defaults to `--backend fake --config-dir
+actions`: the sample backend plus the bundled rules, which is the reproducible
+way to exercise the UI. Pass other runtime arguments after `--`. For a longer
+investigation, hold a session open and look between steps:
 
 ```sh
 scripts/drive-tui.sh start
@@ -146,7 +147,8 @@ CI runs a short soak on every push/PR and a longer one on a weekly schedule
 ## Project Layout
 
 - `src/discovery/`: the discovery layer — produces `Entry` values from a
-  `DiscoverySession` that owns the running adapter (mDNS and fake backends).
+  `DiscoverySession` that owns the running adapter (mDNS plus the feature-gated
+  fake backend).
 - `src/plumber/`: the rules engine — command-file parsing, matching, and
   execution behind the `RuleEngine` trait.
 - `src/ui/`: CLI parsing, config/keymap loading, app state, and rendering.
@@ -178,6 +180,6 @@ When reporting bugs, include:
 - operating system and version
 - how `kinjo` was installed
 - command used to run it
-- whether `--fake-discovery` works
+- whether `--backend fake` works in a build with the `fake` feature
 - relevant command or keybinding config snippets
 - the full error output

@@ -15,6 +15,7 @@
 //! one concrete session type rather than a trait over receivers.
 
 mod entry;
+#[cfg(feature = "fake")]
 mod fake;
 mod mdns;
 mod options;
@@ -58,8 +59,9 @@ pub enum DiscoveryEvent {
 /// Start the discovery adapter selected by `options` and return the session
 /// that owns it. Dropping the session stops the adapter.
 ///
-/// Sample records come back only when `options.fake()` is set. A real adapter
-/// that fails reports a [`SessionState::Failed`] and emits no entries:
+/// Sample records come back only when the feature-gated `fake` backend is
+/// selected. A real adapter that fails reports a [`SessionState::Failed`] and
+/// emits no entries:
 /// fabricating plausible LAN endpoints out of a failure would let a user act on
 /// a device that does not exist.
 ///
@@ -68,11 +70,10 @@ pub enum DiscoveryEvent {
 /// happened in [`DiscoveryConfig::validate`], once, and no adapter below can be
 /// reached with a value it would have to quietly reinterpret.
 pub fn start(options: &DiscoveryOptions) -> DiscoverySession {
-    if options.fake() {
-        return fake::start(options);
-    }
     match options.backend() {
         DiscoveryBackend::MdnsSd => mdns::start(options),
+        #[cfg(feature = "fake")]
+        DiscoveryBackend::Fake => fake::start(options),
         #[cfg(feature = "zeroconf")]
         DiscoveryBackend::Zeroconf => zeroconf::start(options),
     }

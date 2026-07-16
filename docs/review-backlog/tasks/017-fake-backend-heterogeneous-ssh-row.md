@@ -48,7 +48,7 @@ Reproduction of the gap, once this task lands the picker should appear:
 
 ```sh
 # Group by service type (⇥), select the _ssh._tcp row, press ⏎.
-kinjo --fake-discovery --config-dir actions
+kinjo --backend fake --config-dir actions
 ```
 
 ## Required Outcome
@@ -116,9 +116,9 @@ kinjo --fake-discovery --config-dir actions
 ## Validation
 
 ```sh
-cargo test --locked discovery::fake
-cargo test --locked ui::app
-cargo run --locked -- --fake-discovery --config-dir actions   # confirm by hand
+cargo test --locked --features fake discovery::fake
+cargo test --locked --features fake ui::app
+cargo run --locked --features fake -- --backend fake --config-dir actions   # confirm by hand
 cargo fmt -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets
@@ -158,7 +158,7 @@ cargo test --locked --all-targets --all-features
   all-features, 0 failed (from 319/334).
 
   **Verified by hand, which is the point of this task.** Drove the real binary in
-  a pty: `kinjo --fake-discovery --config-dir actions`, tabbed to the types view,
+  a pty: `kinjo --backend fake --config-dir actions`, tabbed to the types view,
   selected `_ssh._tcp` (listed as `2 svc ×2 · 2 hosts`, details showing both
   `raspberry-pi` and `workstation` children under one `ssh` action), and pressed
   ⏎. A `select instance` picker opened listing:

@@ -189,6 +189,7 @@ impl DiscoverySession {
     /// worker published its outcome first.
     fn ending(&self) -> SessionState {
         match self.producer.as_ref().and_then(DiscoveryWorker::outcome) {
+            #[cfg(feature = "fake")]
             Some(BrowseOutcome::Complete) => SessionState::Complete,
             Some(BrowseOutcome::Startup(cause)) => SessionState::Failed(DiscoveryFailure {
                 kind: FailureKind::Startup,
@@ -212,12 +213,14 @@ impl DiscoverySession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::{DiscoveryBackend, DiscoveryConfig, DiscoveryOptions, Entry, start};
+    use crate::discovery::Entry;
+    #[cfg(feature = "fake")]
+    use crate::discovery::{DiscoveryBackend, DiscoveryConfig, DiscoveryOptions, start};
 
+    #[cfg(feature = "fake")]
     fn fake_options(service_type: Option<&str>) -> DiscoveryOptions {
         DiscoveryConfig {
-            fake: true,
-            backend: DiscoveryBackend::default(),
+            backend: DiscoveryBackend::Fake,
             domain: "local".to_string(),
             service_type: service_type.map(str::to_string),
         }
@@ -237,6 +240,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "fake")]
     fn upserts(events: &[DiscoveryEvent]) -> Vec<Entry> {
         events
             .iter()
@@ -309,6 +313,7 @@ mod tests {
     /// Explicit fake discovery streams the documented samples and then reports
     /// a *normal* completion: a finite stream running out is not a failure, and
     /// its records stay trustworthy.
+    #[cfg(feature = "fake")]
     #[test]
     fn the_fake_session_completes_normally_after_its_finite_stream() {
         let mut session = start(&fake_options(Some("_ssh._tcp")));
@@ -330,6 +335,7 @@ mod tests {
 
     /// Dropping a session must stop its producer even mid-stream — including
     /// the fake adapter, whose sample stream sleeps between records.
+    #[cfg(feature = "fake")]
     #[test]
     fn dropping_a_fake_session_cancels_its_delayed_stream() {
         let mut session = start(&fake_options(None));
@@ -350,6 +356,7 @@ mod tests {
     }
 
     /// Shutting a session down stops its producer and is safe to repeat.
+    #[cfg(feature = "fake")]
     #[test]
     fn shutdown_stops_the_producer_and_is_idempotent() {
         let mut session = start(&fake_options(None));
@@ -372,6 +379,7 @@ mod tests {
 
     /// A cancelled producer is a stop, not a completion: its records were cut
     /// short and must not be labelled as a finished stream.
+    #[cfg(feature = "fake")]
     #[test]
     fn a_cancelled_producer_ends_as_stopped_not_complete() {
         let mut session = start(&fake_options(None));

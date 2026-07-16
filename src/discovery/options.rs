@@ -33,6 +33,10 @@ pub enum DiscoveryBackend {
     /// the native DNS-SD meta-query. This is the default.
     #[default]
     MdnsSd,
+    /// Built-in finite sample records for development and deterministic smoke
+    /// tests. Only available with the `fake` feature.
+    #[cfg(feature = "fake")]
+    Fake,
     /// `zeroconf`: wraps the system Avahi/Bonjour stack, sweeping a curated set
     /// of common service types in parallel. Only available when the crate is
     /// built with the `zeroconf` feature.
@@ -45,6 +49,8 @@ impl DiscoveryBackend {
     pub fn name(self) -> &'static str {
         match self {
             DiscoveryBackend::MdnsSd => "mdns-sd",
+            #[cfg(feature = "fake")]
+            DiscoveryBackend::Fake => "fake",
             #[cfg(feature = "zeroconf")]
             DiscoveryBackend::Zeroconf => "zeroconf",
         }
@@ -60,6 +66,8 @@ impl DiscoveryBackend {
     fn supports_custom_domain(self) -> bool {
         match self {
             DiscoveryBackend::MdnsSd => true,
+            #[cfg(feature = "fake")]
+            DiscoveryBackend::Fake => true,
             #[cfg(feature = "zeroconf")]
             DiscoveryBackend::Zeroconf => false,
         }
@@ -252,9 +260,7 @@ impl std::error::Error for DiscoveryOptionError {}
 /// [`DiscoveryOptions`] an adapter can actually be started with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryConfig {
-    /// Use the built-in sample records instead of real mDNS discovery.
-    pub fake: bool,
-    /// Which mDNS/DNS-SD library to discover with when `fake` is unset.
+    /// Which discovery backend to use.
     pub backend: DiscoveryBackend,
     /// DNS-SD domain to browse. Empty means the default domain.
     pub domain: String,
@@ -267,10 +273,8 @@ impl DiscoveryConfig {
     /// Check and canonicalize these inputs, once, before anything starts.
     ///
     /// Rejects a malformed service type, and a domain the selected backend
-    /// cannot honor. Explicit fake discovery skips the *capability* check
-    /// alone: it exercises no real adapter, so no adapter's limits apply to it
-    /// — but its service type is still validated, because a filter that matches
-    /// no sample is just as silently wrong as one that matches no device.
+    /// cannot honor. The fake backend reports custom-domain support because it
+    /// exercises no network adapter, while its service type is still validated.
     pub fn validate(self) -> Result<DiscoveryOptions, DiscoveryOptionError> {
         let service_type = self
             .service_type
@@ -279,7 +283,7 @@ impl DiscoveryConfig {
             .transpose()?;
         let domain = canonical_domain(&self.domain);
 
-        if !self.fake && domain != DEFAULT_DOMAIN && !self.backend.supports_custom_domain() {
+        if domain != DEFAULT_DOMAIN && !self.backend.supports_custom_domain() {
             return Err(DiscoveryOptionError::UnsupportedDomain {
                 backend: self.backend,
                 domain,
@@ -287,7 +291,6 @@ impl DiscoveryConfig {
         }
 
         Ok(DiscoveryOptions {
-            fake: self.fake,
             backend: self.backend,
             domain,
             service_type,
@@ -301,19 +304,13 @@ impl DiscoveryConfig {
 /// canonical, and that the selected backend can honor it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryOptions {
-    fake: bool,
     backend: DiscoveryBackend,
     domain: String,
     service_type: Option<ServiceTypeFilter>,
 }
 
 impl DiscoveryOptions {
-    /// Whether the caller explicitly asked for sample records.
-    pub fn fake(&self) -> bool {
-        self.fake
-    }
-
-    /// The selected backend. Meaningless when [`fake`](Self::fake) is set.
+    /// The selected backend.
     pub fn backend(&self) -> DiscoveryBackend {
         self.backend
     }
@@ -335,7 +332,6 @@ mod tests {
 
     fn config(domain: &str, service_type: Option<&str>) -> DiscoveryConfig {
         DiscoveryConfig {
-            fake: false,
             backend: DiscoveryBackend::MdnsSd,
             domain: domain.to_string(),
             service_type: service_type.map(str::to_string),
@@ -521,25 +517,26 @@ mod tests {
 
     /// Explicit fake discovery exercises no real adapter, so no adapter's
     /// capability limits apply: sample records can carry any domain.
-    #[cfg(feature = "zeroconf")]
+    #[cfg(feature = "fake")]
     #[test]
-    fn explicit_fake_mode_accepts_a_domain_no_real_backend_could() {
+    fn fake_backend_accepts_a_custom_domain() {
         let mut config = config("corp", None);
-        config.backend = DiscoveryBackend::Zeroconf;
-        config.fake = true;
+        config.backend = DiscoveryBackend::Fake;
 
-        let options = config.validate().expect("fake bypasses capability checks");
+        let options = config.validate().expect("fake supports custom domains");
 
         assert_eq!(options.domain(), "corp");
+        assert_eq!(options.backend(), DiscoveryBackend::Fake);
     }
 
     /// …but a malformed service type is still malformed in fake mode. It is not
     /// a backend capability: a filter that silently matches no sample is the
     /// same confusing outcome as one that matches no device.
+    #[cfg(feature = "fake")]
     #[test]
-    fn explicit_fake_mode_still_validates_the_service_type() {
+    fn fake_backend_still_validates_the_service_type() {
         let mut config = config("corp", Some("not a service type"));
-        config.fake = true;
+        config.backend = DiscoveryBackend::Fake;
 
         let err = config.validate().unwrap_err();
 

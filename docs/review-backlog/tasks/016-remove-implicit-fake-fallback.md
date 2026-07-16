@@ -46,19 +46,20 @@ Line numbers are starting points. Revalidate them against the current branch.
 
 ## Required Outcome
 
-- Sample entries are emitted only when `DiscoveryConfig.fake` is true (the user
-  passed `--fake-discovery`).
+- Sample entries are emitted only when the explicitly selected backend is
+  `DiscoveryBackend::Fake` (the user passed `--backend fake` in a build with the
+  `fake` feature).
 - Real adapter startup/runtime failure emits a Status event naming the failed
   backend and cause, and emits no Upsert. The UI shows an empty list with that
   status; it does not fabricate devices.
 - The failure Status text no longer claims "using sample records"; it names the
-  error and points at `--fake-discovery` as the explicit demo/testing option and
+  error and points at `--backend fake` as the explicit demo/testing option and
   refresh as the retry action.
-- Explicit fake mode (`--fake-discovery`) continues to stream the documented
+- Explicit fake mode (`--backend fake`) continues to stream the documented
   samples unchanged.
 - README no longer promises implicit sample fallback; it documents that
   discovery failure leaves the list empty with an error status and that
-  `--fake-discovery` is the explicit sample mode.
+  `--backend fake` is the explicit sample mode.
 
 ## Implementation Constraints
 
@@ -76,7 +77,7 @@ Line numbers are starting points. Revalidate them against the current branch.
    failure produces Status events only and never an Upsert.
 2. Delete the three `fake::spawn` fallback calls and update the Status text.
 3. Update `fake::spawn`'s doc comment and README's fallback sentence.
-4. Confirm explicit `--fake-discovery` behavior is unchanged.
+4. Confirm explicit `--backend fake` behavior is unchanged.
 
 ## Non-Goals
 
@@ -93,7 +94,7 @@ Line numbers are starting points. Revalidate them against the current branch.
 - [x] Injected worker runtime-creation failure emits no sample Upsert.
 - [x] Zeroconf total startup failure emits no sample Upsert (all-features build).
 - [x] Failure Status names the cause and the explicit fake/refresh remedies.
-- [x] Explicit `--fake-discovery` still streams the documented samples.
+- [x] Explicit `--backend fake` still streams the documented samples.
 - [x] README fallback language matches the new behavior.
 - [x] Full validation passes for default and all-feature builds.
 
@@ -121,9 +122,9 @@ cargo test --locked --all-targets --all-features
   (`src/discovery/mdns.rs` browse-startup failure, `src/discovery/zeroconf.rs`
   zero-started-workers, `src/discovery/worker.rs` runtime-creation failure).
   Each now sends a `DiscoveryEvent::Status` naming the cause and pointing at
-  `--fake-discovery` and refresh, then returns without emitting any `Upsert`.
-  `fake::spawn` itself is untouched and still backs `FakeDiscovery::start` for
-  explicit `--fake-discovery`. Updated `fake::spawn`'s and the two backend
+  `--backend fake` and refresh, then returns without emitting any `Upsert`.
+  `fake::spawn` itself is untouched and still backs explicit sample discovery.
+  Updated `fake::spawn`'s and the two backend
   `start()` doc comments to drop the "falls back to fake" language. Zeroconf's
   `browse_loop` no longer uses its `domain`/`service_type_filter` params after
   the fallback call was removed; they're kept (underscore-prefixed) since the
@@ -138,7 +139,7 @@ cargo test --locked --all-targets --all-features
   covers explicit fake mode and was left unchanged, confirming that behavior is
   unaffected.
 - **Documentation updated:** `README.md` — replaced the "falls back to sample
-  records" sentence with the empty-list/explicit-`--fake-discovery`/refresh
+  records" sentence with the empty-list/explicit-`--backend fake`/refresh
   behavior.
 - **Validation evidence:** All green locally:
   `cargo fmt -- --check`; `cargo clippy --locked --all-targets --all-features -- -D warnings`;

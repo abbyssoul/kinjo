@@ -1245,7 +1245,6 @@ mod tests {
             domain: "local".to_string(),
             config_dirs: Vec::new(),
             service_type: None,
-            fake_discovery: true,
             backend: crate::discovery::DiscoveryBackend::default(),
             command: crate::ui::cli::CliCommand::Run,
         }
@@ -2594,7 +2593,7 @@ mode = "execute"
     fn a_startup_failure_keeps_its_cause_text_across_later_drains() {
         let (mut app, tx) = app_with_session(Matcher::default(), Vec::new());
         tx.send(DiscoveryEvent::Status(
-            "mDNS discovery unavailable (no such device); try --fake-discovery for sample records, or refresh to retry"
+            "mDNS discovery unavailable (no such device); try --backend fake in a build with the fake feature for sample records, or refresh to retry"
                 .to_string(),
         ))
         .unwrap();
@@ -2871,10 +2870,11 @@ mode = "execute"
 
     /// Explicit fake discovery: running out of samples is the normal ending of
     /// a finite stream, so the samples stay and nothing is reported as broken.
+    #[cfg(feature = "fake")]
     #[test]
     fn finite_fake_completion_keeps_its_samples_and_reports_completion() {
         let mut cli = test_cli();
-        cli.fake_discovery = true;
+        cli.backend = crate::discovery::DiscoveryBackend::Fake;
         // Filtering to one type keeps the stream short.
         cli.service_type = Some("_ssh._tcp".to_string());
         let session = crate::discovery::start(
@@ -2909,10 +2909,11 @@ mode = "execute"
     /// which the sample set could not produce while it advertised a single SSH
     /// service. This pins the sample set against that behavior, so `--backend
     /// fake` stays enough to exercise the picker by hand.
+    #[cfg(feature = "fake")]
     #[test]
     fn fake_samples_offer_host_selection_on_the_service_type_row() {
         let mut cli = test_cli();
-        cli.fake_discovery = true;
+        cli.backend = crate::discovery::DiscoveryBackend::Fake;
         cli.service_type = Some("_ssh._tcp".to_string());
         let session = crate::discovery::start(
             &cli.discovery_options()

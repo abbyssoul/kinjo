@@ -106,7 +106,7 @@ async fn browse_loop(
     // persistent failure state instead of a status line the next event erases.
     if workers.is_empty() {
         return BrowseOutcome::Startup(
-            "mDNS discovery unavailable; try --fake-discovery for sample records, or refresh to retry"
+            "mDNS discovery unavailable; try --backend fake in a build with the fake feature for sample records, or refresh to retry"
                 .to_string(),
         );
     }
@@ -237,7 +237,6 @@ mod tests {
 
     fn zeroconf_config(domain: &str, service_type: Option<&str>) -> DiscoveryConfig {
         DiscoveryConfig {
-            fake: false,
             backend: DiscoveryBackend::Zeroconf,
             domain: domain.to_string(),
             service_type: service_type.map(str::to_string),

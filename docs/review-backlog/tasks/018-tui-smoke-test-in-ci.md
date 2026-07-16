@@ -4,7 +4,7 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `blocked` |
+| Status | `ready` |
 | Priority | `P2` |
 | Workstream | UI / CI |
 | Depends on | 017, 019 |
@@ -31,7 +31,7 @@ draws, responds to a key, and exits cleanly — that no current job provides.
 - `.github/workflows/ci-test.yml`: the test workflow builds, lints, and tests;
   no job executes the binary's TUI.
 - `.github/workflows/fuzz.yml`: exercises parsers, not rendering.
-- `scripts/drive-tui.sh`: the local driver, defaulting to `--fake-discovery
+- `scripts/drive-tui.sh`: the local driver, defaulting to `--backend fake
   --config-dir actions`, with `KINJO_COLS`/`KINJO_ROWS` for size.
 - Tasks 006 and 008 shipped verified by regression tests alone; task 017 added
   the sample-set affordance that makes their behavior reachable at all.
@@ -42,7 +42,7 @@ Midpoint validation on 2026-07-16 successfully drove the committed helper at
 100×30 and 60×18, including opening the heterogeneous SSH picker added by task
 017. The local seam is healthy; CI still never invokes it. Task 019 now precedes
 this task so the smoke job is written once against the final `--backend fake`
-interface instead of immediately rewriting a `--fake-discovery` invocation.
+interface instead of immediately rewriting a legacy-flag invocation.
 
 ## Required Outcome
 

@@ -47,6 +47,7 @@ pub(super) enum BrowseOutcome {
     Stopped,
     /// A finite stream finished normally. Only the explicit fake adapter ends
     /// this way; its samples remain valid.
+    #[cfg(feature = "fake")]
     Complete,
     /// The shutdown token fired: the session was dropped or replaced.
     Cancelled,
@@ -110,7 +111,7 @@ impl DiscoveryWorker {
             let ended = match flavor.build() {
                 Ok(runtime) => runtime.block_on(browse(domain, service_type_filter, tx, token)),
                 Err(err) => BrowseOutcome::Startup(format!(
-                    "failed to start mDNS runtime ({err}); try --fake-discovery for sample records, or refresh to retry"
+                    "failed to start mDNS runtime ({err}); try --backend fake in a build with the fake feature for sample records, or refresh to retry"
                 )),
             };
 
@@ -163,7 +164,6 @@ mod tests {
 
     fn config() -> DiscoveryConfig {
         DiscoveryConfig {
-            fake: false,
             backend: DiscoveryBackend::MdnsSd,
             domain: "local".to_string(),
             service_type: None,
@@ -205,14 +205,14 @@ mod tests {
         let (worker, rx) = DiscoveryWorker::spawn(
             &options(),
             RuntimeFlavor::CurrentThread,
-            |_domain, _service_type_filter, _tx, _shutdown| async move { BrowseOutcome::Complete },
+            |_domain, _service_type_filter, _tx, _shutdown| async move { BrowseOutcome::Stopped },
         );
 
         // Block until every sender is gone, which is the exact moment a session
         // decides the producer ended.
         while rx.recv().is_ok() {}
 
-        assert_eq!(worker.outcome(), Some(BrowseOutcome::Complete));
+        assert_eq!(worker.outcome(), Some(BrowseOutcome::Stopped));
     }
 
     /// The browse loop receives the validated domain and service-type filter,

@@ -11,7 +11,7 @@ use super::{DiscoveryEvent, DiscoveryOptions, Entry, ServiceTypeFilter};
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Start the built-in sample-records backend. Reached only when the user asks
-/// for it with `--fake-discovery`: a real adapter's failure never falls back
+/// for it with `--backend fake`: a real adapter's failure never falls back
 /// here, because a plausible `192.168.1.x` endpoint the user did not ask for is
 /// an actionable lie.
 ///

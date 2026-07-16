@@ -1519,7 +1519,6 @@ mod tests {
                 domain: domain.to_string(),
                 config_dirs: Vec::new(),
                 service_type: None,
-                fake_discovery: false,
                 backend: DiscoveryBackend::MdnsSd,
                 command: CliCommand::Run,
             },

@@ -68,7 +68,8 @@ i.e. explicit fake mode only. The README fallback promise was corrected by 016.
 
 ## Required Outcome
 
-- Sample entries are emitted only when `DiscoveryConfig.fake` is true.
+- Sample entries are emitted only when `DiscoveryBackend::Fake` is explicitly
+  selected in a build with the `fake` feature.
 - Real adapter startup/runtime failure emits a typed, persistent failure state and
   no sample Upserts.
 - Unexpected real-adapter channel disconnection is visible to the UI as failed
