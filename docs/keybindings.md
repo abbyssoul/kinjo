@@ -44,6 +44,42 @@ set listed under [Bindable Commands](#bindable-commands); a typo such as
 configuration that unbinds every quit key (`common.quit` and `browse.quit`) is
 rejected, so the app always remains quittable.
 
+## Conflicts
+
+A key triggers exactly one command. If two commands that are active at the same
+time are bound to the same key, the file is rejected with an error naming the
+key and both commands, rather than letting one of them silently win:
+
+```text
+keybinding conflict in `browse` mode: `z` is bound to both
+`browse.same_host` and `browse.refresh`
+```
+
+Because `[common]` commands stay active inside every mode, a common binding
+conflicts with any mode's binding on the same key. Binding `common.quit` to
+`space`, for example, conflicts with the default `type_filter.toggle`. Rebinding
+whichever command you did not want resolves it:
+
+```toml
+[common]
+quit = ["space"]
+
+[type_filter]
+toggle = ["enter"]
+```
+
+The same key in two *different* modes is not a conflict: only one mode is
+listening at a time, so `browse.same_host = ["z"]` and `picker.select = ["z"]`
+happily coexist.
+
+## Hints
+
+The footer, the help overlay, and the modal hints are generated from the
+bindings that are actually in effect, so they follow your customization. Where
+space is tight a command is shown with its first key; the help overlay lists
+every key bound to it. An unbound command is dropped from the hints entirely
+rather than advertising a key that does nothing.
+
 ## Mouse
 
 The mouse works alongside the keyboard while browsing: the wheel over the
@@ -135,8 +171,15 @@ close = ["esc", "enter"]
 clear = ["ctrl-u"]
 ```
 
+`close` leaves the search editor but **keeps** the query: it stays the active
+filter and the list stays narrowed. `clear` is the only command that empties
+the query, and it leaves you in the editor ready to type a new one.
+
 Printable characters, backspace, and delete are handled by the search input
-itself; they are not configured here.
+itself; they are not configured here. The search field is append-only, so
+backspace and delete both remove the last character — there is no cursor to
+move. Binding one of them to a `[search]` command takes precedence over that
+built-in behavior.
 
 ### Type Filter Mode
 
@@ -173,12 +216,15 @@ close = ["esc", "?", "q"]
 
 ### Common Commands
 
-Common commands are checked before mode-specific bindings:
+Common commands stay active in every mode, including inside the modal views:
 
 ```toml
 [common]
 quit = ["ctrl-c"]
 ```
+
+Because they are always active, they must not share a key with any mode's own
+command — see [Conflicts](#conflicts).
 
 ## Examples
 

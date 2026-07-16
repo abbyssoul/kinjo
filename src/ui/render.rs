@@ -20,6 +20,7 @@ use crate::{
 use super::{
     app::{App, AppMode, CommandGroup},
     display,
+    keymap::Action,
 };
 
 // ── palette ──────────────────────────────────────────────────────────────
@@ -72,7 +73,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         AppMode::ActionPicker => render_action_picker(frame, app),
         AppMode::InstancePicker => render_instance_picker(frame, app),
         AppMode::ServicePicker => render_service_picker(frame, app),
-        AppMode::Help => render_help(frame),
+        AppMode::Help => render_help(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -142,8 +143,14 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut spans = vec![Span::styled(" / ", prompt_style), Span::raw(" ")];
 
     if app.filter.text_query.is_empty() && !searching {
+        // Name the key that actually opens search; with search unbound there is
+        // no key to name, so the bar just says what the field is.
+        let placeholder = match app.keybindings.compact(Action::OpenSearch) {
+            Some(key) => format!("fuzzy filter — press {key} to search"),
+            None => "fuzzy filter".to_string(),
+        };
         spans.push(Span::styled(
-            "fuzzy filter — press / to search",
+            display::text(&placeholder),
             Style::default().fg(FG_DIM).add_modifier(Modifier::ITALIC),
         ));
     } else {
@@ -858,30 +865,69 @@ fn render_command_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 // ── footer ───────────────────────────────────────────────────────────────
-fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let hints: &[(&str, &str)] = match app.mode {
-        AppMode::Search => &[("type", "filter"), ("⏎/esc", "done"), ("^U", "clear")],
-        AppMode::TypeFilter => &[("jk", "move"), ("space", "toggle"), ("esc", "close")],
-        AppMode::ActionPicker | AppMode::InstancePicker | AppMode::ServicePicker => {
-            &[("jk", "move"), ("⏎", "run"), ("esc", "cancel")]
-        }
-        AppMode::Help => &[("esc", "close")],
-        AppMode::Browse => &[
-            ("jk", "move"),
-            ("⏎", "open"),
-            ("/", "search"),
-            ("t", "types"),
-            ("⇥", "view"),
-            ("s", "same-host"),
-            ("r", "refresh"),
-            ("u/d", "scroll"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
+/// The footer hints for `mode`, spelled with the keys actually bound to each
+/// action. An unbound action contributes no hint at all, so the footer never
+/// advertises a key that does nothing.
+fn footer_hints(app: &App, mode: AppMode) -> Vec<(String, &'static str)> {
+    let keys = &app.keybindings;
+    let hint = |actions: &[Action], label: &'static str| {
+        keys.compact_group(actions).map(|shown| (shown, label))
     };
+    match mode {
+        AppMode::Search => [
+            Some(("type".to_string(), "filter")),
+            hint(&[Action::SearchClose], "done"),
+            hint(&[Action::SearchClear], "clear"),
+        ],
+        AppMode::TypeFilter => [
+            hint(&[Action::TypeFilterDown, Action::TypeFilterUp], "move"),
+            hint(&[Action::TypeFilterToggle], "toggle"),
+            hint(&[Action::TypeFilterClose], "close"),
+        ],
+        AppMode::ActionPicker | AppMode::InstancePicker | AppMode::ServicePicker => [
+            hint(&[Action::PickerDown, Action::PickerUp], "move"),
+            hint(&[Action::PickerSelect], "run"),
+            hint(&[Action::PickerClose], "cancel"),
+        ],
+        AppMode::Help => [hint(&[Action::HelpClose], "close"), None, None],
+        AppMode::Browse => return browse_footer_hints(app),
+    }
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn browse_footer_hints(app: &App) -> Vec<(String, &'static str)> {
+    let keys = &app.keybindings;
+    let hint = |actions: &[Action], label: &'static str| {
+        keys.compact_group(actions).map(|shown| (shown, label))
+    };
+    [
+        hint(&[Action::MoveDown, Action::MoveUp], "move"),
+        hint(&[Action::Invoke], "open"),
+        hint(&[Action::OpenSearch], "search"),
+        hint(&[Action::OpenTypeFilter], "types"),
+        hint(&[Action::TabNext], "view"),
+        hint(&[Action::SameHost], "same-host"),
+        hint(&[Action::Refresh], "refresh"),
+        hint(&[Action::DetailsDown, Action::DetailsUp], "scroll"),
+        hint(&[Action::OpenHelp], "help"),
+        // Whichever quit survives customization is the one worth showing, and
+        // validation guarantees one of them does.
+        keys.compact(Action::BrowseQuit)
+            .or_else(|| keys.compact(Action::Quit))
+            .map(|shown| (shown, "quit")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let hints = footer_hints(app, app.mode);
 
     let mut spans = vec![Span::raw(" ")];
-    for (key, label) in hints {
+    for (key, label) in &hints {
         spans.push(Span::styled(
             format!(" {key} "),
             Style::default()
@@ -909,6 +955,31 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 // ── modals ───────────────────────────────────────────────────────────────
+/// A modal's bottom-border hint, spelled from the keys bound to each action.
+/// Unbound actions drop out rather than leaving a stale key on the border.
+fn modal_hint(app: &App, parts: &[(Action, &str)]) -> String {
+    parts
+        .iter()
+        .filter_map(|(action, verb)| {
+            app.keybindings
+                .compact(*action)
+                .map(|key| format!("{key} {verb}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The hint shared by the action, instance, and service pickers.
+fn picker_hint(app: &App) -> String {
+    modal_hint(
+        app,
+        &[
+            (Action::PickerSelect, "runs"),
+            (Action::PickerClose, "closes"),
+        ],
+    )
+}
+
 fn render_type_filter(frame: &mut Frame<'_>, app: &App) {
     let service_types = &app.service_types;
     let items: Vec<ListItem> = if service_types.is_empty() {
@@ -939,7 +1010,13 @@ fn render_type_filter(frame: &mut Frame<'_>, app: &App) {
     render_popup(
         frame,
         " service types ",
-        "space toggles · esc closes",
+        &modal_hint(
+            app,
+            &[
+                (Action::TypeFilterToggle, "toggles"),
+                (Action::TypeFilterClose, "closes"),
+            ],
+        ),
         List::new(items),
         58,
         60,
@@ -980,7 +1057,7 @@ fn render_action_picker(frame: &mut Frame<'_>, app: &App) {
     render_popup(
         frame,
         " matching actions ",
-        "⏎ runs · esc closes",
+        &picker_hint(app),
         List::new(items),
         70,
         50,
@@ -1006,7 +1083,7 @@ fn render_instance_picker(frame: &mut Frame<'_>, app: &App) {
     render_popup(
         frame,
         " select instance ",
-        "⏎ runs · esc closes",
+        &picker_hint(app),
         List::new(items),
         72,
         55,
@@ -1036,33 +1113,57 @@ fn render_service_picker(frame: &mut Frame<'_>, app: &App) {
     render_popup(
         frame,
         &format!(" run {command_name} on "),
-        "⏎ runs · esc closes",
+        &picker_hint(app),
         List::new(items),
         72,
         55,
     );
 }
 
-fn render_help(frame: &mut Frame<'_>) {
-    let rows = [
-        ("j / ↓", "move selection down"),
-        ("k / ↑", "move selection up"),
-        ("d / ^d", "details down ½ page"),
-        ("u / ^u", "details up ½ page"),
-        ("enter", "run matching action(s)"),
-        ("/", "fuzzy text filter"),
-        ("t", "service-type checklist"),
-        ("⇥ / ←→", "switch view tab (services/hosts/types/commands)"),
-        ("s", "filter to selected host"),
-        ("r / F5", "refresh: restart service discovery"),
-        ("esc", "close modal / clear search"),
-        ("?", "toggle this help"),
-        ("q", "quit"),
-    ];
+/// The help overlay is the reference, so it lists every key bound to an action
+/// rather than the footer's compact spelling.
+fn help_rows(app: &App) -> Vec<(String, &'static str)> {
+    let keys = &app.keybindings;
+    let row = |actions: &[Action], label: &'static str| {
+        keys.describe_group(actions).map(|shown| (shown, label))
+    };
+    [
+        row(&[Action::MoveDown], "move selection down"),
+        row(&[Action::MoveUp], "move selection up"),
+        row(&[Action::DetailsDown], "details down ½ page"),
+        row(&[Action::DetailsUp], "details up ½ page"),
+        row(&[Action::Invoke], "run matching action(s)"),
+        row(&[Action::OpenSearch], "fuzzy text filter"),
+        // Leaving search keeps the query; only `clear` removes it.
+        row(&[Action::SearchClose], "leave search, keep filter"),
+        row(&[Action::SearchClear], "clear the search filter"),
+        row(&[Action::OpenTypeFilter], "service-type checklist"),
+        row(
+            &[Action::TabNext, Action::TabPrev],
+            "switch view tab (services/hosts/types/commands)",
+        ),
+        row(&[Action::SameHost], "filter to selected host"),
+        row(&[Action::Refresh], "refresh: restart service discovery"),
+        row(&[Action::PickerClose], "close a modal"),
+        row(&[Action::OpenHelp], "toggle this help"),
+        row(&[Action::BrowseQuit, Action::Quit], "quit"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn render_help(frame: &mut Frame<'_>, app: &App) {
+    let rows = help_rows(app);
+    let width = rows
+        .iter()
+        .map(|(key, _)| Span::raw(key.as_str()).width())
+        .max()
+        .unwrap_or(0);
     let mut lines = vec![Line::from("")];
-    for (key, label) in rows {
+    for (key, label) in &rows {
         let key = display::text(key);
-        let padding = 8usize.saturating_sub(Span::raw(key.as_str()).width());
+        let padding = (width + 2).saturating_sub(Span::raw(key.as_str()).width());
         lines.push(Line::from(vec![
             Span::styled(
                 format!("   {key}{}", " ".repeat(padding)),
@@ -1076,13 +1177,15 @@ fn render_help(frame: &mut Frame<'_>) {
         "   badges:  ×N occurrences   ★N matching commands",
         Style::default().fg(FG_DIM),
     )));
+    // Wider and taller than a picker: the key column now lists every alias of
+    // every action, so the rows are longer than the old hard-coded ones.
     render_popup(
         frame,
         " help ",
-        "esc closes",
+        &modal_hint(app, &[(Action::HelpClose, "closes")]),
         Paragraph::new(lines).alignment(Alignment::Left),
-        58,
-        70,
+        72,
+        80,
     );
 }
 
@@ -1386,6 +1489,7 @@ mod tests {
     use crate::{
         discovery::{BrowseMode, DiscoveryBackend, DiscoverySession, OccurrenceId, browse_groups},
         plumber::{ActionMode, CommandAction, CommandConfig, Matcher},
+        test_support::{remove, temp_file},
         ui::{
             app::App,
             cli::{Cli, CliCommand},
@@ -1824,5 +1928,182 @@ mod tests {
 
         assert_eq!(buffer.area.width, 1);
         assert_eq!(buffer.area.height, 4);
+    }
+
+    // ── keybinding hints ───────────────────────────────────────────────────
+    /// Build an app whose bindings come from a keybindings file, so the hints
+    /// under test are produced the same way a user's customization produces
+    /// them.
+    fn app_with_bindings(toml: &str) -> App {
+        let path = temp_file("render-bindings", toml);
+        let bindings = KeyBindings::load(std::slice::from_ref(&path)).unwrap();
+        remove(&path);
+        let mut app = test_app("local");
+        app.keybindings = bindings;
+        app
+    }
+
+    #[test]
+    fn the_footer_shows_the_default_browse_bindings() {
+        let app = test_app("local");
+
+        let text = buffer_text(&render_buffer(&app, 160, 24));
+
+        assert!(text.contains("↓/↑  move"), "{text}");
+        assert!(text.contains("⏎  open"), "{text}");
+        assert!(text.contains("/  search"), "{text}");
+        assert!(text.contains("?  help"), "{text}");
+        assert!(text.contains("q  quit"), "{text}");
+    }
+
+    /// The whole point of the task: after rebinding, the footer must instruct
+    /// the user to press the keys that actually work.
+    #[test]
+    fn rebound_browse_keys_change_the_footer_hints() {
+        let app = app_with_bindings(
+            r#"
+[browse]
+down = ["ctrl-n"]
+up = ["ctrl-p"]
+invoke = ["space"]
+help = ["f1"]
+search = ["f"]
+"#,
+        );
+
+        let text = buffer_text(&render_buffer(&app, 160, 24));
+
+        assert!(text.contains("^n/^p  move"), "{text}");
+        assert!(text.contains("space  open"), "{text}");
+        assert!(text.contains("F1  help"), "{text}");
+        assert!(text.contains("f  search"), "{text}");
+        // The defaults they replaced are gone from the footer.
+        assert!(!text.contains("↓/↑  move"), "{text}");
+        assert!(!text.contains("⏎  open"), "{text}");
+        assert!(!text.contains("?  help"), "{text}");
+    }
+
+    /// An unbound action has no key to advertise, so its hint must disappear
+    /// rather than name a key that does nothing.
+    #[test]
+    fn an_unbound_action_has_no_footer_hint() {
+        let app = app_with_bindings(
+            r#"
+[browse]
+same_host = []
+refresh = []
+"#,
+        );
+
+        let text = buffer_text(&render_buffer(&app, 160, 24));
+
+        assert!(!text.contains("same-host"), "{text}");
+        assert!(!text.contains("refresh"), "{text}");
+        assert!(text.contains("↓/↑  move"), "{text}");
+    }
+
+    /// Quit is guaranteed reachable, so the footer always has a quit hint —
+    /// even when the browse quit key is the one that was unbound.
+    #[test]
+    fn the_footer_falls_back_to_the_common_quit_hint() {
+        let app = app_with_bindings(
+            r#"
+[browse]
+quit = []
+"#,
+        );
+
+        let text = buffer_text(&render_buffer(&app, 160, 24));
+
+        assert!(text.contains("^c  quit"), "{text}");
+    }
+
+    #[test]
+    fn the_search_placeholder_names_the_configured_search_key() {
+        let app = app_with_bindings(
+            r#"
+[browse]
+search = ["f"]
+"#,
+        );
+
+        let text = buffer_text(&render_buffer(&app, 160, 24));
+
+        assert!(text.contains("press f to search"), "{text}");
+    }
+
+    #[test]
+    fn rebound_modal_keys_change_the_popup_hints() {
+        let mut app = app_with_bindings(
+            r#"
+[picker]
+select = ["space"]
+close = ["ctrl-g"]
+"#,
+        );
+        app.mode = AppMode::ActionPicker;
+
+        let text = buffer_text(&render_buffer(&app, 160, 24));
+
+        assert!(text.contains("space runs · ^g closes"), "{text}");
+    }
+
+    #[test]
+    fn the_help_overlay_lists_every_key_bound_to_an_action() {
+        let mut app = test_app("local");
+        app.mode = AppMode::Help;
+
+        let text = buffer_text(&render_buffer(&app, 160, 40));
+
+        // Help is the reference: it keeps every alias, not just the first.
+        assert!(text.contains("↓ / j"), "{text}");
+        assert!(text.contains("r / F5"), "{text}");
+        assert!(text.contains("d / pgdn / ^d"), "{text}");
+        assert!(text.contains("q / ^c"), "{text}");
+    }
+
+    #[test]
+    fn rebound_keys_change_the_help_overlay() {
+        let mut app = app_with_bindings(
+            r#"
+[browse]
+down = ["ctrl-n", "f9"]
+help = ["f1"]
+"#,
+        );
+        app.mode = AppMode::Help;
+
+        let text = buffer_text(&render_buffer(&app, 160, 40));
+
+        assert!(text.contains("^n / F9"), "{text}");
+        assert!(text.contains("F1"), "{text}");
+        assert!(!text.contains("↓ / j"), "{text}");
+    }
+
+    /// Help used to claim Escape clears the search. It does not: leaving search
+    /// keeps the query, and only the clear action removes it. The help text has
+    /// to say what the code does.
+    #[test]
+    fn the_help_overlay_does_not_claim_that_closing_search_clears_it() {
+        let mut app = test_app("local");
+        app.mode = AppMode::Help;
+
+        let text = buffer_text(&render_buffer(&app, 160, 40));
+
+        assert!(!text.contains("clear search"), "{text}");
+        assert!(text.contains("leave search, keep filter"), "{text}");
+        assert!(text.contains("clear the search filter"), "{text}");
+    }
+
+    /// Every hint the footer offers must name a key the keymap resolves back to
+    /// the action the hint describes.
+    #[test]
+    fn every_browse_footer_hint_names_a_key_that_still_works() {
+        let app = test_app("local");
+
+        for (key, label) in browse_footer_hints(&app) {
+            assert!(!key.is_empty(), "`{label}` hint has no key");
+        }
+        assert_eq!(footer_hints(&app, AppMode::Help).len(), 1);
     }
 }
