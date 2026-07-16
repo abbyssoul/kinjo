@@ -162,7 +162,11 @@ CI runs a short soak on every push/PR and a longer one on a weekly schedule
   `DiscoverySession` that owns the running adapter (mDNS plus the feature-gated
   fake backend).
 - `src/plumber/`: the rules engine — command-file parsing, matching, and
-  execution behind the `RuleEngine` trait.
+  execution. `Matcher` is the engine kinjo ships; the public `RuleEngine` trait
+  is the one seam a dependent crate can substitute, per
+  [ADR 0001](docs/adr/0001-rule-engine-is-a-supported-extension-point.md). If you
+  change that trait, you are changing published API — `tests/rule_engine_extension.rs`
+  implements it the way an outside crate would and will tell you.
 - `src/ui/`: CLI parsing, config/keymap loading, app state, and rendering.
 - `src/lib.rs` / `src/main.rs`: the library composition root and its thin binary.
 - `fuzz/`: `cargo-fuzz` targets; `scripts/fuzz.sh`: the fuzz runner.
@@ -171,6 +175,8 @@ CI runs a short soak on every push/PR and a longer one on a weekly schedule
   the Debian package.
 - `docs/actions.md`: custom command file reference.
 - `docs/keybindings.md`: keybinding configuration reference.
+- `docs/adr/`: architectural decisions and the reasoning behind them. Read the
+  relevant one before reversing a design choice that looks arbitrary.
 - `.github/workflows/`: CI, fuzzing, and release packaging workflows.
 
 ## Contribution Guidelines

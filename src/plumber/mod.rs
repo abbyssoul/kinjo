@@ -372,16 +372,66 @@ fn is_address_field(field: &str) -> bool {
     field == "address"
 }
 
-/// Engine that matches discovered entry groups against the loaded rules. The
-/// default implementation is [`Matcher`]; an alternative engine can be swapped
-/// in behind this trait without touching the discovery or UI layers.
+/// A strategy for deciding which command rules apply to a discovered row.
+///
+/// This is a supported extension point, not an internal convenience: kinjo
+/// publishes `plumber`, and [`crate::ui::App::new`] accepts any engine, so a
+/// crate depending on kinjo can substitute its own matching strategy from its
+/// own composition root. See
+/// `docs/adr/0001-rule-engine-is-a-supported-extension-point.md`.
+///
+/// [`Matcher`] is the engine kinjo ships, not the only one this interface
+/// admits. Nothing here may assume an implementor stores its rules the way
+/// `Matcher` does — in particular an engine is free to keep them in a map, to
+/// derive them, or to hold no `CommandConfig` values at all until asked.
+///
+/// # Implementor's contract
+///
+/// - **Agreement.** Every [`MatchResult::command`] returned by
+///   [`Self::matches_group`] must be one [`Self::commands`] also reports, and
+///   the two must agree on `name`. The UI joins the two by name to build its
+///   command view; a match naming a rule the engine will not list is dropped
+///   from that view without complaint.
+/// - **Names are identity.** Rule names must be unique within an engine. The UI
+///   uses the name to track a selected rule across recomputes, so duplicates
+///   make selection follow whichever rule is found first.
+/// - **Purity.** Both methods are called during a redraw and must not block, run
+///   a command, or depend on wall-clock time. Matching is a decision about the
+///   row it is given; running is [`CommandConfig::run`].
+/// - **Order.** [`Self::commands`] must return a stable order across calls that
+///   report the same rules, since it is the order the user sees. Rules that
+///   change between calls are fine — that is what a config reload is.
+/// - **Targets.** Each returned `MatchResult` must carry at least one target;
+///   an empty match means "no match" and should be omitted. Targets that
+///   would prepare identical commands should already have collapsed, because
+///   [`MatchResult::needs_selection`] decides from their count whether to ask
+///   the user to choose.
 pub trait RuleEngine {
-    /// Rules that match at least one entry in `group`.
+    /// The rules applying to `group`, each with the distinct targets that
+    /// running it would choose between.
+    ///
+    /// Returns empty when no rule applies. Called once per recompute for every
+    /// visible row, so an engine that matches expensively should say so.
     fn matches_group(&self, group: &EntryGroup) -> Vec<MatchResult>;
-    /// All loaded rules, in load order.
-    fn commands(&self) -> &[CommandConfig];
-    /// Number of loaded rules.
-    fn command_count(&self) -> usize;
+
+    /// Every rule this engine can offer, in the order the user should see them.
+    ///
+    /// Returns owned rules rather than a borrowed slice deliberately: a slice
+    /// would oblige every engine to keep its rules contiguously in a
+    /// `Vec<CommandConfig>`, which is `Matcher`'s storage decision and no one
+    /// else's. The caller consumes what it gets, so an engine that already owns
+    /// a `Vec` pays one clone and an engine that derives its rules pays nothing
+    /// it would not have paid anyway.
+    fn commands(&self) -> Vec<CommandConfig>;
+
+    /// How many rules [`Self::commands`] would report.
+    ///
+    /// Provided, so a minimal engine implements two methods rather than three.
+    /// The default materialises every rule to count it; override when the count
+    /// is cheaper than that, as it is for anything holding a collection.
+    fn command_count(&self) -> usize {
+        self.commands().len()
+    }
 }
 
 impl RuleEngine for Matcher {
@@ -389,10 +439,12 @@ impl RuleEngine for Matcher {
         Matcher::matches_group(self, group)
     }
 
-    fn commands(&self) -> &[CommandConfig] {
-        Matcher::commands(self)
+    fn commands(&self) -> Vec<CommandConfig> {
+        self.commands.clone()
     }
 
+    /// Overridden: the rules are already a `Vec`, so counting them need not
+    /// clone them.
     fn command_count(&self) -> usize {
         Matcher::command_count(self)
     }

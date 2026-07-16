@@ -2,13 +2,33 @@
 //!
 //! - [`discovery`] produces *entries* (mDNS today), handing the caller a
 //!   [`discovery::DiscoverySession`] that owns the running adapter,
-//! - [`plumber`] is the rules engine that matches entries and runs commands
-//!   (behind the [`plumber::RuleEngine`] trait),
+//! - [`plumber`] is the rules engine that matches entries and runs commands,
 //! - [`ui`] ties them together for a person at the terminal.
 //!
 //! [`run`] is the composition root that wires the parts together; the `kinjo`
 //! binary is a thin wrapper around it. Exposing these modules as a library also
 //! lets the `fuzz/` targets exercise the discovery and parser code directly.
+//!
+//! # Extending kinjo
+//!
+//! There is exactly one seam a dependent crate can substitute:
+//! [`plumber::RuleEngine`], which decides how entries are matched to commands.
+//! [`plumber::Matcher`] is the engine kinjo ships; [`ui::App::new`] accepts any
+//! implementor. See
+//! `docs/adr/0001-rule-engine-is-a-supported-extension-point.md`.
+//!
+//! Reaching it means writing your own composition root. [`run`] is the concrete
+//! default path — it loads a [`plumber::Matcher`] from command files and uses it
+//! directly, so it is not generic over the engine. To substitute one, do what
+//! `run` does: construct a [`ui::App`] with your engine, attach a config loader
+//! and discovery factory, and run it against a terminal.
+//!
+//! Discovery is deliberately *not* such a seam. Its adapters differ in how they
+//! browse but not in how a caller runs and stops them, so the seam sits inside
+//! [`discovery`] at the browse loop, behind one concrete
+//! [`discovery::DiscoverySession`] and a closed [`discovery::DiscoveryBackend`]
+//! enum. Adding a backend is a change to this crate, not something a dependent
+//! can do from outside.
 
 pub mod discovery;
 pub mod plumber;

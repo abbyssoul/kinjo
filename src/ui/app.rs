@@ -623,9 +623,9 @@ impl App {
         let mut command_groups: Vec<CommandGroup> = self
             .matcher
             .commands()
-            .iter()
+            .into_iter()
             .map(|command| CommandGroup {
-                command: command.clone(),
+                command,
                 services: Vec::new(),
             })
             .collect();

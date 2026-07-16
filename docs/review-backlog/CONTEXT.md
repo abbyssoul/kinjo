@@ -70,8 +70,20 @@ Use these terms consistently in design notes and completion records:
 
 Apply the deletion test to proposed abstractions: if deleting a module makes its
 complexity vanish, it was shallow. A seam with one adapter is hypothetical; a
-seam with two adapters is real. The discovery backend seam is real. The current
-`RuleEngine` seam has only `Matcher` and is intentionally reviewed in task 015.
+seam with two adapters is real. The discovery backend seam is real.
+
+That rule governs *internal* abstractions, where every caller is in this
+repository and the adapter count is therefore complete evidence. It does not
+settle the fate of a published crate's public API, where the second adapter may
+live in a repository we cannot see. Kinjo publishes `discovery`, `plumber`, and
+`ui` from `src/lib.rs`, so a public trait can have users the tree cannot show.
+
+`plumber::RuleEngine` is decided, not open: it is a **supported extension point**
+and is not to be deleted. See
+[ADR 0001](../adr/0001-rule-engine-is-a-supported-extension-point.md) for the
+reasoning and for the obligations that "supported" carries. Task 022 makes the
+seam implementable from outside `Matcher`. Do not reopen the question inside an
+implementation task; bring new evidence to a superseding ADR instead.
 
 ## Trust and Safety Model
 
@@ -190,6 +202,13 @@ fixed; task 017 closed that gap, and this is how to avoid reopening it.
 - [`docs/keybindings.md`](../keybindings.md): keybinding interface.
 - [`CONTRIBUTING.md`](../../CONTRIBUTING.md): development and validation workflow.
 
-No project ADRs existed when this backlog was created. Decisions above capture
-the agreed defaults for these tasks; enduring decisions discovered during
-implementation should be recorded explicitly rather than left only in code.
+- [`docs/adr/`](../adr/): enduring architectural decisions. An ADR outranks the
+  defaults in this document where the two disagree.
+
+No project ADRs existed when this backlog was created; the decisions above
+capture the agreed defaults for these tasks. Enduring decisions discovered
+during implementation should be recorded as an ADR rather than left only in
+code. Recorded so far:
+
+- [ADR 0001](../adr/0001-rule-engine-is-a-supported-extension-point.md): keep
+  `plumber::RuleEngine` as a supported extension point (2026-07-17).

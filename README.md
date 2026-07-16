@@ -308,9 +308,9 @@ reused independently:
    caller cannot hold a receiver whose producer has silently died, and dropping
    it stops the browse. Adapters vary behind that session — the mDNS/Avahi
    backend is the default, with a feature-gated built-in sample backend selected
-   by `--backend fake`
-   — and you could drop in a different DNS-SD source, a static file, or an
-   SSDP/UPnP browser without touching anything else. Discovery options are
+   by `--backend fake` — so a different DNS-SD source, a static file, or an
+   SSDP/UPnP browser slots in beside them without disturbing anything above
+   (see [Extending it](#extending-it) for where that seam is). Discovery options are
    checked once at that seam: a `DiscoveryConfig` is a request, and validating
    it yields the `DiscoveryOptions` that starting an adapter requires. A
    malformed service type, or a domain the selected backend cannot honour, is
@@ -319,7 +319,7 @@ reused independently:
 2. **Plumber** (`src/plumber/`) — the rules engine. A serializable collection of
    command rules (the TOML command files) is matched against entries by their
    attributes; multiple rules can match one entry, and a matching rule can be
-   executed. It depends only on `Entry`, never on the UI, and sits behind a
+   executed. It depends only on `Entry`, never on the UI, and sits behind the
    `RuleEngine` trait so an alternative matching strategy can be substituted.
 3. **UI** (`src/ui/`) — ties discovery and the rules engine together for a person
    at the terminal: CLI parsing, config and keymap loading, the application
@@ -327,9 +327,29 @@ reused independently:
    on it.
 
 The dependency flow is one-directional — `discovery ← plumber ← ui` — wired
-together in `main.rs`. The two trait seams (`Discovery` and `RuleEngine`) are the
-intended extension points: implement a trait, swap it in at the composition root,
-and experiment. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
+together by `run` in `src/lib.rs`, which the `kinjo` binary is a thin wrapper
+around.
+
+### Extending it
+
+The two layers are extensible in deliberately different ways, and the difference
+is the interesting part:
+
+- **A rule engine is substitutable from outside.** `RuleEngine` is public, and
+  `App::new` accepts any implementor, so a crate depending on `kinjo` can bring
+  its own matching strategy. `Matcher` is the engine kinjo ships, not the only
+  one the interface admits. Doing so means writing your own composition root:
+  `run` loads a `Matcher` and uses it concretely, so it is not generic over the
+  engine — do what `run` does, with your engine in its place. See
+  [ADR 0001](docs/adr/0001-rule-engine-is-a-supported-extension-point.md).
+- **A discovery backend is not.** Adapters vary *inside* `src/discovery/`, at
+  the browse loop, behind one concrete `DiscoverySession` and a closed
+  `DiscoveryBackend` enum. They differ in how they browse but not in how a
+  caller runs and stops them, so there is no trait to implement: a new source —
+  a static file, an SSDP/UPnP browser — is a module and an enum variant in this
+  crate, not something a dependent adds from outside.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
 
 ## UI
 

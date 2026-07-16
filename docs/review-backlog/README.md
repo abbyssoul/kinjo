@@ -47,13 +47,14 @@ Status values:
 | 012 | P0 | done | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014, 020 |
 | 013 | P1 | done | [Keybindings and search consistency](tasks/013-keybindings-and-search-consistency.md) | — | 011, 012, 014 |
 | 014 | P2 | done | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015, 021 |
-| 015 | P2 | ready | [App and RuleEngine refactoring](tasks/015-app-and-rule-engine-refactoring.md) | 001–014, 016–021 | all prior tasks; run last |
+| 015 | P2 | ready | [App encapsulation](tasks/015-app-encapsulation.md) | 001–014, 016–021 | all prior tasks; run last |
 | 016 | P0 | done | [Remove implicit fake fallback](tasks/016-remove-implicit-fake-fallback.md) | — | 002 |
 | 017 | P2 | done | [Fake backend heterogeneous SSH row](tasks/017-fake-backend-heterogeneous-ssh-row.md) | 006 | — |
 | 018 | P2 | done | [TUI smoke test in CI](tasks/018-tui-smoke-test-in-ci.md) | 017, 019 | 015 |
 | 019 | P2 | done | [Fake as a selectable backend](tasks/019-fake-as-a-selectable-backend.md) | 017 | — |
 | 020 | P0 | done | [Safe process-owned terminal output](tasks/020-safe-process-terminal-output.md) | 012 | 007, 009, 015 |
 | 021 | P2 | done | [Session-aware activity indicator](tasks/021-session-aware-activity-indicator.md) | 002, 010, 014 | 014, 015 |
+| 022 | P2 | done | [Make the `RuleEngine` seam implementable](tasks/022-rule-engine-seam.md) | — | 015 |
 
 Priority meanings:
 
@@ -87,6 +88,7 @@ Terminal:      012 → 020
                 overlap)
 
 Final depth:   all tasks 001–014, 016–021 → 015
+Rule seam:     022 (independent; ADR 0001 replaced 015's deletion half)
 ```
 
 Tasks in separate workstreams may run concurrently when the task metadata does
@@ -126,26 +128,65 @@ than hidden in completion notes:
 
 ## Current Validation
 
-Re-validated on 2026-07-17 at the head of `main` with tasks 014 and 021 done:
+Re-validated on 2026-07-17 at the head of `main` with tasks 014, 021, and 022
+done:
 
 ```text
 cargo fmt -- --check                                      pass
 cargo clippy --locked --all-targets --all-features -- -D warnings
                                                             pass
-cargo test --locked --all-targets                           409 passed
-cargo test --locked --all-targets --all-features            435 passed
+cargo test --locked --all-targets            410 lib + 6 integration
+cargo test --locked --all-targets --all-features
+                                             436 lib + 7 integration
 cargo +nightly fuzz build                                   5 targets built
 ```
 
-Up from 320/335 at the midpoint, with no test removed or weakened. The real TUI
+Task 022 added the integration tests; the library counts are unchanged by it.
+The `409`/`435` recorded above were off by one — the actual figures before task
+022 were 410 and 436, confirmed by stashing its source change and re-running.
+No test has been removed or weakened.
+
+Up from 320/335 at the midpoint. The real TUI
 driver passed at 100×30, 100×14, 60×18, and 20×8, on both `--backend fake` (a
 finite stream settling to a still `✓`) and `--backend mdns-sd` (a live browse
 animating). No regression in a completed task was found.
 
-Tasks 014 and 021 are now done. **Task 015 is the only task left**, and every
-dependency it named is complete.
+Tasks 014 and 021 are now done, and every dependency task 015 named is complete.
 
-Two things it should inherit rather than revisit:
+## Task 015 Rescoped (2026-07-17)
+
+Task 015 originally bundled two changes: App encapsulation, and deleting
+`RuleEngine` as a hypothetical seam. The project owner reviewed the second half
+and **decided to keep the seam** as a supported extension point, on the grounds
+that kinjo publishes `plumber` as public API — so its adapter count in this tree
+is not evidence about its users. The reasoning and the obligations that decision
+carries are in
+[ADR 0001](../adr/0001-rule-engine-is-a-supported-extension-point.md).
+
+The backlog now reflects that:
+
+- **015** keeps the App encapsulation work, which never depended on the seam
+  question, and is the larger half. It is unchanged in substance, and is now the
+  only task left.
+- **022** is new and **done**: the retained seam had to be *implementable* by
+  someone who is not `Matcher`, which the forwarding trait was not. Deletion
+  would have discarded that work; keeping the seam created it.
+
+Implementing 022 turned up an error in ADR 0001 and its source. The ADR argued
+that `RuleEngine` mirrored a `Discovery` trait seam, echoing `README.md`'s claim
+of "two trait seams". **There is no `Discovery` trait.** Discovery dispatches on
+a closed enum and deliberately keeps its adapter seam *inside* the module; it
+has three adapters and no public trait, while `RuleEngine` has one adapter and
+is a public trait. Those are opposite decisions. The ADR now records the bad
+argument alongside the real reason the seam is kept, and the README claim is
+fixed. Nothing here reopens the decision — but a future reader should know the
+analogy it was originally justified with does not hold.
+
+`CONTEXT.md` previously stated the one-adapter deletion rule without qualifying
+it, and named 015 as the review that would settle `RuleEngine`. Both are now
+corrected there, so the question is not silently reopened by a future agent.
+
+Two things task 015 should inherit rather than revisit:
 
 - Task 014 removed the last of the renderer's write-back into `App`: no
   `Cell`-backed layout fields remain, and `src/ui/layout.rs` owns the browse
