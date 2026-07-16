@@ -12,8 +12,11 @@ rustPlatform.buildRustPackage {
     homepage = "https://github.com/abbyssoul/kinjo";
     license = lib.licenses.mit;
     mainProgram = "kinjo";
-    # The default mdns-sd backend is pure-Rust multicast (no C deps), so this
-    # would build on Darwin too; kept Linux-only because that's what's tested.
+    # The default mdns-sd backend is pure-Rust multicast (no C deps), and CI
+    # builds and tests the crate on macOS, which also ships as a Homebrew
+    # formula. The restriction is about this flake, not the crate: the Nix
+    # build has only ever been exercised on Linux. Extending it to Darwin is a
+    # follow-up.
     platforms = lib.platforms.linux;
     maintainers = [
       {
