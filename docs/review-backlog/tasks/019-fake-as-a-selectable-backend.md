@@ -7,8 +7,8 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 | Status | `ready` |
 | Priority | `P2` |
 | Workstream | Discovery / CLI |
-| Depends on | — |
-| Likely conflicts | 018 |
+| Depends on | 017 |
+| Likely conflicts | — |
 | Owner | Unclaimed |
 
 ## Why This Matters

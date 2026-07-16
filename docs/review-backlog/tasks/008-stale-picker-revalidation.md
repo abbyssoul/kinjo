@@ -73,12 +73,12 @@ model immediately before preparation/execution.
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] Removed targets cannot execute from Action, Instance, or Service pickers.
-- [ ] Changed hostname/address/TXT cannot execute using the stale value.
-- [ ] Unrelated events do not silently change the selected target.
-- [ ] Added/removed candidates reconcile deterministically.
-- [ ] Final execution always uses current records and current command rules.
-- [ ] Full validation passes.
+- [x] Removed targets cannot execute from Action, Instance, or Service pickers.
+- [x] Changed hostname/address/TXT cannot execute using the stale value.
+- [x] Unrelated events do not silently change the selected target.
+- [x] Added/removed candidates reconcile deterministically.
+- [x] Final execution always uses current records and current command rules.
+- [x] Full validation passes.
 
 ## Required Tests
 

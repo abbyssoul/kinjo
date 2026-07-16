@@ -8,7 +8,7 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 | Priority | `P1` |
 | Workstream | CLI / Configuration |
 | Depends on | — |
-| Likely conflicts | 003 |
+| Likely conflicts | 003, 020 |
 | Owner | Unclaimed |
 
 ## Why This Matters
@@ -33,6 +33,19 @@ Confirmed reproduction at review time:
 kinjo --config-dir actions list-commands           # printed only the header
 kinjo list-commands --config-dir actions           # listed five commands
 ```
+
+Reproduced again at midpoint validation on 2026-07-16 against the current
+branch:
+
+```sh
+cargo run --locked --quiet -- --config-dir actions list-commands
+# header only
+cargo run --locked --quiet -- list-commands --config-dir actions
+# five bundled rules
+```
+
+`src/ui/cli.rs:77-83` still reads only the subcommand context when
+`list-commands` is present, so the accepted root-position value is still lost.
 
 ## Required Outcome
 

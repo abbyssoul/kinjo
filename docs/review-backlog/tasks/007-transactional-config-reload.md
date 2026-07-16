@@ -4,11 +4,11 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `blocked` |
+| Status | `ready` |
 | Priority | `P1` |
 | Workstream | Command rules / UI |
 | Depends on | 005 |
-| Likely conflicts | 006, 015 |
+| Likely conflicts | 006, 015, 020 |
 | Owner | Unclaimed |
 
 ## Why This Matters
@@ -31,6 +31,18 @@ policy and preserve diagnostics.
 - `src/ui/app.rs:748-754`: only warning count is retained in status.
 - `src/lib.rs:53-68`: exit output contains startup warnings only; later reload
   diagnostics are unavailable.
+
+Midpoint validation on 2026-07-16 confirmed the task is still needed and is no
+longer dependency-blocked:
+
+- `src/ui/config.rs:10-24` still returns a leniently built matcher with warnings
+  for normal Run configuration.
+- `src/ui/app.rs:1067-1085` still installs the returned matcher even when the
+  same reload produced warnings, so a mixed valid/invalid overlay can replace a
+  complete working ruleset with a partial one.
+- `reload_reports_skipped_config_files` in `src/ui/app.rs` currently encodes the
+  partial-swap behavior. Replace that expectation with the transactional policy;
+  do not mistake the existing test for proof the defect is fixed.
 
 ## Required Outcome
 

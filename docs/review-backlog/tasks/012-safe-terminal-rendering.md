@@ -8,7 +8,7 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 | Priority | `P0` |
 | Workstream | UI / Safety |
 | Depends on | — |
-| Likely conflicts | 010, 011, 013, 014 |
+| Likely conflicts | 010, 011, 013, 014, 020 |
 | Owner | Codex (`main`) |
 
 ## Why This Matters
@@ -125,4 +125,6 @@ cargo test --locked --all-targets --all-features
   `cargo clippy --locked --all-targets --all-features -- -D warnings`,
   `cargo test --locked --all-targets` (184 passed), and
   `cargo test --locked --all-targets --all-features` (189 passed).
-- **Follow-ups:** None.
+- **Follow-ups:** Task 020 extends the display boundary to process-owned
+  stdout/stderr and post-TUI error reporting. This task remains complete for the
+  Ratatui rendering surface it implemented and validated.

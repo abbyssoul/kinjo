@@ -230,9 +230,9 @@ cargo test --locked --all-targets --all-features
     exact event sequences and endings; CONTEXT permits private internal seams.
     If a real second production producer ever appears, revisit whether they
     should merge with it.
-  - The top-bar spinner (`render.rs`) still animates unconditionally. Harmless
-    (it is not a "listening" claim, and the list body now tells the truth), but a
-    mode-aware top bar belongs with task 010 rather than here.
+  - The top-bar spinner (`render.rs`) still animates unconditionally after the
+    session completes or fails. Task 021 now owns making that activity indicator
+    reflect `SessionState`; task 002 remains complete.
   - `FailureKind::Startup` is only reachable from a worker-backed session, since
     it is the producer's own account of its ending. A detached session ends as
     `Stopped`, which is the honest answer for a producer that cannot explain

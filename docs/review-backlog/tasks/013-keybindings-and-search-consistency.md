@@ -196,10 +196,10 @@ cargo test --locked --all-targets --all-features
     was widened to 72% and heightened to 80% to accommodate complete labels.
 - **Follow-ups:**
   - The help overlay is a fixed-percentage popup, so its content still clips on
-    terminals shorter than roughly 24 rows. Task 011 (scrollable pickers) covers
-    the adjacent "selection visible at every supported size" invariant; extending
-    it, or a successor, to the help overlay would close this. Not in this task's
-    scope and not a regression — the previous hard-coded help clipped sooner.
+    terminals shorter than roughly 24 rows. Task 011 now explicitly owns a
+    scrollable/windowed help viewport alongside picker visibility. This remains a
+    follow-up rather than reopening task 013; the typed keybinding and generated
+    hint work completed here remains valid.
   - `delete` is not a bindable key *name* even though `backspace` is: Delete is
     handled by the search editor only. Worth a small task if users want to bind
     it, and it would need a `KeySpec` label for `KeyCode::Delete`.

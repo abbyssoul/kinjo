@@ -8,7 +8,7 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 | Priority | `P2` |
 | Workstream | UI / Architecture |
 | Depends on | 010 |
-| Likely conflicts | 008, 011, 012, 013, 015 |
+| Likely conflicts | 008, 011, 012, 013, 015, 021 |
 | Owner | Unclaimed |
 
 ## Why This Matters
@@ -35,6 +35,13 @@ pure layout snapshot for render and hit testing.
 - `src/ui/app.rs:97-107`: layout feedback is represented as several independent
   fields rather than one coherent snapshot.
 
+Midpoint validation on 2026-07-16 confirmed that render still writes temporal
+state back into `App`: `src/ui/app.rs` retains `Cell`-backed
+`details_max_scroll`, `list_area`, and `details_area` fields, and
+`src/ui/render.rs` still sets the detail limit during drawing. The passing suite
+therefore does not invalidate this task; it lacks a regression that breaks the
+render-before-input ordering dependency.
+
 ## Required Outcome
 
 - Selection is tracked by structured row identity. Whenever recomputation changes
@@ -51,6 +58,9 @@ pure layout snapshot for render and hit testing.
 - Mouse hit testing, list viewport, details viewport/max scroll, and rendering use
   the same snapshot/calculations.
 - Resize and zero-size panes produce a new safe snapshot before subsequent input.
+- The immutable render view/layout interface exposes the current discovery
+  `SessionState` needed by task 021; that task must not reach back into the full
+  mutable `App` merely to render the activity indicator.
 
 ## Implementation Constraints
 

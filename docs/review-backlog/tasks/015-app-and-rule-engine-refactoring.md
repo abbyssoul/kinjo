@@ -7,8 +7,8 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 | Status | `blocked` |
 | Priority | `P2` |
 | Workstream | Architecture |
-| Depends on | All tasks 001–014, 016 |
-| Likely conflicts | All architectural work; run last |
+| Depends on | 001–014, 016–021 |
+| Likely conflicts | all prior tasks; run last |
 | Owner | Unclaimed |
 
 ## Why This Matters
@@ -64,7 +64,7 @@ Finish the deepening begun by earlier tasks without changing observable behavior
 - Remove parallel-array invariants such as `visible_groups` plus `group_matches` or
   make their consistency private and construction-atomic.
 - Update crate/README architecture documentation to describe actual supported seams.
-- Preserve all behavior/regressions from tasks 001–014.
+- Preserve all behavior/regressions from tasks 001–014 and 016–021.
 
 ## Implementation Constraints
 
@@ -108,7 +108,7 @@ Finish the deepening begun by earlier tasks without changing observable behavior
 - [ ] Render consumes immutable view/layout data, not the entire mutable App state.
 - [ ] Parallel representation consistency is construction-atomic or eliminated.
 - [ ] README/crate docs describe the actual discovery and rule-set interfaces.
-- [ ] No behavior regression in all tasks 001–014.
+- [ ] No behavior regression in all tasks 001–014 and 016–021.
 - [ ] Full validation and relevant fuzz smoke targets pass.
 
 ## Required Tests

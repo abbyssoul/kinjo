@@ -4,11 +4,11 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `ready` |
+| Status | `blocked` |
 | Priority | `P2` |
 | Workstream | UI / CI |
-| Depends on | — |
-| Likely conflicts | 019 |
+| Depends on | 017, 019 |
+| Likely conflicts | 015 |
 | Owner | Unclaimed |
 
 ## Why This Matters
@@ -37,6 +37,12 @@ draws, responds to a key, and exits cleanly — that no current job provides.
   the sample-set affordance that makes their behavior reachable at all.
 - `docs/review-backlog/CONTEXT.md`, *Baseline and Validation*: driving the real
   app is now expected of UI-affecting tasks. CI does not enforce it.
+
+Midpoint validation on 2026-07-16 successfully drove the committed helper at
+100×30 and 60×18, including opening the heterogeneous SSH picker added by task
+017. The local seam is healthy; CI still never invokes it. Task 019 now precedes
+this task so the smoke job is written once against the final `--backend fake`
+interface instead of immediately rewriting a `--fake-discovery` invocation.
 
 ## Required Outcome
 

@@ -39,19 +39,21 @@ Status values:
 | 004 | P0 | done | [Address-predicate correctness](tasks/004-address-predicate-correctness.md) | — | 005, 006 |
 | 005 | P1 | done | [Compiled command rules](tasks/005-compiled-command-rules.md) | 004 | 006, 007, 015 |
 | 006 | P0 | done | [Grouped action targeting](tasks/006-grouped-action-targeting.md) | 005 | 007, 008, 010 |
-| 007 | P1 | ready | [Transactional config reload](tasks/007-transactional-config-reload.md) | 005 | 006, 015 |
+| 007 | P1 | ready | [Transactional config reload](tasks/007-transactional-config-reload.md) | 005 | 006, 015, 020 |
 | 008 | P0 | done | [Stale picker revalidation](tasks/008-stale-picker-revalidation.md) | 001, 002, 006 | 010, 011, 014, 015 |
-| 009 | P1 | ready | [CLI config-directory handling](tasks/009-cli-config-directory-handling.md) | — | 003 |
+| 009 | P1 | ready | [CLI config-directory handling](tasks/009-cli-config-directory-handling.md) | — | 003, 020 |
 | 010 | P1 | done | [Mode-aware aggregate views](tasks/010-mode-aware-aggregate-views.md) | 001 | 006, 008, 011, 012, 013, 014, 015 |
-| 011 | P1 | ready | [Scrollable pickers](tasks/011-scrollable-pickers.md) | 008, 010 | 012, 013, 014, 015 |
-| 012 | P0 | done | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014 |
+| 011 | P1 | ready | [Scrollable modal content and pickers](tasks/011-scrollable-pickers.md) | 008, 010 | 012, 013, 014, 015 |
+| 012 | P0 | done | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014, 020 |
 | 013 | P1 | done | [Keybindings and search consistency](tasks/013-keybindings-and-search-consistency.md) | — | 011, 012, 014 |
-| 014 | P2 | ready | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015 |
-| 015 | P2 | blocked | [App and RuleEngine refactoring](tasks/015-app-and-rule-engine-refactoring.md) | 001–014, 016 | all prior tasks; run last |
+| 014 | P2 | ready | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015, 021 |
+| 015 | P2 | blocked | [App and RuleEngine refactoring](tasks/015-app-and-rule-engine-refactoring.md) | 001–014, 016–021 | all prior tasks; run last |
 | 016 | P0 | done | [Remove implicit fake fallback](tasks/016-remove-implicit-fake-fallback.md) | — | 002 |
 | 017 | P2 | done | [Fake backend heterogeneous SSH row](tasks/017-fake-backend-heterogeneous-ssh-row.md) | 006 | — |
-| 018 | P2 | ready | [TUI smoke test in CI](tasks/018-tui-smoke-test-in-ci.md) | — | 019 |
-| 019 | P2 | ready | [Fake as a selectable backend](tasks/019-fake-as-a-selectable-backend.md) | — | 018 |
+| 018 | P2 | blocked | [TUI smoke test in CI](tasks/018-tui-smoke-test-in-ci.md) | 017, 019 | 015 |
+| 019 | P2 | ready | [Fake as a selectable backend](tasks/019-fake-as-a-selectable-backend.md) | 017 | — |
+| 020 | P0 | ready | [Safe process-owned terminal output](tasks/020-safe-process-terminal-output.md) | 012 | 007, 009, 015 |
+| 021 | P2 | blocked | [Session-aware activity indicator](tasks/021-session-aware-activity-indicator.md) | 002, 010, 014 | 014, 015 |
 
 Priority meanings:
 
@@ -69,23 +71,57 @@ Command rules: 004 → 005 → 006 → 008
                          └──────→ 007
                             006 → 017 (makes 006 verifiable by hand)
 
-Verification:  017 → 018 (smoke-test the rendered UI in CI)
-               019 (fake becomes a --backend, feature-gated; moves 018's
-                    invocation, so serialize the two)
+Verification:  017 → 019 → 018
+               (preserve the heterogeneous fake sample, move it to
+                --backend fake, then smoke-test that final interface in CI)
 
 CLI:           009
 
 UI model:      001 → 010 → 014
               008 + 010 → 011
-              012
+              014 → 021
               013
 
-Final depth:   all tasks 001–014, 016 → 015
+Terminal:      012 → 020
+               (serialize 020 with 007 and 009 where composition/list output
+                overlap)
+
+Final depth:   all tasks 001–014, 016–021 → 015
 ```
 
 Tasks in separate workstreams may run concurrently when the task metadata does
 not list a likely conflict. A likely conflict is not a dependency; it means the
 agents should coordinate file ownership or serialize their merges.
+
+## Midpoint Validation Baseline
+
+The backlog was re-reviewed on 2026-07-16 at commit
+`638dc9097fa052b4629629ec0e7bbb63d2217a44`, before these backlog-only edits.
+Completed work remained green:
+
+```text
+cargo fmt -- --check                                      pass
+cargo clippy --locked --all-targets --all-features -- -D warnings
+                                                            pass
+cargo test --locked --all-targets                           320 passed
+cargo test --locked --all-targets --all-features            335 passed
+cargo +nightly fuzz build                                   5 targets built
+```
+
+The real TUI driver also passed at 100×30 and 60×18, including opening the
+correct heterogeneous SSH picker. No regression in a completed task was found.
+The review did identify remaining or newly exposed work, now recorded rather
+than hidden in completion notes:
+
+- tasks 007 and 009 still reproduce on the current branch and are ready;
+- task 011 now owns short-terminal help clipping as well as picker visibility;
+- task 020 follows task 012 for direct stdout/stderr and post-TUI error safety;
+- task 021 follows task 014 for the still-unconditional session spinner;
+- task 018 follows task 019 so CI targets the final fake-backend CLI;
+- stale fuzz warnings in tasks 003 and 005 are marked resolved.
+
+This normalization changed backlog documentation only; it did not implement any
+open task or alter source behavior.
 
 ## Completion Gate
 

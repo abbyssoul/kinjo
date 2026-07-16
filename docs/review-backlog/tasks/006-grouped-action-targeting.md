@@ -103,14 +103,14 @@ behavior runs the first hostname instead of opening a picker.
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] `{hostname}`, `{name}`, `{service_type}`, `{domain}`, `{port}`, `{address}`,
+- [x] `{hostname}`, `{name}`, `{service_type}`, `{domain}`, `{port}`, `{address}`,
       and `txt.*` differences cause selection when prepared argv differ.
-- [ ] Constant commands or candidates producing identical mode/argv run once
+- [x] Constant commands or candidates producing identical mode/argv run once
       without a picker.
-- [ ] No group path executes an arbitrary first child.
-- [ ] Picker labels identify the actual target sufficiently to choose safely.
-- [ ] `docs/actions.md` matches the generalized selection behavior.
-- [ ] Full validation passes.
+- [x] No group path executes an arbitrary first child.
+- [x] Picker labels identify the actual target sufficiently to choose safely.
+- [x] `docs/actions.md` matches the generalized selection behavior.
+- [x] Full validation passes.
 
 ## Required Tests
 

@@ -199,13 +199,10 @@ cargo test --locked --all-targets --all-features
     `--domain`: the `zeroconf` backend cannot browse the `corp` domain …";
     `kinjo --backend zeroconf --domain local. list-commands` → exit 0.
 - **Follow-ups:**
-  - **The `discovery_entry` fuzz target does not compile, on `main`, independent
-    of this task.** It imports `kinjo::discovery::group_entries`, which commit
-    `2ffb5b8` (task 010) renamed to `browse_groups` without updating the target;
-    `git show main:src/discovery/mod.rs | grep -c group_entries` → 0. Left alone
-    here rather than broadening this task's scope. The other four targets
-    (`decode_dns_sd`, `parse_command`, `prepare_command`, `command_roundtrip`)
-    build against this change. Worth a small new task, or folding into 015.
+  - **Resolved after completion:** commit `707b565` updated the
+    `discovery_entry` fuzz target from `group_entries` to `browse_groups` and the
+    current `GroupFacts` model. Midpoint validation on 2026-07-16 confirmed that
+    all five fuzz targets compile with `cargo +nightly fuzz build`.
   - The new service-type grammar is a parsing surface but is outside every
     existing fuzz target's oracle, so none was extended. `ServiceTypeFilter::parse`
     is total by construction (the only byte indexing is guarded by an is-empty

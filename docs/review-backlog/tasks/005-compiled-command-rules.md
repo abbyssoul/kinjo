@@ -7,7 +7,7 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 | Status | `done` |
 | Priority | `P1` |
 | Workstream | Command rules |
-| Depends on | 004 (`done`) |
+| Depends on | 004 |
 | Likely conflicts | 006, 007, 015 |
 | Owner | agent-af100d3ff63576edf (branch `worktree-agent-af100d3ff63576edf`) |
 
@@ -220,13 +220,10 @@ cargo test --locked --all-targets --all-features
     Deleting the trait makes that complexity vanish with no behaviour lost —
     a hypothetical seam by CONTEXT's definition. Not removed here: task 015 owns
     it and this task's blast radius was already wide.
-  - **Pre-existing, out of scope:** `fuzz/fuzz_targets/discovery_entry.rs` does
-    not compile on `main` — it imports `kinjo::discovery::group_entries`, which
-    the merged discovery work renamed to `browse_groups`. Confirmed present
-    before this change (`git stash` check). The fuzz crate is not in the default
-    workspace, so the completion gate never catches it. Belongs to the discovery
-    workstream (task 003 owns `src/discovery/**`); worth its own small task so
-    CI's fuzz soak is not silently broken.
+  - **Resolved after completion:** commit `707b565` updated
+    `fuzz/fuzz_targets/discovery_entry.rs` to use `browse_groups` and the current
+    `GroupFacts` API. Midpoint validation on 2026-07-16 confirmed all five fuzz
+    targets compile with `cargo +nightly fuzz build`.
   - `src/ui/render.rs` needed three unavoidable lines (a `Requirement` render
     helper and two test-fixture constructions) because `requirements` changed
     type and `CommandAction` gained a private field. Kept minimal and far from

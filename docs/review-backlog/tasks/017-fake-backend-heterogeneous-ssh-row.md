@@ -95,14 +95,14 @@ kinjo --fake-discovery --config-dir actions
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] `fake_records` yields two `_ssh._tcp` occurrences on different hosts.
-- [ ] The existing SSH entry still carries both of its addresses on one entry.
-- [ ] The `_ssh._tcp` service-type row presents two children, and invoking the
+- [x] `fake_records` yields two `_ssh._tcp` occurrences on different hosts.
+- [x] The existing SSH entry still carries both of its addresses on one entry.
+- [x] The `_ssh._tcp` service-type row presents two children, and invoking the
       shipped `ssh` rule opens the instance picker.
-- [ ] Choosing a child runs that child's hostname.
-- [ ] Tests disturbed by the extra record state the new correct expectation.
-- [ ] Task 006's behavior is confirmed by hand and the evidence recorded.
-- [ ] Full validation passes.
+- [x] Choosing a child runs that child's hostname.
+- [x] Tests disturbed by the extra record state the new correct expectation.
+- [x] Task 006's behavior is confirmed by hand and the evidence recorded.
+- [x] Full validation passes.
 
 ## Required Tests
 
