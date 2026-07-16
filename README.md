@@ -231,7 +231,9 @@ daemon, so discovery works as soon as it's installed — there's nothing to
 enable on NixOS. (The `zeroconf` backend does go through `avahi-daemon`, but
 it's behind an off-by-default cargo feature that this flake doesn't build.)
 
-Use `--fake-discovery` to try the UI against built-in sample data.
+The packaged Nix build intentionally omits the off-by-default `fake` feature.
+To try the UI against built-in sample data from a source checkout, use
+`cargo run --features fake -- --backend fake`.
 
 ### Build From Source
 
