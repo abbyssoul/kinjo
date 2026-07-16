@@ -39,7 +39,7 @@ Status values:
 | 004 | P0 | done | [Address-predicate correctness](tasks/004-address-predicate-correctness.md) | — | 005, 006 |
 | 005 | P1 | done | [Compiled command rules](tasks/005-compiled-command-rules.md) | 004 | 006, 007, 015 |
 | 006 | P0 | done | [Grouped action targeting](tasks/006-grouped-action-targeting.md) | 005 | 007, 008, 010 |
-| 007 | P1 | ready | [Transactional config reload](tasks/007-transactional-config-reload.md) | 005 | 006, 015, 020 |
+| 007 | P1 | done | [Transactional config reload](tasks/007-transactional-config-reload.md) | 005 | 006, 015, 020 |
 | 008 | P0 | done | [Stale picker revalidation](tasks/008-stale-picker-revalidation.md) | 001, 002, 006 | 010, 011, 014, 015 |
 | 009 | P1 | done | [CLI config-directory handling](tasks/009-cli-config-directory-handling.md) | — | 003, 020 |
 | 010 | P1 | done | [Mode-aware aggregate views](tasks/010-mode-aware-aggregate-views.md) | 001 | 006, 008, 011, 012, 013, 014, 015 |
