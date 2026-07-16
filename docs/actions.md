@@ -79,6 +79,51 @@ Requirements are the one thing it does not check: whether a program is installed
 is a property of the machine, not of the file, and it is re-checked each time an
 action runs.
 
+## Reloading While It Runs
+
+A running `kinjo` re-reads its command files on `SIGHUP`, so an edit applies
+without restarting the TUI:
+
+```sh
+pkill -HUP kinjo
+```
+
+A reload is all-or-nothing. It loads the same directories in the same order as
+startup, and installs the result only if **every** file in **every** directory
+is valid. If any file is malformed — or any configured directory cannot be read
+— nothing changes: the commands already loaded stay loaded, and stay runnable.
+
+This is deliberately stricter than startup, because the two are not the same
+situation:
+
+| | Startup | Reload (`SIGHUP`) |
+|---|---|---|
+| An invalid file is | skipped, with a warning naming it | a reason to keep the current commands |
+| The other files | still load | are not loaded either |
+| The outcome | a partly working `kinjo` | the rule set you already had |
+
+At startup, skipping a bad file is the difference between a partly working
+`kinjo` and no `kinjo` at all — one stale file in `/etc/kinjo/commands` must not
+stop the app launching. At reload there is already a rule set that works, so
+skipping a bad file would trade it for a *smaller* one, and a command you use
+would quietly disappear mid-session because a file was caught half-saved.
+Refusing the reload leaves you exactly where you were: the edit simply has not
+taken effect yet.
+
+A rejected reload says so on the status line, naming how many files were invalid
+and how many commands remain in force. The details — every invalid file, with
+its full path and the reason — are printed to the terminal when `kinjo` exits,
+where the status line cannot lose them:
+
+```text
+reload rejected: /home/you/.config/kinjo/commands/ssh.toml: unterminated quote
+```
+
+Only the most recent reload is reported: fixing the file and signalling again
+clears it, because a reload always describes the configuration as it is now, not
+the edits you have already corrected. To see the same errors immediately instead
+of on exit, run `kinjo list-commands`, which validates the identical way.
+
 ## File Format
 
 A command file has three parts:
@@ -371,5 +416,7 @@ When the TUI starts normally, an invalid command file is skipped with a warning
 naming it (shown on the status line and printed on exit) so one bad file — for
 example in the shared system directory — cannot prevent the app from starting.
 Every invalid file is reported, not just the first, and the valid ones still
-load. `kinjo list-commands` loads strictly and fails on the first invalid file;
-use it to validate your configuration.
+load. A reload of a running instance is stricter: see
+[Reloading While It Runs](#reloading-while-it-runs). `kinjo list-commands` loads
+strictly and fails on the first invalid file; use it to validate your
+configuration.

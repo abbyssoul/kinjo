@@ -142,14 +142,24 @@ fn install_dirs_from(exe: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
+/// Load every command directory strictly: the first unreadable directory,
+/// unreadable entry, or malformed command file fails the whole load.
+///
+/// This is the policy for `list-commands`, whose entire job is to answer
+/// whether a configuration is valid, and for any caller that would rather have
+/// no rule set than an incomplete one.
 pub fn load_from_dirs(builder: &mut MatcherBuilder, dirs: &[PathBuf]) -> Result<()> {
     for dir in dirs {
         if !dir.is_dir() {
             continue;
         }
         builder.start_layer();
-        for path in toml_files_in(dir)? {
-            builder.add_file(&path)?;
+        // Name the directory here, where it is known: `Permission denied` on
+        // its own tells the user nothing about what to go and fix.
+        let files =
+            toml_files_in(dir).map_err(|err| eyre!("cannot read {}: {err}", dir.display()))?;
+        for path in &files {
+            builder.add_file(path)?;
         }
     }
     Ok(())
@@ -158,8 +168,14 @@ pub fn load_from_dirs(builder: &mut MatcherBuilder, dirs: &[PathBuf]) -> Result<
 /// Like [`load_from_dirs`], but never fails: unreadable directories and
 /// malformed command files are skipped and reported as warnings, so one bad
 /// file (e.g. in the shared system directory) cannot prevent the app from
-/// starting. `list-commands` keeps using the strict variant, since validating
-/// configs is its whole point.
+/// starting.
+///
+/// The warnings are the whole point of the return value, and each names its
+/// source. A caller that cannot tolerate an incomplete rule set — a live
+/// reload, which already has a working one — builds through this policy and
+/// then refuses to install the result unless it came back with no warnings at
+/// all. That way one loading and validating path serves both policies, and
+/// "which files are wrong" is answered in full rather than one file at a time.
 pub fn load_from_dirs_lenient(builder: &mut MatcherBuilder, dirs: &[PathBuf]) -> Vec<String> {
     let mut warnings = Vec::new();
     for dir in dirs {
@@ -185,11 +201,20 @@ pub fn load_from_dirs_lenient(builder: &mut MatcherBuilder, dirs: &[PathBuf]) ->
 
 /// The `.toml` files directly inside `dir`, sorted by name (the load order
 /// within one overlay layer).
+///
+/// A failure *part way through* the directory is an error like any other, not
+/// an empty spot in the listing. Skipping unreadable entries would silently
+/// shorten the overlay, and a rule that vanishes looks exactly like a rule that
+/// was never configured — so both loading policies get told, and each decides:
+/// strict loading fails, lenient loading warns and moves on.
 fn toml_files_in(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut files = fs::read_dir(dir)?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
-        .collect::<Vec<_>>();
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "toml") {
+            files.push(path);
+        }
+    }
     files.sort();
     Ok(files)
 }
