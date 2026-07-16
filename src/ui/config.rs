@@ -118,6 +118,104 @@ mode = "execute"
         remove(&overlay);
     }
 
+    /// The overlay order that reaches the loader is the command-line order of
+    /// the `--config-dir` occurrences, regardless of which side of the
+    /// `list-commands` name each was written on.
+    ///
+    /// This proves order rather than membership: both directories define `ssh`,
+    /// so only the directory that overlays *last* can supply the surviving
+    /// rule. `base` also defines a rule `overlay` does not, so a placement that
+    /// dropped either directory would lose a rule instead of merely reordering
+    /// one — the count and the winner are checked together. Directories are
+    /// real and the argv is parsed by the real CLI, so nothing here can agree
+    /// with a broken parser.
+    #[test]
+    fn list_commands_overlay_order_follows_command_line_order_not_placement() {
+        let base = temp_dir("overlay-order-base");
+        let overlay = temp_dir("overlay-order-overlay");
+        write_command(&base, "ssh.toml", "ssh", "ssh base");
+        write_command(&base, "mosh.toml", "mosh", "mosh base");
+        write_command(&overlay, "ssh.toml", "ssh", "ssh overlay");
+
+        // Build `kinjo [before...] list-commands [after...]`, so each case below
+        // states only where its directories were written.
+        let argv_of = |before: &[&std::path::Path], after: &[&std::path::Path]| {
+            let flagged = |dirs: &[&std::path::Path]| -> Vec<String> {
+                dirs.iter()
+                    .flat_map(|dir| ["--config-dir".to_string(), dir.display().to_string()])
+                    .collect()
+            };
+
+            let mut argv = vec!["kinjo".to_string()];
+            argv.extend(flagged(before));
+            argv.push("list-commands".to_string());
+            argv.extend(flagged(after));
+            argv
+        };
+
+        let (base, overlay) = (base.as_path(), overlay.as_path());
+        // Every case writes `base` before `overlay` on the command line, across
+        // all three placements, so `overlay` must win in each. Reversing the
+        // command line must reverse the winner — that is what makes these
+        // assertions statements about order rather than membership.
+        let cases = [
+            (argv_of(&[base, overlay], &[]), "ssh overlay"),
+            (argv_of(&[], &[base, overlay]), "ssh overlay"),
+            (argv_of(&[base], &[overlay]), "ssh overlay"),
+            (argv_of(&[overlay, base], &[]), "ssh base"),
+            (argv_of(&[], &[overlay, base]), "ssh base"),
+            (argv_of(&[overlay], &[base]), "ssh base"),
+        ];
+
+        for (argv, expected) in &cases {
+            let cli = super::super::cli::parse_from(argv.clone()).unwrap();
+            let (matcher, warnings) = load_matcher(&cli).unwrap();
+
+            assert!(warnings.is_empty(), "{argv:?}");
+            // Both directories were loaded: `mosh` exists only in `base`, and
+            // `ssh` collapses to one rule however many layers define it.
+            assert_eq!(matcher.command_count(), 2, "{argv:?}");
+            let ssh = matcher
+                .commands()
+                .iter()
+                .find(|command| command.name == "ssh")
+                .unwrap_or_else(|| panic!("{argv:?}: no `ssh` rule"));
+            assert_eq!(ssh.action.command, *expected, "{argv:?}");
+        }
+
+        remove(base);
+        remove(overlay);
+    }
+
+    /// The placement fix must not have quietly turned a run's extra directories
+    /// into a replacement for the defaults: a run still layers defaults first.
+    #[test]
+    fn run_config_dirs_parsed_from_argv_still_overlay_the_defaults() {
+        let extra = temp_dir("run-extra-commands");
+        let dirs = matcher_config_dirs(
+            &super::super::cli::parse_from(["kinjo", "--config-dir", extra.to_str().unwrap()])
+                .unwrap(),
+        );
+
+        assert!(dirs.contains(&PathBuf::from(plumber::SYSTEM_CONFIG_DIR)));
+        assert_eq!(dirs.last(), Some(&extra));
+
+        remove(&extra);
+    }
+
+    /// With no explicit directory, `list-commands` keeps expanding the normal
+    /// defaults — the fix changes where the flag may be written, not what its
+    /// absence means.
+    #[test]
+    fn list_commands_without_config_dirs_still_expands_the_defaults() {
+        let cli = super::super::cli::parse_from(["kinjo", "list-commands"]).unwrap();
+
+        let dirs = matcher_config_dirs(&cli);
+
+        assert_eq!(dirs, plumber::config_dirs(&[]));
+        assert!(dirs.contains(&PathBuf::from(plumber::SYSTEM_CONFIG_DIR)));
+    }
+
     #[test]
     fn load_keybindings_falls_back_to_defaults_when_no_files_exist() {
         let bindings = KeyBindings::load(&[PathBuf::from("/tmp/kinjo-no-such-keymap")]).unwrap();

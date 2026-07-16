@@ -1,6 +1,6 @@
 use std::{ffi::OsString, path::PathBuf};
 
-use clap::{Arg, ArgAction, Command, error::ErrorKind};
+use clap::{Arg, ArgAction, ArgMatches, Command, error::ErrorKind};
 
 use crate::discovery::{DiscoveryBackend, DiscoveryConfig, DiscoveryOptionError, DiscoveryOptions};
 
@@ -91,12 +91,15 @@ where
 {
     let matches = command().try_get_matches_from(args)?;
 
-    // `--config-dir` is repeatable and is read from whichever argument context
-    // applies: the `list-commands` subcommand carries its own copy of the flag,
-    // while a plain run reads the top-level one.
+    // `--config-dir` is repeatable and accepted on either side of
+    // `list-commands`. Both sides are merged in occurrence order, so placement
+    // never changes which directories are loaded, nor the order they overlay in.
     let (command, config_dirs) = match matches.subcommand() {
-        None => (CliCommand::Run, collect_config_dirs(&matches)),
-        Some(("list-commands", sub)) => (CliCommand::ListCommands, collect_config_dirs(sub)),
+        None => (CliCommand::Run, merge_config_dirs(&matches, None)),
+        Some(("list-commands", sub)) => (
+            CliCommand::ListCommands,
+            merge_config_dirs(&matches, Some(sub)),
+        ),
         Some((name, _)) => {
             return Err(command().error(
                 ErrorKind::InvalidSubcommand,
@@ -173,13 +176,7 @@ fn command() -> Command {
                 .default_value("local")
                 .value_name("DOMAIN"),
         )
-        .arg(
-            Arg::new("config-dir")
-                .long("config-dir")
-                .help("Extra command directory; repeatable, each overlays the previous")
-                .action(ArgAction::Append)
-                .value_name("PATH"),
-        )
+        .arg(config_dir_arg())
         .arg(
             Arg::new("service-type")
                 .long("service-type")
@@ -203,23 +200,55 @@ fn command() -> Command {
         .subcommand(
             Command::new("list-commands")
                 .about("Validate and list registered command configs")
-                .arg(
-                    Arg::new("config-dir")
-                        .long("config-dir")
-                        .help("Command config directory to load")
-                        .action(ArgAction::Append)
-                        .value_name("PATH"),
-                ),
+                .long_about(
+                    "Validate and list registered command configs.\n\n\
+                     With no `--config-dir`, the default directories are validated. \
+                     With one or more, only those directories are validated, so a \
+                     layer can be checked on its own.",
+                )
+                .arg(config_dir_arg()),
         )
 }
 
-fn collect_config_dirs(matches: &clap::ArgMatches) -> Vec<PathBuf> {
-    matches
-        .get_many::<String>("config-dir")
-        .into_iter()
-        .flatten()
-        .map(PathBuf::from)
-        .collect()
+/// The one `--config-dir` definition, registered in every context that accepts
+/// the flag.
+///
+/// It is deliberately not `global(true)`. A Clap global option does not append
+/// across levels: an occurrence after the subcommand *replaces* the root's
+/// values outright — in both the subcommand and the root matches — so the
+/// root-position value would be silently discarded. That is precisely the
+/// defect this option must never reintroduce, so the flag is registered per
+/// context and merged once, in [`merge_config_dirs`].
+fn config_dir_arg() -> Arg {
+    Arg::new("config-dir")
+        .long("config-dir")
+        .help("Command directory; repeatable, each overlays the previous")
+        .action(ArgAction::Append)
+        .value_name("PATH")
+}
+
+/// The `--config-dir` occurrences from both sides of the subcommand, in
+/// command-line order.
+///
+/// Clap records each occurrence in the context it was written in. Because the
+/// option is not global, the root matches hold exactly the occurrences written
+/// *before* the subcommand and `sub` exactly those written *after* it. Chaining
+/// root-then-sub therefore reproduces left-to-right occurrence order, which is
+/// what the overlay precedence documented in `docs/actions.md` is defined
+/// against. No accepted occurrence is dropped, whichever side it was written on.
+fn merge_config_dirs(root: &ArgMatches, sub: Option<&ArgMatches>) -> Vec<PathBuf> {
+    let occurrences = |matches: &ArgMatches| -> Vec<PathBuf> {
+        matches
+            .get_many::<String>("config-dir")
+            .into_iter()
+            .flatten()
+            .map(PathBuf::from)
+            .collect()
+    };
+
+    let mut dirs = occurrences(root);
+    dirs.extend(sub.map(occurrences).unwrap_or_default());
+    dirs
 }
 
 #[cfg(test)]
@@ -333,25 +362,125 @@ mod tests {
         assert_eq!(cli.command, CliCommand::Run);
     }
 
+    fn config_dirs_of(args: &[&str]) -> Vec<PathBuf> {
+        let cli = parse_from(args.to_vec()).unwrap_or_else(|err| panic!("{args:?}: {err}"));
+        assert_eq!(cli.command, CliCommand::ListCommands, "{args:?}");
+        cli.config_dirs
+    }
+
+    /// A single directory means the same thing on either side of the
+    /// subcommand. Reading only the subcommand context used to discard the
+    /// root-position value while still reporting success, so `list-commands`
+    /// appeared to validate a directory it had never loaded.
     #[test]
-    fn parses_list_commands_config_dirs_from_subcommand_context() {
-        let cli = parse_from([
+    fn one_config_dir_is_equivalent_before_and_after_the_subcommand() {
+        let before = config_dirs_of(&["kinjo", "--config-dir", "commands", "list-commands"]);
+        let after = config_dirs_of(&["kinjo", "list-commands", "--config-dir", "commands"]);
+
+        assert_eq!(before, vec![PathBuf::from("commands")]);
+        assert_eq!(before, after);
+    }
+
+    /// Several directories on one side keep their order, and the side they are
+    /// written on is not part of the meaning.
+    #[test]
+    fn repeated_config_dirs_are_equivalent_before_and_after_the_subcommand() {
+        let before = config_dirs_of(&[
             "kinjo",
             "--config-dir",
-            "run-only",
-            "list-commands",
-            "--config-dir",
-            "commands",
+            "base",
             "--config-dir",
             "overrides",
-        ])
-        .unwrap();
+            "list-commands",
+        ]);
+        let after = config_dirs_of(&[
+            "kinjo",
+            "list-commands",
+            "--config-dir",
+            "base",
+            "--config-dir",
+            "overrides",
+        ]);
+
+        assert_eq!(
+            before,
+            vec![PathBuf::from("base"), PathBuf::from("overrides")]
+        );
+        assert_eq!(before, after);
+    }
+
+    /// Directories written on both sides all survive, in command-line
+    /// occurrence order — the order overlay precedence is defined against.
+    /// The root-position values must come first because that is where they
+    /// were written, not merely be present somewhere in the vector.
+    #[test]
+    fn mixed_config_dirs_preserve_command_line_occurrence_order() {
+        let dirs = config_dirs_of(&[
+            "kinjo",
+            "--config-dir",
+            "first",
+            "--config-dir",
+            "second",
+            "list-commands",
+            "--config-dir",
+            "third",
+            "--config-dir",
+            "fourth",
+        ]);
+
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from("first"),
+                PathBuf::from("second"),
+                PathBuf::from("third"),
+                PathBuf::from("fourth"),
+            ]
+        );
+    }
+
+    /// Interleaving one on each side is the tightest statement of the rule:
+    /// the value written first overlays first, whichever side of the
+    /// subcommand name each was written on.
+    #[test]
+    fn a_root_config_dir_precedes_a_subcommand_one_written_after_it() {
+        assert_eq!(
+            config_dirs_of(&[
+                "kinjo",
+                "--config-dir",
+                "base",
+                "list-commands",
+                "--config-dir",
+                "overlay",
+            ]),
+            vec![PathBuf::from("base"), PathBuf::from("overlay")]
+        );
+    }
+
+    /// `list-commands` with no explicit directory keeps the default-directory
+    /// policy: the CLI reports nothing, and `ui::config` expands the defaults.
+    #[test]
+    fn list_commands_without_config_dirs_reports_none() {
+        let cli = parse_from(["kinjo", "list-commands"]).unwrap();
 
         assert_eq!(cli.command, CliCommand::ListCommands);
-        assert_eq!(
-            cli.config_dirs,
-            vec![PathBuf::from("commands"), PathBuf::from("overrides")]
-        );
+        assert!(cli.config_dirs.is_empty());
+    }
+
+    /// The flag is documented in both contexts, so neither placement looks
+    /// unsupported in `--help`.
+    #[test]
+    fn config_dir_help_appears_in_both_contexts() {
+        for args in [
+            vec!["kinjo", "--help"],
+            vec!["kinjo", "list-commands", "--help"],
+        ] {
+            let err = parse_from(args.clone()).unwrap_err();
+            let help = err.to_string();
+
+            assert_eq!(err.kind(), ErrorKind::DisplayHelp, "{args:?}");
+            assert!(help.contains("--config-dir <PATH>"), "{args:?}: {help}");
+        }
     }
 
     /// `--version` and `-v` surface as a `DisplayVersion` "error" that the

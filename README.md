@@ -400,6 +400,15 @@ To validate and list only the commands from a specific directory:
 kinjo list-commands --config-dir ./commands
 ```
 
+`--config-dir` may be written on either side of `list-commands`, and repeated on
+both; the two lines below are equivalent. Directories always overlay in the
+order they appear on the command line, whichever side they were written on.
+
+```sh
+kinjo --config-dir ./commands list-commands
+kinjo list-commands --config-dir ./commands
+```
+
 A running instance reloads its command files on `SIGHUP` (the conventional
 reload signal), so edits apply without restarting the TUI:
 
