@@ -210,14 +210,12 @@ nixpkgs.overlays = [ inputs.kinjo.overlays.default ];
 environment.systemPackages = [ pkgs.kinjo ];
 ```
 
-The default `mdns-sd` backend discovers services through the system **Avahi**
-daemon over D-Bus, so enable it for real local-network discovery:
+The default `mdns-sd` backend speaks mDNS/DNS-SD itself and needs no system
+daemon, so discovery works as soon as it's installed — there's nothing to
+enable on NixOS. (The `zeroconf` backend does go through `avahi-daemon`, but
+it's behind an off-by-default cargo feature that this flake doesn't build.)
 
-```nix
-services.avahi.enable = true;
-```
-
-Use `--fake-discovery` to try the UI without a running daemon.
+Use `--fake-discovery` to try the UI against built-in sample data.
 
 ### Build From Source
 
