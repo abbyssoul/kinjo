@@ -8,7 +8,9 @@ use zeroconf_tokio::{
 
 use super::session::DiscoverySession;
 use super::worker::{BrowseOutcome, DiscoveryWorker, RuntimeFlavor};
-use super::{DiscoveryConfig, DiscoveryEvent, Entry, Registration};
+use super::{
+    DiscoveryEvent, DiscoveryOptions, Entry, Registration, ServiceTypeFilter as ValidServiceType,
+};
 
 /// DNS-SD service types browsed when the user does not pass `--service-type`.
 ///
@@ -48,10 +50,16 @@ const DEFAULT_SERVICE_TYPES: &[&str] = &[
 /// Avahi/Bonjour APIs which browse one concrete service type at a time, so this
 /// backend sweeps [`DEFAULT_SERVICE_TYPES`] in parallel (on a multi-threaded
 /// runtime) when no filter is given.
-pub(super) fn start(config: &DiscoveryConfig) -> DiscoverySession {
-    let service_types = resolve_service_types(config.service_type.as_deref());
+///
+/// The domain is not passed on, because upstream `zeroconf`'s browser has no
+/// domain setter to pass it to. That is a capability this adapter lacks rather
+/// than one it ignores: [`DiscoveryConfig::validate`](super::DiscoveryConfig::validate)
+/// rejects a non-default domain for this backend before anything spawns, so the
+/// domain reaching here is always the default one the browser uses anyway.
+pub(super) fn start(options: &DiscoveryOptions) -> DiscoverySession {
+    let service_types = resolve_service_types(options.service_type());
     let (worker, rx) = DiscoveryWorker::spawn(
-        config,
+        options,
         RuntimeFlavor::MultiThread,
         move |domain, service_type_filter, tx, shutdown| {
             browse_loop(service_types, domain, service_type_filter, tx, shutdown)
@@ -62,8 +70,10 @@ pub(super) fn start(config: &DiscoveryConfig) -> DiscoverySession {
 
 async fn browse_loop(
     service_types: Vec<ServiceType>,
+    // Always the default domain; see `start`.
     _domain: String,
-    _service_type_filter: Option<String>,
+    // Already resolved into `service_types` before the worker spawned.
+    _service_type_filter: Option<ValidServiceType>,
     tx: mpsc::Sender<DiscoveryEvent>,
     shutdown: CancellationToken,
 ) -> BrowseOutcome {
@@ -195,28 +205,65 @@ fn format_service_type(service_type: &ServiceType) -> String {
     format!("_{}._{}", service_type.name(), service_type.protocol())
 }
 
-fn resolve_service_types(filter: Option<&str>) -> Vec<ServiceType> {
-    if let Some(filter) = filter
-        && let Ok(service_type) = ServiceType::from_str(filter)
-    {
-        return vec![service_type];
-    }
+/// The concrete types to browse: exactly the requested one, or the curated
+/// sweep when none was requested.
+///
+/// An explicit filter can only *narrow* the browse. There is deliberately no
+/// "it did not parse, so browse everything instead" path: the filter arrives
+/// validated, and widening an explicit request into a sweep of every default
+/// type would observe more of the network than the user asked for — the exact
+/// inversion of what a filter is for.
+fn resolve_service_types(filter: Option<&ValidServiceType>) -> Vec<ServiceType> {
+    let Some(filter) = filter else {
+        return DEFAULT_SERVICE_TYPES
+            .iter()
+            .filter_map(|kind| ServiceType::from_str(kind).ok())
+            .collect();
+    };
 
-    DEFAULT_SERVICE_TYPES
-        .iter()
-        .filter_map(|kind| ServiceType::from_str(kind).ok())
+    // The name and protocol are already known good, and `ServiceType::new`
+    // rejects only empty text and `.`/`,` — none of which can survive
+    // validation. Should upstream ever tighten that, the browse still must not
+    // widen: an empty list is a startup failure in `browse_loop`, not a sweep.
+    ServiceType::new(filter.name(), filter.protocol().as_str())
+        .into_iter()
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::{DiscoveryBackend, DiscoveryConfig, DiscoveryOptionError};
+
+    fn zeroconf_config(domain: &str, service_type: Option<&str>) -> DiscoveryConfig {
+        DiscoveryConfig {
+            fake: false,
+            backend: DiscoveryBackend::Zeroconf,
+            domain: domain.to_string(),
+            service_type: service_type.map(str::to_string),
+        }
+    }
+
+    fn filter(value: &str) -> ValidServiceType {
+        ValidServiceType::parse(value).expect("valid service type")
+    }
 
     #[test]
     fn explicit_filter_browses_single_type() {
-        let types = resolve_service_types(Some("_ssh._tcp"));
+        let types = resolve_service_types(Some(&filter("_ssh._tcp")));
+
         assert_eq!(types.len(), 1);
         assert_eq!(format_service_type(&types[0]), "_ssh._tcp");
+    }
+
+    /// A UDP type is browsed as a UDP type: the protocol survives the trip
+    /// through the adapter rather than defaulting to `_tcp`.
+    #[test]
+    fn an_explicit_udp_filter_browses_that_one_udp_type() {
+        let types = resolve_service_types(Some(&filter("_dns-sd._udp")));
+
+        assert_eq!(types.len(), 1);
+        assert_eq!(format_service_type(&types[0]), "_dns-sd._udp");
     }
 
     #[test]
@@ -225,10 +272,35 @@ mod tests {
         assert_eq!(types.len(), DEFAULT_SERVICE_TYPES.len());
     }
 
+    /// Replaces a test that enshrined the opposite: an unparseable filter used
+    /// to fall through to the full default sweep, quietly turning "browse only
+    /// this" into "browse everything". Such a value can no longer reach
+    /// adapter resolution at all — `resolve_service_types` only accepts an
+    /// already-validated type, and the malformed text is rejected at the start
+    /// seam, before any browser is created.
     #[test]
-    fn unparseable_filter_falls_back_to_default_sweep() {
-        let types = resolve_service_types(Some("not a service type"));
-        assert_eq!(types.len(), DEFAULT_SERVICE_TYPES.len());
+    fn an_invalid_filter_is_rejected_before_it_can_widen_the_browse() {
+        let err = zeroconf_config("local", Some("not a service type"))
+            .validate()
+            .unwrap_err();
+
+        assert!(matches!(err, DiscoveryOptionError::ServiceType { .. }));
+    }
+
+    /// The capability check happens before spawning: with no domain setter to
+    /// pass `corp` to, this backend must refuse rather than browse `local` and
+    /// present the results as if they answered the question.
+    #[test]
+    fn a_custom_domain_is_rejected_before_any_browser_starts() {
+        let err = zeroconf_config("corp", None).validate().unwrap_err();
+
+        assert_eq!(
+            err,
+            DiscoveryOptionError::UnsupportedDomain {
+                backend: DiscoveryBackend::Zeroconf,
+                domain: "corp".to_string(),
+            }
+        );
     }
 
     /// `zeroconf` reports a removal with nothing that distinguishes one
@@ -286,15 +358,12 @@ mod tests {
     fn a_failed_zeroconf_session_reports_a_typed_failure_and_no_samples() {
         use crate::discovery::{FailureKind, SessionPoll, SessionState};
 
-        // An unparseable service type would fall back to the default sweep, so
-        // drive the no-browser case through the loop the session runs.
+        // A malformed service type cannot get this far any more, so drive the
+        // no-browser case directly through the loop the session runs.
         let (worker, rx) = DiscoveryWorker::spawn(
-            &DiscoveryConfig {
-                fake: false,
-                backend: crate::discovery::DiscoveryBackend::Zeroconf,
-                domain: "local".to_string(),
-                service_type: None,
-            },
+            &zeroconf_config("local", None)
+                .validate()
+                .expect("valid test options"),
             RuntimeFlavor::MultiThread,
             move |domain, service_type_filter, tx, shutdown| {
                 browse_loop(Vec::new(), domain, service_type_filter, tx, shutdown)

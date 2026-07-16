@@ -30,7 +30,8 @@ Launch the TUI without arguments to browse the default `local` domain:
 kinjo
 ```
 
-Browse another DNS-SD domain with the `--domain` (`-d`) flag:
+Browse another DNS-SD domain with the `--domain` (`-d`) flag (supported by the
+default `mdns-sd` backend; see [backends](#discovery-backends) below):
 
 ```sh
 kinjo --domain example.local
@@ -42,11 +43,14 @@ For development without a running Avahi setup:
 kinjo --fake-discovery
 ```
 
+### Discovery backends
+
 The app discovers services over mDNS/DNS-SD so no external CLI tools are
 required. Two discovery backends are available, selectable with `--backend`:
 
 - `mdns-sd` (default): the `mdns-sd-discovery` crate. A single browser
   enumerates every service type on the link via the native DNS-SD meta-query.
+  It accepts a custom `--domain`.
 - `zeroconf`: the `zeroconf-tokio` crate, which talks to the system Avahi daemon
   on Linux. It browses one service type at a time, so a curated set of common
   types is swept in parallel when no `--service-type` is given. This backend is
@@ -58,7 +62,45 @@ cargo install kinjo --features zeroconf
 kinjo --backend zeroconf
 ```
 
-When a `--service-type` is given, only that type is browsed.
+**The `zeroconf` backend browses only the default `local` domain.** Its browser
+exposes no way to select a domain, so rather than accept `--domain` and quietly
+browse `local` anyway, it refuses the combination up front:
+
+```console
+$ kinjo --backend zeroconf --domain corp
+error: invalid value for `--domain`: the `zeroconf` backend cannot browse the
+`corp` domain: it can only browse the default `local` domain. Browse `local`, or
+select the `mdns-sd` backend, which supports custom domains
+```
+
+Use the default `mdns-sd` backend to browse a custom domain. Empty, `local`, and
+`local.` all name the default domain.
+
+### Limiting discovery to one service type
+
+When a `--service-type` is given, only that type is browsed:
+
+```sh
+kinjo --service-type _ssh._tcp
+```
+
+The value must be a DNS-SD service type — `_<name>._tcp` or `_<name>._udp`,
+where `<name>` is 1–15 ASCII letters, digits, and internal hyphens, begins and
+ends alphanumeric, and contains at least one letter. Service types are
+case-insensitive, so `_SSH._TCP` and `_ssh._tcp` are the same browse.
+
+A value that is not a service type is rejected before discovery starts, rather
+than being ignored in favour of browsing everything — a filter is there to
+narrow what the program observes, so a typo must never widen it:
+
+```console
+$ kinjo --service-type bogus
+error: invalid value for `--service-type`: `bogus` is not a DNS-SD service type:
+a service type begins with `_`. Use a type such as `_ssh._tcp` or `_dns-sd._udp`,
+or omit it to browse every service type
+```
+
+Omit `--service-type` to browse every supported type.
 
 Discovery never falls back to sample records. If mDNS discovery is unavailable,
 the list stays empty and the status line explains why. If a running browse stops
@@ -216,7 +258,12 @@ reused independently:
    it stops the browse. Adapters vary behind that session — the mDNS/Avahi
    backend is the default, with a built-in sample backend for `--fake-discovery`
    — and you could drop in a different DNS-SD source, a static file, or an
-   SSDP/UPnP browser without touching anything else.
+   SSDP/UPnP browser without touching anything else. Discovery options are
+   checked once at that seam: a `DiscoveryConfig` is a request, and validating
+   it yields the `DiscoveryOptions` that starting an adapter requires. A
+   malformed service type, or a domain the selected backend cannot honour, is
+   therefore refused before anything spawns — no adapter can be reached with a
+   value it would have to quietly reinterpret.
 2. **Plumber** (`src/plumber/`) — the rules engine. A serializable collection of
    command rules (the TOML command files) is matched against entries by their
    attributes; multiple rules can match one entry, and a matching rule can be

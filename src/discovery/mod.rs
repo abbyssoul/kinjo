@@ -17,6 +17,7 @@
 mod entry;
 mod fake;
 mod mdns;
+mod options;
 mod session;
 mod worker;
 #[cfg(feature = "zeroconf")]
@@ -28,21 +29,11 @@ pub use entry::{
     ServiceTypeAggregate, TxtValue, UNRESOLVED_HOST_LABEL, browse_groups, browse_row_count,
     decode_dns_sd_escapes,
 };
+pub use options::{
+    DEFAULT_DOMAIN, DiscoveryBackend, DiscoveryConfig, DiscoveryOptionError, DiscoveryOptions,
+    ServiceTypeFilter, TransportProtocol,
+};
 pub use session::{DiscoveryFailure, DiscoverySession, FailureKind, SessionPoll, SessionState};
-
-/// The mDNS/DNS-SD library used to discover services.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DiscoveryBackend {
-    /// `mdns-sd-discovery`: a single browser enumerates every service type via
-    /// the native DNS-SD meta-query. This is the default.
-    #[default]
-    MdnsSd,
-    /// `zeroconf`: wraps the system Avahi/Bonjour stack, sweeping a curated set
-    /// of common service types in parallel. Only available when the crate is
-    /// built with the `zeroconf` feature.
-    #[cfg(feature = "zeroconf")]
-    Zeroconf,
-}
 
 /// An event emitted by a discovery backend.
 #[derive(Debug, Clone)]
@@ -64,34 +55,25 @@ pub enum DiscoveryEvent {
     Status(String),
 }
 
-/// Inputs a discovery backend needs. Keeps the discovery layer decoupled from
-/// the CLI/UI layer (see [`crate::ui::cli::Cli::discovery_config`]).
-#[derive(Debug, Clone)]
-pub struct DiscoveryConfig {
-    /// Use the built-in sample records instead of real mDNS discovery.
-    pub fake: bool,
-    /// Which mDNS/DNS-SD library to discover with when `fake` is unset.
-    pub backend: DiscoveryBackend,
-    /// DNS-SD domain to browse.
-    pub domain: String,
-    /// Limit discovery to a single DNS-SD service type, if set.
-    pub service_type: Option<String>,
-}
-
-/// Start the discovery adapter selected by `config` and return the session that
-/// owns it. Dropping the session stops the adapter.
+/// Start the discovery adapter selected by `options` and return the session
+/// that owns it. Dropping the session stops the adapter.
 ///
-/// Sample records come back only when `config.fake` is set. A real adapter that
-/// fails reports a [`SessionState::Failed`] and emits no entries: fabricating
-/// plausible LAN endpoints out of a failure would let a user act on a device
-/// that does not exist.
-pub fn start(config: &DiscoveryConfig) -> DiscoverySession {
-    if config.fake {
-        return fake::start(config);
+/// Sample records come back only when `options.fake()` is set. A real adapter
+/// that fails reports a [`SessionState::Failed`] and emits no entries:
+/// fabricating plausible LAN endpoints out of a failure would let a user act on
+/// a device that does not exist.
+///
+/// Taking [`DiscoveryOptions`] rather than a raw [`DiscoveryConfig`] is what
+/// makes "an option is honored exactly or rejected" structural: the checking
+/// happened in [`DiscoveryConfig::validate`], once, and no adapter below can be
+/// reached with a value it would have to quietly reinterpret.
+pub fn start(options: &DiscoveryOptions) -> DiscoverySession {
+    if options.fake() {
+        return fake::start(options);
     }
-    match config.backend {
-        DiscoveryBackend::MdnsSd => mdns::start(config),
+    match options.backend() {
+        DiscoveryBackend::MdnsSd => mdns::start(options),
         #[cfg(feature = "zeroconf")]
-        DiscoveryBackend::Zeroconf => zeroconf::start(config),
+        DiscoveryBackend::Zeroconf => zeroconf::start(options),
     }
 }
