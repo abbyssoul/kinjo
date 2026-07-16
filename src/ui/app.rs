@@ -23,7 +23,7 @@ use crate::{
         BrowseMode, DiscoveryEvent, DiscoverySession, Entry, EntryGroup, EntryId, GroupingMode,
         RowHost, SessionPoll, SessionState, browse_groups, browse_row_count,
     },
-    plumber::{self, ActionMode, CommandConfig, MatchResult, PreparedCommand, RuleEngine},
+    plumber::{ActionOutcome, CommandConfig, MatchResult, PreparedCommand, RuleEngine},
 };
 
 use super::{
@@ -816,29 +816,19 @@ impl App {
     ) -> Result<Option<PreparedCommand>> {
         let name = &action.command.name;
 
-        if let Some(missing) = plumber::exec::missing_requirement(&action.command.requirements) {
-            return self.fail(format!(
-                "`{name}` needs `{missing}`, which is not installed"
-            ));
-        }
-
-        let prepared = match plumber::exec::prepare(&action.command.action, record) {
-            Ok(prepared) => prepared,
-            Err(err) => return self.fail(format!("cannot run `{name}`: {err}")),
-        };
-
-        match prepared.mode {
-            ActionMode::Fork => match plumber::exec::fork(&prepared) {
-                Ok(()) => {
-                    self.status = format!("launched `{name}`");
-                    self.return_to_browse();
-                    Ok(None)
-                }
-                Err(err) => self.fail(format!("cannot run `{name}`: {err}")),
-            },
+        // The rule owns what running it means — checking its requirements,
+        // building the argv, and honouring its mode. The UI only decides what a
+        // person sees afterwards.
+        match action.command.run(record) {
+            Ok(ActionOutcome::Forked) => {
+                self.status = format!("launched `{name}`");
+                self.return_to_browse();
+                Ok(None)
+            }
             // The execute hand-off happens after the TUI is torn down, so the
             // caller takes ownership of the prepared command from here.
-            ActionMode::Execute => Ok(Some(prepared)),
+            Ok(ActionOutcome::Handoff(prepared)) => Ok(Some(prepared)),
+            Err(err) => self.fail(format!("cannot run `{name}`: {err}")),
         }
     }
 
@@ -2683,16 +2673,6 @@ command = "echo hi"
 mode = "execute"
 "#;
 
-    const BAD_TEMPLATE: &str = r#"
-[metadata]
-name = "bad-template"
-[match.service_type]
-equals = "_ssh._tcp"
-[action]
-command = "echo {nonexistent_field}"
-mode = "execute"
-"#;
-
     const FORK_MISSING_BINARY: &str = r#"
 [metadata]
 name = "ghost"
@@ -2737,19 +2717,9 @@ mode = "execute"
         assert_eq!(command.argv, vec!["echo", "hi"]);
     }
 
-    #[test]
-    fn bad_template_reports_status_instead_of_crashing_the_loop() {
-        let mut app = app_with(
-            matcher_from(&[BAD_TEMPLATE]),
-            vec![ssh("alpha", "10.0.0.1")],
-        );
-
-        // `send` unwraps the handler Result, so reaching the assert proves the
-        // error never propagated out of the event loop.
-        assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert!(app.status.contains("cannot run `bad-template`"));
-        assert_eq!(app.mode, AppMode::Browse);
-    }
+    // A template naming an unknown field can no longer reach the app at all:
+    // loading rejects it, so there is nothing here to fail at invocation time.
+    // `plumber::template` covers that rejection.
 
     #[test]
     fn fork_failure_reports_status_and_stays_in_browse() {
@@ -2773,7 +2743,7 @@ mode = "execute"
         // Two actions match, opening the picker; selecting the broken one must
         // both report the error and drop the picker, not leave it dangling.
         let mut app = app_with(
-            matcher_from(&[SSH, BAD_TEMPLATE]),
+            matcher_from(&[SSH, FORK_MISSING_BINARY]),
             vec![ssh("alpha", "10.0.0.1")],
         );
 
@@ -2781,11 +2751,11 @@ mode = "execute"
         assert_eq!(app.mode, AppMode::ActionPicker);
         assert_eq!(app.action_matches.len(), 2);
 
-        // action_index 1 is the bad-template command (insertion order).
+        // action_index 1 is the missing-binary command (insertion order).
         send(&mut app, KeyCode::Down);
         assert!(send(&mut app, KeyCode::Enter).is_none());
         assert_eq!(app.mode, AppMode::Browse);
         assert!(app.action_matches.is_empty());
-        assert!(app.status.contains("cannot run `bad-template`"));
+        assert!(app.status.contains("cannot run `ghost`"));
     }
 }
