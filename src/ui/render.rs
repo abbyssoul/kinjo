@@ -1034,7 +1034,7 @@ fn render_action_picker(frame: &mut Frame<'_>, app: &App) {
         &app.action_matches,
         app.action_index,
         |action, selected, base| {
-            let needs = action.needs_instance && action.matching_records.len() > 1;
+            let needs = action.needs_selection();
             let description = action
                 .command
                 .action
@@ -1074,7 +1074,7 @@ fn render_instance_picker(frame: &mut Frame<'_>, app: &App) {
     let records = app
         .pending_action
         .as_ref()
-        .map(|action| action.matching_records.as_slice())
+        .map(|action| action.targets.as_slice())
         .unwrap_or(&[]);
     let items = build_list_items(records, app.instance_index, |record, selected, base| {
         Line::from(vec![

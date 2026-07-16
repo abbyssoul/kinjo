@@ -592,7 +592,7 @@ impl App {
         let count = self
             .pending_action
             .as_ref()
-            .map(|action| action.matching_records.len())
+            .map(|action| action.targets.len())
             .unwrap_or(0);
         match action {
             Some(Action::PickerClose) => self.return_to_browse(),
@@ -607,7 +607,7 @@ impl App {
                     self.return_to_browse();
                     return Ok(None);
                 };
-                let Some(record) = pending.matching_records.get(self.instance_index) else {
+                let Some(record) = pending.targets.get(self.instance_index) else {
                     self.return_to_browse();
                     return Ok(None);
                 };
@@ -794,14 +794,18 @@ impl App {
     }
 
     fn choose_action(&mut self, action: MatchResult) -> Result<Option<PreparedCommand>> {
-        if action.needs_instance && action.matching_records.len() > 1 {
+        // The rule decides whether there is a choice to make: it knows what its
+        // candidates would actually run. Anything left to pick between here
+        // genuinely differs, and one target means the alternatives were the
+        // same command, not that the difference was deemed unimportant.
+        if action.needs_selection() {
             self.pending_action = Some(action);
             self.instance_index = 0;
             self.mode = AppMode::InstancePicker;
             return Ok(None);
         }
 
-        let Some(record) = action.matching_records.first() else {
+        let Some(record) = action.targets.first() else {
             self.status = "selected action has no matching services".to_string();
             self.return_to_browse();
             return Ok(None);
@@ -1697,6 +1701,45 @@ same_host = []
         assert!(app.status.contains("launched `ping`"));
     }
 
+    /// A rule whose mandatory dependency is missing fails for the whole rule,
+    /// not for one candidate. It must say so rather than quietly try the next
+    /// service, which would run a command against something the user did not
+    /// choose.
+    #[test]
+    fn a_missing_requirement_reports_failure_without_trying_another_target() {
+        const NEEDS_ABSENT: &str = r#"
+[metadata]
+name = "needs-absent"
+requirements = ["definitely-absent-xyz"]
+[match.service_type]
+equals = "_ssh._tcp"
+[action]
+command = "ssh {hostname}"
+mode = "execute"
+"#;
+        let mut app = app_with(
+            matcher_from(&[NEEDS_ABSENT]),
+            vec![
+                service_on("alpha", "_ssh._tcp", "alpha.local", 22),
+                service_on("beta", "_ssh._tcp", "beta.local", 22),
+            ],
+        );
+        app.filter.grouping = GroupingMode::ServiceType;
+        app.recompute_visible();
+
+        // The row's two hosts differ, so the action is offered for selection.
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::InstancePicker);
+
+        // Choosing one reports the rule's failure; nothing else runs.
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert!(
+            app.status.contains("definitely-absent-xyz"),
+            "status should name the missing dependency, was: {}",
+            app.status
+        );
+    }
+
     #[test]
     fn instance_picker_disambiguates_then_executes_chosen_address() {
         // One logical service reachable at two addresses; an address-specific
@@ -1820,7 +1863,10 @@ same_host = []
         let mut beta = service_on("beta", "_ssh._tcp", "beta.local", 2222);
         beta.addresses = vec!["10.0.0.2".parse().unwrap()];
 
-        let mut app = app_with(matcher_from(&[PING_ADDR]), vec![alpha, beta]);
+        // `ssh {hostname}` names no address or port, so nothing about the rule
+        // looks instance-specific — which is exactly why an aggregate row used
+        // to run its first child without asking.
+        let mut app = app_with(matcher_from(&[SSH]), vec![alpha, beta]);
         app.filter.grouping = GroupingMode::ServiceType;
         app.recompute_visible();
 
@@ -1831,13 +1877,13 @@ same_host = []
         assert_eq!(by_type.facts().host(), RowHost::Varies);
         assert_eq!(by_type.resolved_host_count(), 2);
 
-        // The rule needs a concrete address, so the aggregate offers up its
-        // children rather than answering for them.
+        // The two children would ssh to two different hosts, so the aggregate
+        // offers them up rather than answering for them.
         assert!(send(&mut app, KeyCode::Enter).is_none());
         assert_eq!(app.mode, AppMode::InstancePicker);
         send(&mut app, KeyCode::Down);
         let command = send(&mut app, KeyCode::Enter).expect("the chosen child runs");
-        assert_eq!(command.argv, vec!["echo", "10.0.0.2"]);
+        assert_eq!(command.argv, vec!["ssh", "beta.local"]);
     }
 
     #[test]

@@ -109,11 +109,26 @@ pub enum Predicate {
     Regex(Regex),
 }
 
+/// A rule that matches a row, together with the distinct ways running it can
+/// turn out.
 #[derive(Debug, Clone)]
 pub struct MatchResult {
     pub command: CommandConfig,
-    pub matching_records: Vec<Entry>,
-    pub needs_instance: bool,
+    /// The rule's distinct execution targets within the row, in discovery
+    /// order. Candidates that would run the identical command have already
+    /// collapsed, so this is precisely what a user still has to choose between.
+    pub targets: Vec<Entry>,
+}
+
+impl MatchResult {
+    /// Whether running this rule requires the user to choose a target.
+    ///
+    /// True exactly when the row's candidates prepare more than one distinct
+    /// command. Below that there is nothing to decide; above it, deciding for
+    /// the user would mean running one service's command against another.
+    pub fn needs_selection(&self) -> bool {
+        self.targets.len() > 1
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -126,20 +141,18 @@ impl Matcher {
         self.commands
             .iter()
             .filter_map(|command| {
-                let matching_records: Vec<Entry> = group
+                let candidates: Vec<Entry> = group
                     .instances()
                     .iter()
                     .flat_map(|record| command.candidates(record))
                     .collect();
-                if matching_records.is_empty() {
+                let targets = command.distinct_targets(candidates);
+                if targets.is_empty() {
                     return None;
                 }
-                let needs_instance = command.needs_instance()
-                    || matching_records.len() > 1 && command.has_instance_specific_template();
                 Some(MatchResult {
                     command: command.clone(),
-                    matching_records,
-                    needs_instance,
+                    targets,
                 })
             })
             .collect()
@@ -179,15 +192,38 @@ impl CommandConfig {
         }
     }
 
-    pub fn needs_instance(&self) -> bool {
-        self.predicates
-            .iter()
-            .any(|predicate| is_instance_field(&predicate.field))
-            || self.has_instance_specific_template()
-    }
-
-    fn has_instance_specific_template(&self) -> bool {
-        self.action.template.references("address") || self.action.template.references("port")
+    /// The distinct execution targets among `candidates`, in the order the
+    /// candidates were discovered.
+    ///
+    /// Two candidates are the same target when they prepare the same command:
+    /// running either does the identical thing, so asking which one would be a
+    /// question with one answer. Any field that changes the argument vector —
+    /// hostname, name, service type, domain, TXT value, port, address — leaves
+    /// them distinct, and then the caller must ask.
+    ///
+    /// Keying on the prepared command rather than on a list of fields deemed
+    /// "instance-specific" is the point. A field list cannot know what a rule
+    /// *does*: it let `ssh {hostname}` run the lexically first host of a
+    /// service-type row without asking, because `hostname` was not on the list.
+    /// Preparing the command answers the question directly, for every field at
+    /// once, including ones nobody thought to enumerate.
+    ///
+    /// A candidate that fails to prepare is kept as a target rather than
+    /// dropped, so a rule that cannot run for the chosen service can never
+    /// quietly run against a different one instead. Selecting it reports the
+    /// failure, which is the honest outcome.
+    fn distinct_targets(&self, candidates: Vec<Entry>) -> Vec<Entry> {
+        let mut seen: Vec<Option<PreparedCommand>> = Vec::new();
+        let mut targets = Vec::new();
+        for candidate in candidates {
+            let prepared = self.action.prepare(&candidate).ok();
+            if seen.contains(&prepared) {
+                continue;
+            }
+            seen.push(prepared);
+            targets.push(candidate);
+        }
+        targets
     }
 
     /// Whether this command distinguishes between a service's individual
@@ -327,10 +363,6 @@ pub(crate) fn is_supported_field(field: &str) -> bool {
         || field
             .strip_prefix("txt.")
             .is_some_and(|key| !key.is_empty())
-}
-
-fn is_instance_field(field: &str) -> bool {
-    is_address_field(field) || field == "port"
 }
 
 /// The match field naming a service's IP address. Address predicates are the one
@@ -635,9 +667,9 @@ mode = "fork"
         let matches = matcher.matches_group(&group);
 
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].matching_records.len(), 1);
+        assert_eq!(matches[0].targets.len(), 1);
         assert_eq!(
-            matches[0].matching_records[0].hostname.as_deref(),
+            matches[0].targets[0].hostname.as_deref(),
             Some("print-01.local")
         );
     }
@@ -672,8 +704,11 @@ mode = "execute"
         assert!(matcher.matches_group(&group).is_empty());
     }
 
+    /// A rule may constrain the address without rendering it. Every address
+    /// that satisfies the predicate then prepares the very same command, so
+    /// there is nothing to choose: asking would be a question with one answer.
     #[test]
-    fn instance_specific_predicates_and_templates_request_instance_selection() {
+    fn addresses_preparing_the_same_command_do_not_ask_which_address() {
         let mut builder = MatcherBuilder::new();
         builder
             .add_str(
@@ -691,43 +726,14 @@ mode = "execute"
 "#,
             )
             .unwrap();
-        builder
-            .add_str(
-                "by-port-template",
-                r#"
-[metadata]
-name = "by-port-template"
-
-[match.service_type]
-equals = "_http._tcp"
-
-[action]
-command = "curl http://{hostname}:{port}"
-mode = "execute"
-"#,
-            )
-            .unwrap();
-        builder
-            .add_str(
-                "by-host-template",
-                r#"
-[metadata]
-name = "by-host-template"
-
-[match.service_type]
-equals = "_http._tcp"
-
-[action]
-command = "open http://{hostname}"
-mode = "execute"
-"#,
-            )
-            .unwrap();
         let matcher = builder.build();
         let mut record = Entry::new("site", "_http._tcp", "local");
         record.hostname = Some("site.local".to_string());
-        record.addresses = vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))];
-        record.port = Some(8080);
+        // Both satisfy the predicate, so both are candidates.
+        record.addresses = vec![
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+        ];
         let group = crate::discovery::browse_groups(
             &[record],
             crate::discovery::BrowseMode::LogicalService,
@@ -735,19 +741,54 @@ mode = "execute"
         .remove(0);
 
         let matches = matcher.matches_group(&group);
-        let needs_instance = matches
-            .iter()
-            .map(|result| (result.command.name.as_str(), result.needs_instance))
-            .collect::<Vec<_>>();
 
-        assert_eq!(
-            needs_instance,
-            vec![
-                ("by-address", true),
-                ("by-port-template", true),
-                ("by-host-template", false),
-            ]
+        assert_eq!(matches.len(), 1);
+        assert!(
+            !matches[0].needs_selection(),
+            "two addresses rendering one identical command must not ask"
         );
+        assert_eq!(matches[0].targets.len(), 1);
+    }
+
+    /// The same rule that renders the address, over the same two addresses,
+    /// does have something to ask about.
+    #[test]
+    fn addresses_preparing_different_commands_ask_which_address() {
+        let mut builder = MatcherBuilder::new();
+        builder
+            .add_str(
+                "by-address",
+                r#"
+[metadata]
+name = "by-address"
+
+[match.address]
+regex = "^192[.]0[.]2[.]"
+
+[action]
+command = "ping {address}"
+mode = "execute"
+"#,
+            )
+            .unwrap();
+        let matcher = builder.build();
+        let mut record = Entry::new("site", "_http._tcp", "local");
+        record.hostname = Some("site.local".to_string());
+        record.addresses = vec![
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)),
+        ];
+        let group = crate::discovery::browse_groups(
+            &[record],
+            crate::discovery::BrowseMode::LogicalService,
+        )
+        .remove(0);
+
+        let matches = matcher.matches_group(&group);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].needs_selection());
+        assert_eq!(candidate_addresses(&matches), ["192.0.2.10", "192.0.2.11"]);
     }
 
     #[test]
@@ -794,9 +835,9 @@ mode = "execute"
         // The `{address}` command needs a concrete IP, so both interfaces'
         // addresses are offered for selection.
         assert_eq!(matches.len(), 1);
-        assert!(matches[0].needs_instance);
+        assert!(matches[0].needs_selection());
         let addresses: Vec<String> = matches[0]
-            .matching_records
+            .targets
             .iter()
             .map(|record| record.primary_address().unwrap().to_string())
             .collect();
@@ -829,7 +870,7 @@ mode = "execute"
     fn candidate_addresses(matches: &[MatchResult]) -> Vec<String> {
         matches
             .iter()
-            .flat_map(|result| &result.matching_records)
+            .flat_map(|result| &result.targets)
             .map(|record| {
                 let [address] = record.addresses.as_slice() else {
                     panic!("candidate must carry exactly one concrete address");
@@ -1022,9 +1063,9 @@ mode = "execute"
         let matches = matcher.matches_group(&group);
 
         assert_eq!(matches.len(), 1);
-        assert!(!matches[0].needs_instance);
-        assert_eq!(matches[0].matching_records.len(), 1);
-        assert_eq!(matches[0].matching_records[0].addresses.len(), 2);
+        assert!(!matches[0].needs_selection());
+        assert_eq!(matches[0].targets.len(), 1);
+        assert_eq!(matches[0].targets[0].addresses.len(), 2);
     }
 
     #[test]
@@ -1149,8 +1190,219 @@ mode = "fork"
         let matches = matcher.matches_group(&group);
 
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].matching_records.len(), 1);
-        assert_eq!(matches[0].matching_records[0].name, "nas");
+        assert_eq!(matches[0].targets.len(), 1);
+        assert_eq!(matches[0].targets[0].name, "nas");
+    }
+
+    /// A group of `records` under `mode`, as the matcher is asked about it.
+    fn group_of(records: &[Entry], mode: crate::discovery::BrowseMode) -> EntryGroup {
+        crate::discovery::browse_groups(records, mode).remove(0)
+    }
+
+    /// An `_ssh._tcp` service on `hostname`.
+    fn ssh_on(name: &str, hostname: &str) -> Entry {
+        let mut record = Entry::new(name, "_ssh._tcp", "local");
+        record.hostname = Some(hostname.to_string());
+        record.port = Some(22);
+        record
+    }
+
+    /// The argv each target would run, in order.
+    fn target_argv(result: &MatchResult) -> Vec<Vec<String>> {
+        result
+            .targets
+            .iter()
+            .map(|target| result.command.action.prepare(target).unwrap().argv)
+            .collect()
+    }
+
+    /// The defect this task exists for: a service-type row legitimately holds
+    /// several hosts, and `hostname` is not an "instance-specific" field, so the
+    /// old field-list heuristic ran the lexically first host with no picker.
+    #[test]
+    fn a_hostname_template_over_several_hosts_asks_which_host() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "ssh"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "ssh {hostname}"
+mode = "execute"
+"#,
+        );
+        let group = group_of(
+            &[ssh_on("alpha", "alpha.local"), ssh_on("beta", "beta.local")],
+            crate::discovery::BrowseMode::ServiceType,
+        );
+        assert_eq!(group.instances().len(), 2);
+
+        let matches = matcher.matches_group(&group);
+
+        assert_eq!(matches.len(), 1);
+        assert!(
+            matches[0].needs_selection(),
+            "two hosts run two different commands, so the user must choose"
+        );
+        assert_eq!(
+            target_argv(&matches[0]),
+            [
+                vec!["ssh".to_string(), "alpha.local".to_string()],
+                vec!["ssh".to_string(), "beta.local".to_string()],
+            ]
+        );
+    }
+
+    /// The same generalization, for a field nobody would have put on a list of
+    /// instance-specific ones.
+    #[test]
+    fn a_txt_template_over_differing_values_asks_which_service() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "open-path"
+
+[match.txt.path]
+regex = "."
+
+[action]
+command = "open http://host/{txt.path}"
+mode = "execute"
+"#,
+        );
+        let mut first = Entry::new("one", "_http._tcp", "local");
+        first.hostname = Some("host.local".to_string());
+        first.txt.insert("path".to_string(), "admin".to_string());
+        let mut second = Entry::new("two", "_http._tcp", "local");
+        second.hostname = Some("host.local".to_string());
+        second.txt.insert("path".to_string(), "status".to_string());
+        let group = group_of(&[first, second], crate::discovery::BrowseMode::Host);
+
+        let matches = matcher.matches_group(&group);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].needs_selection());
+        assert_eq!(
+            target_argv(&matches[0]),
+            [
+                vec!["open".to_string(), "http://host/admin".to_string()],
+                vec!["open".to_string(), "http://host/status".to_string()],
+            ]
+        );
+    }
+
+    /// A rule that renders nothing about the service runs one command however
+    /// many services the row holds, so it must not ask.
+    #[test]
+    fn several_services_preparing_one_identical_command_do_not_ask() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "constant"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "echo hello"
+mode = "execute"
+"#,
+        );
+        let group = group_of(
+            &[ssh_on("alpha", "alpha.local"), ssh_on("beta", "beta.local")],
+            crate::discovery::BrowseMode::ServiceType,
+        );
+
+        let matches = matcher.matches_group(&group);
+
+        assert_eq!(matches.len(), 1);
+        assert!(
+            !matches[0].needs_selection(),
+            "one effective command must not raise a picker"
+        );
+        assert_eq!(matches[0].targets.len(), 1);
+    }
+
+    /// Distinct services that happen to render the same command collapse too:
+    /// the question is what runs, not how many services are behind it.
+    #[test]
+    fn different_services_rendering_the_same_command_collapse() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "ssh"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "ssh {hostname}"
+mode = "execute"
+"#,
+        );
+        // Two registrations of one host — different service names, one host.
+        let group = group_of(
+            &[
+                ssh_on("alpha", "shared.local"),
+                ssh_on("beta", "shared.local"),
+            ],
+            crate::discovery::BrowseMode::ServiceType,
+        );
+        assert_eq!(group.instances().len(), 2);
+
+        let matches = matcher.matches_group(&group);
+
+        assert_eq!(matches.len(), 1);
+        assert!(!matches[0].needs_selection());
+        assert_eq!(
+            target_argv(&matches[0]),
+            [vec!["ssh".to_string(), "shared.local".to_string()]]
+        );
+    }
+
+    /// A candidate that cannot be prepared is kept rather than dropped, so the
+    /// rule can never quietly run against a different service instead.
+    #[test]
+    fn a_candidate_that_cannot_prepare_is_offered_rather_than_skipped() {
+        let matcher = matcher_with(
+            r#"
+[metadata]
+name = "run-named"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "{name} --version"
+mode = "execute"
+"#,
+        );
+        // An empty name renders an empty program, which only preparation can
+        // catch. Dropping it here would silently run `htop --version` instead.
+        let group = group_of(
+            &[ssh_on("", "alpha.local"), ssh_on("htop", "beta.local")],
+            crate::discovery::BrowseMode::ServiceType,
+        );
+
+        let matches = matcher.matches_group(&group);
+
+        assert_eq!(matches.len(), 1);
+        assert!(
+            matches[0].needs_selection(),
+            "a failing candidate must not hand its turn to another service"
+        );
+        assert_eq!(matches[0].targets.len(), 2);
+        assert!(
+            matches[0]
+                .command
+                .action
+                .prepare(&matches[0].targets[0])
+                .is_err(),
+            "the unpreparable candidate is still the first target"
+        );
     }
 
     /// The rule, not the caller, decides what running it means.

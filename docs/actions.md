@@ -219,15 +219,38 @@ Common placeholders:
 - `{port}`
 - `{txt.<key>}`
 
-If a command uses instance-specific fields such as `{address}` or `{port}`, and
-the selected row contains multiple service instances, `kinjo` asks which
-instance to use before running the command.
+### Choosing a target
+
+A row may cover several services — a host row collects everything on one host, a
+service-type row everything advertising one type — and a service may advertise
+several addresses. When you invoke a command there, `kinjo` decides whether to
+ask you which one it should act on by looking at *what the command would
+actually run*:
+
+- It builds the command for every service and address the rule matches.
+- Candidates producing the **identical** command collapse into one, and it runs
+  without asking. There is nothing to choose between two identical commands.
+- If two candidates produce **different** commands, `kinjo` asks which target to
+  use, and runs only the one you pick.
+
+This follows from the command line itself, so **any** placeholder that varies
+across a row causes the question — `{hostname}`, `{name}`, `{service_type}`,
+`{domain}`, `{port}`, `{address}`, or a `{txt.<key>}`. A command that
+interpolates nothing, such as `echo hello`, runs once however many services the
+row holds.
+
+For example, `ssh {hostname}` on a service-type row covering two hosts asks
+which host, because it would otherwise pick one for you. The same rule on a row
+whose services all share one host does not ask, because both candidates would
+run the very same command.
 
 A command using `{address}` needs one concrete address. With no
 `[match.address]` predicate, every advertised address is offered for selection;
 with predicates, only the addresses satisfying all of them are. A service whose
 addresses are not (yet) resolved offers no such command at all, rather than
-failing once it is run.
+failing once it is run. If the rule constrains the address but does not
+interpolate it, every satisfying address builds the same command, so `kinjo`
+does not ask.
 
 ### Quoting and Escaping
 

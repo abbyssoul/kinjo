@@ -12,7 +12,12 @@ use super::ActionMode;
 
 /// The final argument vector and the mode deciding how it reaches the operating
 /// system. Produced by [`super::CommandAction::prepare`].
-#[derive(Debug, Clone)]
+///
+/// Equality is the rule's *observable* execution: two prepared commands that
+/// compare equal run the identical program with the identical arguments in the
+/// identical way, so a user has nothing to choose between them. That is what
+/// makes them collapsible, and what makes anything else worth asking about.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedCommand {
     pub argv: Vec<String>,
     pub mode: ActionMode,
