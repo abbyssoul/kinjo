@@ -2241,7 +2241,7 @@ help = ["f1"]
 
     /// An entry whose rendered line names `index` unmistakably.
     fn numbered_entry(index: usize) -> Entry {
-        let mut record = Entry::new(&format!("svc-{index:02}"), "_ssh._tcp", "local");
+        let mut record = Entry::new(format!("svc-{index:02}"), "_ssh._tcp", "local");
         record.hostname = Some(format!("host-{index:02}.local"));
         record.addresses = vec!["192.0.2.1".parse().unwrap()];
         record.port = Some(22);

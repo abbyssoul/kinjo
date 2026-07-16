@@ -35,9 +35,9 @@ impl Window {
     /// A `selected` beyond `total` cannot pull the window past the content: the
     /// offset is clamped to the last full window either way.
     pub(crate) fn containing(total: usize, height: usize, selected: usize) -> Self {
-        let offset = if height == 0 || total <= height {
-            0
-        } else if selected < height {
+        // Everything fits, there is nowhere to look, or the selection is already
+        // within the first window: all three show the content from the top.
+        let offset = if height == 0 || total <= height || selected < height {
             0
         } else {
             (selected + 1 - height).min(total - height)
