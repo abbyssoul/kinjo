@@ -12,5 +12,6 @@ pub(crate) mod display;
 pub mod filter;
 pub mod keymap;
 pub mod render;
+pub(crate) mod viewport;
 
 pub use app::App;

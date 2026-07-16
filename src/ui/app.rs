@@ -31,6 +31,7 @@ use super::{
     filter::FilterState,
     keymap::{Action, KeyBindings, Mode as KeyMode},
     render,
+    viewport::Window,
 };
 
 /// What a reload attempt came back with. There is no third case: a reload
@@ -179,6 +180,12 @@ pub struct App {
     pub command_groups: Vec<CommandGroup>,
     /// Cursor within the service picker opened from a command row.
     pub service_picker_index: usize,
+    /// Top line shown in the help overlay (0 = unscrolled). Help is generated
+    /// from the active bindings, so it can be taller than the popup; this is how
+    /// far down it the reader has moved. Clamped against the content when it
+    /// changes, and again by the renderer's window, so a resize cannot strand it
+    /// past the end.
+    pub help_scroll: usize,
     /// Top line shown in the details pane (0 = unscrolled).
     pub details_scroll: usize,
     /// Largest valid `details_scroll`, recomputed by the renderer each frame.
@@ -232,6 +239,7 @@ impl App {
             ticks: 0,
             command_groups: Vec::new(),
             service_picker_index: 0,
+            help_scroll: 0,
             details_scroll: 0,
             details_max_scroll: Cell::new(0),
             details_viewport: Cell::new(0),
@@ -262,6 +270,9 @@ impl App {
             self.poll_reload();
             self.drain_discovery();
             terminal.draw(|frame| render::render(frame, self))?;
+            // The screen the frame just drawn used, and the one the next frame
+            // will use: what a key that moves a modal window is bounded by.
+            let area = terminal.get_frame().area();
 
             if event::poll(Duration::from_millis(120))? {
                 match event::read()? {
@@ -269,7 +280,7 @@ impl App {
                         if key.kind == KeyEventKind::Release {
                             continue;
                         }
-                        if let Some(command) = self.handle_key(key)? {
+                        if let Some(command) = self.handle_key(key, area)? {
                             return Ok(Some(command));
                         }
                         if self.should_quit {
@@ -656,7 +667,12 @@ impl App {
     /// Resolve the key to at most one action for the active mode, then act on
     /// it. Resolution is the keymap's job, so no handler re-checks keys and no
     /// binding can be shadowed by the order the handlers are written in.
-    fn handle_key(&mut self, key: KeyEvent) -> Result<Option<PreparedCommand>> {
+    ///
+    /// `area` is the screen the modal windows are computed against, so that a
+    /// key which moves a window is bounded by the same geometry that will draw
+    /// it. It is passed in rather than written back by the renderer: the app
+    /// state a key changes stays something only key handling changes.
+    fn handle_key(&mut self, key: KeyEvent, area: Rect) -> Result<Option<PreparedCommand>> {
         let action = self.keybindings.resolve(self.mode.key_mode(), key);
         if action == Some(Action::Quit) {
             self.should_quit = true;
@@ -677,12 +693,32 @@ impl App {
             AppMode::InstancePicker => self.handle_instance_picker_key(action),
             AppMode::ServicePicker => self.handle_service_picker_key(action),
             AppMode::Help => {
-                if action == Some(Action::HelpClose) {
-                    self.return_to_browse();
-                }
+                self.handle_help_key(action, area);
                 Ok(None)
             }
         }
+    }
+
+    /// Help is read, not selected from, so its navigation moves the window
+    /// rather than a cursor. `area` is the screen the next frame will be drawn
+    /// on: the same geometry decides how far down the content a scroll can go.
+    fn handle_help_key(&mut self, action: Option<Action>, area: Rect) {
+        match action {
+            Some(Action::HelpClose) => self.return_to_browse(),
+            Some(Action::HelpDown) => self.scroll_help(1, area),
+            Some(Action::HelpUp) => self.scroll_help(-1, area),
+            _ => {}
+        }
+    }
+
+    /// Scroll help by `delta` lines, clamped to what is left to read. Clamping
+    /// here is what keeps the overlay's own keys honest: at the bottom, further
+    /// presses do nothing rather than banking scroll the reader would have to
+    /// undo before the content moved again.
+    fn scroll_help(&mut self, delta: isize, area: Rect) {
+        let total = render::help_lines(self).len();
+        let max = Window::max_scroll(total, render::help_viewport(area)) as isize;
+        self.help_scroll = (self.help_scroll as isize + delta).clamp(0, max) as usize;
     }
 
     fn handle_browse_key(
@@ -706,7 +742,11 @@ impl App {
             Some(Action::Refresh) => self.refresh_services(),
             Some(Action::DetailsDown) => self.scroll_details(1),
             Some(Action::DetailsUp) => self.scroll_details(-1),
-            Some(Action::OpenHelp) => self.mode = AppMode::Help,
+            // Help opens where it is read from: the top.
+            Some(Action::OpenHelp) => {
+                self.help_scroll = 0;
+                self.mode = AppMode::Help;
+            }
             // Typing a character with nothing bound to it starts a search with
             // it, so the query never loses the keystroke that opened it.
             None => {
@@ -1604,8 +1644,16 @@ mode = "execute"
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    /// A comfortable terminal, for the tests whose subject is not the geometry.
+    const SCREEN: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 120,
+        height: 40,
+    };
+
     fn send(app: &mut App, code: KeyCode) -> Option<PreparedCommand> {
-        app.handle_key(key(code)).unwrap()
+        app.handle_key(key(code), SCREEN).unwrap()
     }
 
     #[test]
@@ -1657,8 +1705,11 @@ mode = "execute"
         send(&mut app, KeyCode::Backspace);
         assert_eq!(app.filter.text_query, "z");
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
-            .unwrap();
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            SCREEN,
+        )
+        .unwrap();
         assert_eq!(app.filter.text_query, "", "ctrl-u clears the query");
 
         send(&mut app, KeyCode::Enter);
@@ -1741,8 +1792,11 @@ mode = "execute"
         send(&mut app, KeyCode::Char('z'));
         assert_eq!(app.visible_groups.len(), 1);
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
-            .unwrap();
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            SCREEN,
+        )
+        .unwrap();
 
         assert_eq!(app.filter.text_query, "");
         assert_eq!(app.mode, AppMode::Search, "clearing stays in search");
@@ -1764,15 +1818,170 @@ clear = ["ctrl-k"]
         app.keybindings = KeyBindings::load(std::slice::from_ref(&path)).unwrap();
         send(&mut app, KeyCode::Char('z'));
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
-            .unwrap();
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+            SCREEN,
+        )
+        .unwrap();
         assert_eq!(app.filter.text_query, "z", "ctrl-u no longer clears");
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
-            .unwrap();
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            SCREEN,
+        )
+        .unwrap();
         assert_eq!(app.filter.text_query, "");
 
         remove(&path);
+    }
+
+    // ── help scrolling ─────────────────────────────────────────────────────
+
+    /// The 60×18 terminal the midpoint review reproduced the help clipping on.
+    const SHORT_SCREEN: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 60,
+        height: 18,
+    };
+
+    fn help_app() -> App {
+        let mut app = app_with(Matcher::default(), vec![ssh("zulu", "10.0.0.2")]);
+        app.mode = AppMode::Help;
+        app
+    }
+
+    fn help_max_scroll(app: &App, area: Rect) -> usize {
+        Window::max_scroll(render::help_lines(app).len(), render::help_viewport(area))
+    }
+
+    #[test]
+    fn help_opens_at_the_top_and_scrolls_down_a_row_at_a_time() {
+        let mut app = help_app();
+        app.help_scroll = 7;
+        app.mode = AppMode::Browse;
+
+        send(&mut app, KeyCode::Char('?'));
+        assert_eq!(app.mode, AppMode::Help);
+        assert_eq!(app.help_scroll, 0, "help must open where it is read from");
+
+        app.handle_key(key(KeyCode::Down), SHORT_SCREEN).unwrap();
+        assert_eq!(app.help_scroll, 1);
+        app.handle_key(key(KeyCode::Char('j')), SHORT_SCREEN)
+            .unwrap();
+        assert_eq!(app.help_scroll, 2);
+        app.handle_key(key(KeyCode::Up), SHORT_SCREEN).unwrap();
+        assert_eq!(app.help_scroll, 1);
+    }
+
+    /// Scrolling must stop at the ends. Banking scroll past the bottom would
+    /// leave the reader pressing up several times before anything moved.
+    #[test]
+    fn help_scrolling_stops_at_both_ends_of_the_content() {
+        let mut app = help_app();
+        let max = help_max_scroll(&app, SHORT_SCREEN);
+        assert!(
+            max > 0,
+            "help must be clipped at 60x18 for this to mean much"
+        );
+
+        for _ in 0..max + 10 {
+            app.handle_key(key(KeyCode::Down), SHORT_SCREEN).unwrap();
+        }
+        assert_eq!(app.help_scroll, max);
+
+        for _ in 0..max + 10 {
+            app.handle_key(key(KeyCode::Up), SHORT_SCREEN).unwrap();
+        }
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    /// On a terminal tall enough to show every row there is nothing to scroll,
+    /// so the scroll keys must not move a window that is already complete.
+    #[test]
+    fn help_does_not_scroll_when_all_of_it_fits() {
+        let mut app = help_app();
+        assert_eq!(help_max_scroll(&app, SCREEN), 0);
+
+        app.handle_key(key(KeyCode::Down), SCREEN).unwrap();
+
+        assert_eq!(app.help_scroll, 0);
+    }
+
+    /// Task 013's resolver stays the single source of truth: rebinding the
+    /// scroll keys must move dispatch with the binding, and the defaults they
+    /// replaced must stop working.
+    #[test]
+    fn rebound_help_scroll_keys_replace_the_defaults() {
+        let path = temp_file(
+            "help-scroll",
+            r#"
+[help]
+down = ["ctrl-n"]
+up = ["ctrl-p"]
+"#,
+        );
+        let mut app = help_app();
+        app.keybindings = KeyBindings::load(std::slice::from_ref(&path)).unwrap();
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            SHORT_SCREEN,
+        )
+        .unwrap();
+        assert_eq!(app.help_scroll, 1);
+
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            SHORT_SCREEN,
+        )
+        .unwrap();
+        assert_eq!(app.help_scroll, 0);
+
+        // The default it replaced no longer scrolls.
+        app.handle_key(key(KeyCode::Down), SHORT_SCREEN).unwrap();
+        assert_eq!(app.help_scroll, 0, "`down` is no longer bound to help.down");
+
+        remove(&path);
+    }
+
+    /// Unbinding help scrolling leaves the overlay static rather than falling
+    /// back to a hard-coded key beside the resolver.
+    #[test]
+    fn unbound_help_scroll_keys_do_nothing() {
+        let path = temp_file(
+            "help-scroll-off",
+            r#"
+[help]
+down = []
+up = []
+"#,
+        );
+        let mut app = help_app();
+        app.keybindings = KeyBindings::load(std::slice::from_ref(&path)).unwrap();
+
+        app.handle_key(key(KeyCode::Down), SHORT_SCREEN).unwrap();
+        app.handle_key(key(KeyCode::Char('j')), SHORT_SCREEN)
+            .unwrap();
+
+        assert_eq!(app.help_scroll, 0);
+
+        remove(&path);
+    }
+
+    /// A window scrolled to the bottom of a short terminal must not strand the
+    /// content when the terminal grows: the offset is clamped against whatever
+    /// geometry the next key is handled on.
+    #[test]
+    fn growing_the_terminal_pulls_a_scrolled_help_window_back_onto_its_content() {
+        let mut app = help_app();
+        app.help_scroll = help_max_scroll(&app, SHORT_SCREEN);
+        assert!(app.help_scroll > 0);
+
+        // The same key, now on a screen that shows all of help.
+        app.handle_key(key(KeyCode::Down), SCREEN).unwrap();
+
+        assert_eq!(app.help_scroll, 0, "nothing left to scroll to");
     }
 
     /// An unbound control chord is a shortcut that did nothing, not text: it
@@ -1782,8 +1991,11 @@ clear = ["ctrl-k"]
         let mut app = app_with(Matcher::default(), vec![ssh("zulu", "10.0.0.2")]);
         send(&mut app, KeyCode::Char('z'));
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))
-            .unwrap();
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            SCREEN,
+        )
+        .unwrap();
 
         assert_eq!(app.filter.text_query, "z");
     }
@@ -1793,8 +2005,11 @@ clear = ["ctrl-k"]
     fn shifted_characters_type_into_the_search_query() {
         let mut app = app_with(Matcher::default(), vec![ssh("Zulu", "10.0.0.2")]);
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT))
-            .unwrap();
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
+            SCREEN,
+        )
+        .unwrap();
 
         assert_eq!(app.mode, AppMode::Search);
         assert_eq!(app.filter.text_query, "Z");
@@ -3318,7 +3533,10 @@ mode = "execute"
         let mut common = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
         assert!(
             common
-                .handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
+                .handle_key(
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                    SCREEN
+                )
                 .unwrap()
                 .is_none()
         );
@@ -3338,8 +3556,11 @@ mode = "execute"
         send(&mut app, KeyCode::Char('?'));
         assert_eq!(app.mode, AppMode::Help);
 
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL))
-            .unwrap();
+        app.handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            SCREEN,
+        )
+        .unwrap();
 
         assert!(app.should_quit, "ctrl-c must quit while a modal is open");
     }
