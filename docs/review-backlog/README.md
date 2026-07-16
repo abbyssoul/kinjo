@@ -41,7 +41,7 @@ Status values:
 | 006 | P0 | done | [Grouped action targeting](tasks/006-grouped-action-targeting.md) | 005 | 007, 008, 010 |
 | 007 | P1 | ready | [Transactional config reload](tasks/007-transactional-config-reload.md) | 005 | 006, 015, 020 |
 | 008 | P0 | done | [Stale picker revalidation](tasks/008-stale-picker-revalidation.md) | 001, 002, 006 | 010, 011, 014, 015 |
-| 009 | P1 | ready | [CLI config-directory handling](tasks/009-cli-config-directory-handling.md) | — | 003, 020 |
+| 009 | P1 | done | [CLI config-directory handling](tasks/009-cli-config-directory-handling.md) | — | 003, 020 |
 | 010 | P1 | done | [Mode-aware aggregate views](tasks/010-mode-aware-aggregate-views.md) | 001 | 006, 008, 011, 012, 013, 014, 015 |
 | 011 | P1 | ready | [Scrollable modal content and pickers](tasks/011-scrollable-pickers.md) | 008, 010 | 012, 013, 014, 015 |
 | 012 | P0 | done | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014, 020 |
