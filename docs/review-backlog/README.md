@@ -115,13 +115,20 @@ than hidden in completion notes:
 
 - tasks 007 and 009 still reproduce on the current branch and are ready;
 - task 011 now owns short-terminal help clipping as well as picker visibility;
-- task 020 follows task 012 for direct stdout/stderr and post-TUI error safety;
+- task 020 followed task 012 for direct stdout/stderr and post-TUI error safety
+  and is now done;
 - task 021 follows task 014 for the still-unconditional session spinner;
-- task 018 follows task 019 so CI targets the final fake-backend CLI;
+- task 019 is now done, so task 018 is ready to add CI coverage against the
+  final fake-backend CLI;
 - stale fuzz warnings in tasks 003 and 005 are marked resolved.
 
-This normalization changed backlog documentation only; it did not implement any
-open task or alter source behavior.
+The current claimable queue is 007, 009, 011, 014, and 018. Task 021 remains
+blocked on 014, and task 015 remains the final refactor after all other open
+tasks are complete.
+
+The original midpoint normalization changed backlog documentation only.
+Subsequent implementations are reflected in the task index and completion
+records above.
 
 ## Completion Gate
 
