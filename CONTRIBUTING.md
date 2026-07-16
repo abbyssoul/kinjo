@@ -72,6 +72,43 @@ Build a Debian package if `cargo-deb` is installed:
 cargo deb
 ```
 
+## Driving the TUI
+
+Tests assert what the app computes. They cannot tell you what a person sees, and
+a rendering, keybinding, or picker change is only really verified by running it.
+`scripts/drive-tui.sh` runs the app in a detached tmux pane, sends keys, and
+prints the rendered screen — no live network needed, and no terminal of your own
+tied up:
+
+```sh
+scripts/drive-tui.sh run 'Tab Tab Down Down Down Enter'   # one shot
+scripts/drive-tui.sh --help                               # keys, options
+```
+
+It defaults to `--fake-discovery --config-dir actions`: the sample backend plus
+the bundled rules, which is the reproducible way to exercise the UI. Pass other
+arguments after `--`. For a longer investigation, hold a session open and look
+between steps:
+
+```sh
+scripts/drive-tui.sh start
+scripts/drive-tui.sh keys Tab Tab
+scripts/drive-tui.sh shot
+scripts/drive-tui.sh stop
+```
+
+Set `KINJO_COLS`/`KINJO_ROWS` to check a size — a narrow or short terminal is
+where layout bugs live:
+
+```sh
+KINJO_COLS=60 KINJO_ROWS=18 scripts/drive-tui.sh run 'Down'
+```
+
+The sample records are chosen so the UI's real behavior is reachable: SSH is
+advertised on two hosts, so the `_ssh._tcp` service-type row asks which host to
+act on, and one service carries several addresses. If you change them, keep them
+able to demonstrate what the app does.
+
 ## Fuzzing
 
 The parser and the discovery entry model are exercised by [`cargo-fuzz`]
@@ -115,6 +152,7 @@ CI runs a short soak on every push/PR and a longer one on a weekly schedule
 - `src/ui/`: CLI parsing, config/keymap loading, app state, and rendering.
 - `src/lib.rs` / `src/main.rs`: the library composition root and its thin binary.
 - `fuzz/`: `cargo-fuzz` targets; `scripts/fuzz.sh`: the fuzz runner.
+- `scripts/drive-tui.sh`: runs the TUI in tmux and prints what it renders.
 - `actions/`: bundled command examples installed as system command defaults in
   the Debian package.
 - `docs/actions.md`: custom command file reference.

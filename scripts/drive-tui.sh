@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+#
+# Drive the kinjo TUI in a detached tmux pane and print what it renders.
+#
+# Tests assert what the app computes; only running it shows what a person
+# actually sees. This makes that cheap and repeatable — for a human, or for an
+# agent that cannot look at a screen.
+#
+# Usage:
+#   scripts/drive-tui.sh start [-- kinjo-args...]        # build, then start
+#   scripts/drive-tui.sh keys <key> [key ...]            # send keys, then settle
+#   scripts/drive-tui.sh shot                            # print the screen
+#   scripts/drive-tui.sh stop                            # end the session
+#   scripts/drive-tui.sh run '<keys>' [-- kinjo-args...] # all of the above
+#
+# Keys are tmux key names: Tab BTab Enter Escape Down Up Left Right Space, or a
+# literal character such as q or /. `sleep:N` pauses N seconds mid-sequence, for
+# a UI that is still waiting on discovery.
+#
+# Examples:
+#   # Does an aggregate row ask which host to act on, or pick one silently?
+#   scripts/drive-tui.sh run 'Tab Tab Down Down Down Enter'
+#
+#   # Or step through it, looking after each move:
+#   scripts/drive-tui.sh start
+#   scripts/drive-tui.sh keys Tab Tab
+#   scripts/drive-tui.sh shot
+#   scripts/drive-tui.sh stop
+#
+#   # A real backend, a custom rule set, a narrow terminal:
+#   KINJO_COLS=60 KINJO_ROWS=20 scripts/drive-tui.sh run 'Down' -- --config-dir /tmp/rules
+#
+# Environment:
+#   KINJO_SESSION   tmux session name (default: kinjo-drive)
+#   KINJO_COLS      pane width  (default: 100)
+#   KINJO_ROWS      pane height (default: 30)
+#   KINJO_SETTLE    seconds to wait after a key batch (default: 0.6)
+#   KINJO_STARTUP   seconds to wait after start, for discovery (default: 2.5)
+#
+# The default arguments are `--fake-discovery --config-dir actions`: the sample
+# backend plus the bundled rules, which is the reproducible way to exercise the
+# UI without a live network. Pass your own after `--` to override them.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+SESSION="${KINJO_SESSION:-kinjo-drive}"
+COLS="${KINJO_COLS:-100}"
+ROWS="${KINJO_ROWS:-30}"
+SETTLE="${KINJO_SETTLE:-0.6}"
+STARTUP="${KINJO_STARTUP:-2.5}"
+BIN="target/debug/kinjo"
+DEFAULT_ARGS=(--fake-discovery --config-dir actions)
+
+die() {
+    echo "drive-tui: $*" >&2
+    exit 1
+}
+
+usage() {
+    sed -n '3,44p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+require_session() {
+    tmux has-session -t "$SESSION" 2>/dev/null ||
+        die "no session '$SESSION' — run: scripts/drive-tui.sh start"
+}
+
+cmd_start() {
+    local args=("$@")
+    if [[ ${#args[@]} -eq 0 ]]; then
+        args=("${DEFAULT_ARGS[@]}")
+    fi
+
+    command -v tmux >/dev/null || die "tmux is required"
+    cargo build --locked -q || die "build failed"
+    [[ -x "$BIN" ]] || die "no binary at $BIN"
+
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    # Quote every argument: a rule path or service type may contain anything.
+    local command
+    command=$(printf '%q ' "$BIN" "${args[@]}")
+    tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" "$command"
+    # Keep the pane after the app exits, so the last frame — a handoff, a crash,
+    # an error — is still there to look at.
+    tmux set-option -t "$SESSION" remain-on-exit on >/dev/null
+    sleep "$STARTUP"
+}
+
+cmd_keys() {
+    require_session
+    local key
+    for key in "$@"; do
+        case "$key" in
+            sleep:*) sleep "${key#sleep:}" ;;
+            *) tmux send-keys -t "$SESSION" "$key" ;;
+        esac
+    done
+    sleep "$SETTLE"
+}
+
+cmd_shot() {
+    require_session
+    tmux capture-pane -p -t "$SESSION"
+}
+
+cmd_stop() {
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+}
+
+cmd_run() {
+    local keys_string="${1-}"
+    shift || true
+    if [[ "${1-}" == "--" ]]; then
+        shift
+    fi
+
+    # `run` owns the session it makes, however it ends.
+    trap cmd_stop EXIT
+    cmd_start "$@"
+
+    local keys=()
+    read -ra keys <<<"$keys_string"
+    if [[ ${#keys[@]} -gt 0 ]]; then
+        cmd_keys "${keys[@]}"
+    fi
+    cmd_shot
+}
+
+subcommand="${1-}"
+shift || true
+case "$subcommand" in
+    start)
+        if [[ "${1-}" == "--" ]]; then shift; fi
+        cmd_start "$@"
+        ;;
+    keys) cmd_keys "$@" ;;
+    shot) cmd_shot ;;
+    stop) cmd_stop ;;
+    run) cmd_run "$@" ;;
+    -h | --help | help | "") usage ;;
+    *) die "unknown subcommand '$subcommand' (try --help)" ;;
+esac

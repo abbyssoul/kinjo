@@ -169,6 +169,20 @@ Use narrower targeted tests during development. Run the full gate before marking
 a task done unless the task explains an environment limitation in its completion
 record.
 
+A green gate is not the same as a working feature. For any task that changes what
+the user sees or does — rendering, keybindings, pickers, filters, layout — drive
+the real app and look at it:
+
+```sh
+scripts/drive-tui.sh run 'Tab Tab Down Down Down Enter'   # see CONTRIBUTING.md
+```
+
+It uses the sample backend, so it needs no live network and is reproducible. If a
+change genuinely cannot be reached this way, say so in the completion record
+rather than leaving the omission unstated. Tasks 006 and 008 both shipped on
+regression tests alone because the sample set could not reach the behavior they
+fixed; task 017 closed that gap, and this is how to avoid reopening it.
+
 ## Source Documentation
 
 - [`README.md`](../../README.md): product behavior and architecture overview.
