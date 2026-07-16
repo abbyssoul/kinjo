@@ -50,6 +50,8 @@ Status values:
 | 015 | P2 | blocked | [App and RuleEngine refactoring](tasks/015-app-and-rule-engine-refactoring.md) | 001–014, 016 | all prior tasks; run last |
 | 016 | P0 | done | [Remove implicit fake fallback](tasks/016-remove-implicit-fake-fallback.md) | — | 002 |
 | 017 | P2 | done | [Fake backend heterogeneous SSH row](tasks/017-fake-backend-heterogeneous-ssh-row.md) | 006 | — |
+| 018 | P2 | ready | [TUI smoke test in CI](tasks/018-tui-smoke-test-in-ci.md) | — | 019 |
+| 019 | P2 | ready | [Fake as a selectable backend](tasks/019-fake-as-a-selectable-backend.md) | — | 018 |
 
 Priority meanings:
 
@@ -66,6 +68,10 @@ Discovery:     016 (minimal fallback removal, immediately shippable)
 Command rules: 004 → 005 → 006 → 008
                          └──────→ 007
                             006 → 017 (makes 006 verifiable by hand)
+
+Verification:  017 → 018 (smoke-test the rendered UI in CI)
+               019 (fake becomes a --backend, feature-gated; moves 018's
+                    invocation, so serialize the two)
 
 CLI:           009
 
