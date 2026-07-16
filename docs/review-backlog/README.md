@@ -47,13 +47,13 @@ Status values:
 | 012 | P0 | done | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014, 020 |
 | 013 | P1 | done | [Keybindings and search consistency](tasks/013-keybindings-and-search-consistency.md) | — | 011, 012, 014 |
 | 014 | P2 | done | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015, 021 |
-| 015 | P2 | blocked | [App and RuleEngine refactoring](tasks/015-app-and-rule-engine-refactoring.md) | 001–014, 016–021 | all prior tasks; run last |
+| 015 | P2 | ready | [App and RuleEngine refactoring](tasks/015-app-and-rule-engine-refactoring.md) | 001–014, 016–021 | all prior tasks; run last |
 | 016 | P0 | done | [Remove implicit fake fallback](tasks/016-remove-implicit-fake-fallback.md) | — | 002 |
 | 017 | P2 | done | [Fake backend heterogeneous SSH row](tasks/017-fake-backend-heterogeneous-ssh-row.md) | 006 | — |
 | 018 | P2 | done | [TUI smoke test in CI](tasks/018-tui-smoke-test-in-ci.md) | 017, 019 | 015 |
 | 019 | P2 | done | [Fake as a selectable backend](tasks/019-fake-as-a-selectable-backend.md) | 017 | — |
 | 020 | P0 | done | [Safe process-owned terminal output](tasks/020-safe-process-terminal-output.md) | 012 | 007, 009, 015 |
-| 021 | P2 | ready | [Session-aware activity indicator](tasks/021-session-aware-activity-indicator.md) | 002, 010, 014 | 014, 015 |
+| 021 | P2 | done | [Session-aware activity indicator](tasks/021-session-aware-activity-indicator.md) | 002, 010, 014 | 014, 015 |
 
 Priority meanings:
 
@@ -119,20 +119,43 @@ than hidden in completion notes:
 - task 020 followed task 012 for direct stdout/stderr and post-TUI error safety
   and is now done;
 - task 021 followed task 014 for the still-unconditional session spinner and is
-  now ready;
+  now done;
 - tasks 019 and 018 are now done, so CI covers the final fake-backend CLI at
   default and narrow terminal sizes;
 - stale fuzz warnings in tasks 003 and 005 are marked resolved.
 
-Task 014 is now done, which unblocked task 021 — the only remaining ready task.
-Task 015 remains the final refactor once 021 is complete.
+## Current Validation
 
-Task 014 removed the last of the renderer's write-back into `App`: no
-`Cell`-backed layout fields remain, and `src/ui/layout.rs` owns the browse
-screen's geometry as a value the event loop computes before both drawing and
-input. Task 021 therefore renders its indicator from an immutable `&App`, and
-task 015 should treat that module — with `ui::viewport` from task 011 — as the
-shape to extend rather than revisit.
+Re-validated on 2026-07-17 at the head of `main` with tasks 014 and 021 done:
+
+```text
+cargo fmt -- --check                                      pass
+cargo clippy --locked --all-targets --all-features -- -D warnings
+                                                            pass
+cargo test --locked --all-targets                           409 passed
+cargo test --locked --all-targets --all-features            435 passed
+cargo +nightly fuzz build                                   5 targets built
+```
+
+Up from 320/335 at the midpoint, with no test removed or weakened. The real TUI
+driver passed at 100×30, 100×14, 60×18, and 20×8, on both `--backend fake` (a
+finite stream settling to a still `✓`) and `--backend mdns-sd` (a live browse
+animating). No regression in a completed task was found.
+
+Tasks 014 and 021 are now done. **Task 015 is the only task left**, and every
+dependency it named is complete.
+
+Two things it should inherit rather than revisit:
+
+- Task 014 removed the last of the renderer's write-back into `App`: no
+  `Cell`-backed layout fields remain, and `src/ui/layout.rs` owns the browse
+  screen's geometry as a value the event loop computes before both drawing and
+  input. With `ui::viewport` from task 011, that is the shape to extend.
+- Task 021 found a second, unrecorded spinner in `render_services` alongside the
+  one its evidence named, and that one treated `Complete` as *listening*. Both
+  now render from one `Activity` mapping. The lesson generalises for 015: the
+  duplicate was invisible because the two call sites each did their own
+  arithmetic on `ticks`.
 
 The original midpoint normalization changed backlog documentation only.
 Subsequent implementations are reflected in the task index and completion

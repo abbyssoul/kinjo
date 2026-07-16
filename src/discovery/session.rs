@@ -139,6 +139,35 @@ impl DiscoverySession {
         }
     }
 
+    /// A session that has already ended in `state`.
+    ///
+    /// For tests about how an ending is *presented* rather than how it is
+    /// reached. Reaching each ending for real is this module's own business and
+    /// is covered below; this lets a caller cover every terminal state without a
+    /// live producer — including [`SessionState::Complete`], which otherwise
+    /// only a finite fake stream can produce, and then only under its feature.
+    ///
+    /// `state` must be an ending. [`SessionState::Listening`] here would be a
+    /// session that has ended and is still running: use [`Self::inert`] for a
+    /// live one.
+    #[cfg(test)]
+    pub(crate) fn ended(state: SessionState) -> Self {
+        debug_assert!(
+            !state.is_listening(),
+            "`ended` takes an ending; use `inert` for a listening session"
+        );
+        // No sender: the channel is disconnected, exactly as it is after a real
+        // producer has gone. `poll` leaves an already-ended state alone, so the
+        // session stays in the ending it was given.
+        let (_, receiver) = mpsc::channel();
+        Self {
+            receiver,
+            producer: None,
+            keepalive: None,
+            state,
+        }
+    }
+
     /// A session that stays listening and never produces anything, for tests
     /// about behaviour that has nothing to do with discovery.
     #[cfg(test)]

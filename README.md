@@ -341,6 +341,8 @@ Default keys follow Vim-style conventions:
 - `/`: fuzzy text filter
 - `t`: service type checklist filter
 - `tab` / `shift+tab` (or `←` / `→`): switch view tab
+- `s`: narrow the list to the selected row's host (press again to clear)
+- `d` / `u` (or `page down` / `page up`): scroll the details pane
 - `r` / `F5`: refresh — restart service discovery from scratch
 - `?`: help
 - `q`: quit
@@ -358,6 +360,20 @@ A host's details name the host and list every service on it — each with its ow
 type, port, and TXT data — rather than presenting one service's fields as the
 host's. A service type's details likewise list every host offering it. Actions
 always run against a concrete discovered service, whichever tab they start from.
+
+The indicator at the top left says what discovery is doing, and it only animates
+while something is actually happening:
+
+| Indicator | Meaning |
+|---|---|
+| `⠋` (spinning) | Browsing. The list may still change. |
+| `✓` | A sample stream finished normally. Its records stay valid; nothing more will arrive. |
+| `✗` | Discovery failed or stopped. Its records are no longer being confirmed. |
+
+A still indicator therefore means the list is final until you refresh (`r`),
+which starts a new browse and returns the indicator to spinning. The empty-list
+message says the same thing in words, so the two can never disagree. Neither
+ending retries by itself.
 
 The type filter (`t`) lists the service types currently being advertised, and
 its `types n/m` chip counts only those: `m` is how many types are on the link

@@ -313,7 +313,11 @@ impl App {
         self.details_scroll = self.details_scroll.min(self.layout.details_max_scroll());
     }
 
-    fn drain_discovery(&mut self) {
+    /// Take everything the session has produced since the last tick, and notice
+    /// if it has ended. Crate-visible for the same reason as
+    /// [`App::update_layout`]: a test that wants a frame the event loop could
+    /// actually have drawn has to drive the loop's steps, not simulate them.
+    pub(crate) fn drain_discovery(&mut self) {
         let mut changed = false;
         loop {
             let event = match self.session.poll() {
@@ -3287,6 +3291,34 @@ mode = "execute"
         app.drain_discovery();
         assert_eq!(app.visible_groups.len(), 1);
         assert_eq!(app.visible_groups[0].label(), "gamma");
+    }
+
+    /// The other ending: a finished sample stream is not a failure, but it is
+    /// still over, and refreshing it must start a live browse rather than
+    /// leave the user on a session that can never produce anything again.
+    #[test]
+    fn refresh_restarts_a_completed_session() {
+        let (factory, spawned) = channel_factory();
+        let mut app = App::new(
+            test_cli(),
+            Matcher::default(),
+            KeyBindings::default(),
+            DiscoverySession::ended(SessionState::Complete),
+        )
+        .with_discovery_factory(factory);
+        assert!(!app.session.state().is_listening());
+
+        send(&mut app, KeyCode::Char('r'));
+
+        assert!(
+            app.session.state().is_listening(),
+            "refresh must restart a completed session"
+        );
+        spawned.lock().unwrap()[0]
+            .send(DiscoveryEvent::Upsert(ssh("gamma", "10.0.0.3")))
+            .unwrap();
+        app.drain_discovery();
+        assert_eq!(app.visible_groups.len(), 1);
     }
 
     /// The session owns its receiver, so a replaced session's events cannot

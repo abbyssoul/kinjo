@@ -35,6 +35,63 @@ const WARN: Color = Color::Rgb(0xe0, 0xaf, 0x68); // amber
 const STAR: Color = Color::Rgb(0xf7, 0xce, 0x52); // yellow
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// The indicators for a session that has finished and one that has stopped.
+/// Single-width, like the spinner frames they stand in for, so the tab strip
+/// beside them sits in the same column whatever discovery is doing.
+const DONE: &str = "✓";
+const STOPPED: &str = "✗";
+
+/// What the UI says discovery is doing.
+///
+/// Animation is a claim: something is happening in the background, and the list
+/// may still change. Only a listening session may make it. A finished sample
+/// stream and a dead browse are both *over* — a spinner above either one invites
+/// the user to go on waiting for services that can never arrive. That is the
+/// lie task 002 removed from the list body; this removes the rest of it.
+///
+/// The mapping is a pure function of [`SessionState`], and both the top bar and
+/// the empty list body render from one of these, so the indicator and the words
+/// under it cannot come to different conclusions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Activity {
+    /// The producer is running; the list may still change.
+    Listening,
+    /// A finite sample stream ended normally. Nothing is arriving, and nothing
+    /// is wrong.
+    Complete,
+    /// The browse is over and its records are no longer being confirmed.
+    Failed,
+}
+
+impl Activity {
+    fn of(state: &SessionState) -> Self {
+        match state {
+            SessionState::Listening => Self::Listening,
+            SessionState::Complete => Self::Complete,
+            SessionState::Failed(_) => Self::Failed,
+        }
+    }
+
+    /// The glyph for tick `ticks`. Only [`Activity::Listening`] varies with the
+    /// tick, so a session that has ended draws the same frame however long it
+    /// is left on screen.
+    fn symbol(self, ticks: u64) -> &'static str {
+        match self {
+            Self::Listening => SPINNER[(ticks / 2) as usize % SPINNER.len()],
+            Self::Complete => DONE,
+            Self::Failed => STOPPED,
+        }
+    }
+
+    /// The palette's existing "fine" and "needs attention" vocabulary, so a
+    /// stopped browse reads the same way as the failure text beneath it.
+    fn color(self) -> Color {
+        match self {
+            Self::Listening | Self::Complete => GOOD,
+            Self::Failed => WARN,
+        }
+    }
+}
 
 /// Draw the whole screen from `app` and the layout it already computed.
 ///
@@ -69,12 +126,14 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
 // ── top bar (view tabs) ────────────────────────────────────────────────────
 fn render_top_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let spinner = SPINNER[(app.ticks / 2) as usize % SPINNER.len()];
+    // Whether discovery is running is discovery's to say, not something to
+    // guess from whether records happen to have arrived.
+    let activity = Activity::of(app.session.state());
 
     let mut spans = vec![
         Span::styled(
-            display::text(&format!(" {spinner} ")),
-            Style::default().fg(GOOD),
+            display::text(&format!(" {} ", activity.symbol(app.ticks))),
+            Style::default().fg(activity.color()),
         ),
         Span::styled(
             "kinjo  ",
@@ -185,11 +244,60 @@ fn chip(text: &str, color: Color) -> Span<'static> {
     )
 }
 
+/// What an empty list says about discovery itself, once filters have been ruled
+/// out as the reason it is empty.
+///
+/// Every branch starts from the same [`Activity`] the top bar draws, so the
+/// indicator and these words are two renderings of one fact rather than two
+/// opinions that have to be kept in step by hand.
+fn session_lines(app: &App) -> Vec<Line<'static>> {
+    let activity = Activity::of(app.session.state());
+    let symbol = activity.symbol(app.ticks);
+    let headline = Style::default().fg(activity.color());
+    let detail = Style::default().fg(FG_DIM);
+
+    match app.session.state() {
+        SessionState::Listening => vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                display::text(&format!(
+                    "  {symbol} listening for mDNS services on {}…",
+                    app.cli.domain
+                )),
+                detail,
+            )),
+        ],
+        // The sample stream ran to its end and had nothing to show. Not a
+        // failure — nothing went wrong — but nothing will arrive later either,
+        // so "listening…" here would leave the user waiting for an empty list
+        // to fill itself in.
+        SessionState::Complete => vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                display::text(&format!("  {symbol} sample discovery complete")),
+                headline,
+            )),
+            Line::from(Span::styled("  no sample services to show", detail)),
+        ],
+        // Discovery is over and its cause is worth acting on.
+        SessionState::Failed(failure) => vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                display::text(&format!("  {symbol} {}", failure.headline())),
+                headline,
+            )),
+            Line::from(Span::styled(
+                display::text(&format!("  {}", failure.cause)),
+                detail,
+            )),
+        ],
+    }
+}
+
 // ── service list ─────────────────────────────────────────────────────────
 fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let total = app.visible_groups.len();
 
-    let spinner = SPINNER[(app.ticks / 2) as usize % SPINNER.len()];
     let empty = if app.filter.is_active() {
         vec![
             Line::from(""),
@@ -202,32 +310,8 @@ fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Style::default().fg(FG_DIM),
             )),
         ]
-    } else if let SessionState::Failed(failure) = app.session.state() {
-        // Discovery is over. A spinner and "listening…" here would be a lie
-        // about a browse that is not running, and would leave the user waiting
-        // for services that can never arrive.
-        vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                display::text(&format!("  {}", failure.headline())),
-                Style::default().fg(WARN),
-            )),
-            Line::from(Span::styled(
-                display::text(&format!("  {}", failure.cause)),
-                Style::default().fg(FG_DIM),
-            )),
-        ]
     } else {
-        vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                display::text(&format!(
-                    "  {spinner} listening for mDNS services on {}…",
-                    app.cli.domain
-                )),
-                Style::default().fg(FG_DIM),
-            )),
-        ]
+        session_lines(app)
     };
 
     // Column layout — Table handles per-cell truncation and alignment so that
@@ -1637,12 +1721,15 @@ fn render_detail_rows<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU32;
+    use std::{collections::BTreeSet, num::NonZeroU32};
 
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
     use crate::{
-        discovery::{BrowseMode, DiscoveryBackend, DiscoverySession, OccurrenceId, browse_groups},
+        discovery::{
+            BrowseMode, DiscoveryBackend, DiscoveryFailure, DiscoverySession, FailureKind,
+            OccurrenceId, browse_groups,
+        },
         plumber::{ActionMode, CommandAction, CommandConfig, Matcher},
         test_support::{remove, temp_file},
         ui::{
@@ -1744,6 +1831,249 @@ mod tests {
         );
         assert!(text.contains("discovery stopped"));
         assert!(text.contains("the browse ended unexpectedly"));
+    }
+
+    // ── discovery activity indicator ───────────────────────────────────────
+
+    fn failure(kind: FailureKind, cause: &str) -> SessionState {
+        SessionState::Failed(DiscoveryFailure {
+            kind,
+            cause: cause.to_string(),
+        })
+    }
+
+    /// An app whose discovery session is in `state`: a live session for
+    /// `Listening`, and one that has already ended for either ending.
+    fn app_in(state: SessionState) -> App {
+        let mut app = test_app("local");
+        app.session = match state {
+            SessionState::Listening => DiscoverySession::inert(),
+            ended => DiscoverySession::ended(ended),
+        };
+        app
+    }
+
+    #[test]
+    fn the_activity_of_a_session_follows_its_state() {
+        assert_eq!(Activity::of(&SessionState::Listening), Activity::Listening);
+        assert_eq!(Activity::of(&SessionState::Complete), Activity::Complete);
+        assert_eq!(
+            Activity::of(&failure(FailureKind::Startup, "no runtime")),
+            Activity::Failed
+        );
+        assert_eq!(
+            Activity::of(&failure(FailureKind::Stopped, "it died")),
+            Activity::Failed
+        );
+    }
+
+    /// Animation is the claim that something is happening. Only a listening
+    /// session may make it; the other two draw one frame forever.
+    #[test]
+    fn only_a_listening_session_animates() {
+        let frames = |activity: Activity| {
+            (0..40)
+                .map(|ticks| activity.symbol(ticks))
+                .collect::<BTreeSet<_>>()
+        };
+
+        assert_eq!(frames(Activity::Listening).len(), SPINNER.len());
+        assert_eq!(frames(Activity::Complete), BTreeSet::from([DONE]));
+        assert_eq!(frames(Activity::Failed), BTreeSet::from([STOPPED]));
+    }
+
+    /// The three states must be tellable apart at a glance, and a stopped
+    /// browse must not borrow the colour of a healthy one.
+    #[test]
+    fn the_ended_states_are_distinguishable_from_each_other_and_from_listening() {
+        assert_ne!(Activity::Complete.symbol(0), Activity::Failed.symbol(0));
+        assert_ne!(Activity::Complete.color(), Activity::Failed.color());
+        assert_eq!(Activity::Failed.color(), WARN);
+        // Whatever the tick, a live spinner is never mistaken for an ending.
+        for ticks in 0..40 {
+            assert_ne!(Activity::Listening.symbol(ticks), DONE);
+            assert_ne!(Activity::Listening.symbol(ticks), STOPPED);
+        }
+    }
+
+    /// Every indicator occupies one column, so the tab strip beside it sits in
+    /// the same place whatever discovery is doing and however it animates.
+    #[test]
+    fn every_indicator_is_one_column_wide() {
+        let symbols = SPINNER
+            .iter()
+            .copied()
+            .chain([DONE, STOPPED])
+            .collect::<Vec<_>>();
+
+        for symbol in symbols {
+            assert_eq!(Span::raw(symbol).width(), 1, "{symbol:?}");
+        }
+    }
+
+    /// The frame a user is left looking at must not keep changing once there is
+    /// nothing left to happen — byte-for-byte, not just "looks stopped".
+    #[test]
+    fn an_ended_session_renders_an_identical_frame_at_every_tick() {
+        for state in [
+            SessionState::Complete,
+            failure(FailureKind::Stopped, "the browse ended unexpectedly"),
+        ] {
+            let mut app = app_in(state.clone());
+            app.ticks = 0;
+            let first = render_buffer(&mut app, 100, 24);
+
+            for ticks in [1, 2, 7, 21, 99] {
+                app.ticks = ticks;
+                assert_eq!(
+                    render_buffer(&mut app, 100, 24),
+                    first,
+                    "{state:?} changed at tick {ticks}"
+                );
+            }
+        }
+    }
+
+    /// The control: a live browse *does* animate, so the test above is
+    /// measuring stillness rather than a spinner that never moved.
+    #[test]
+    fn a_listening_session_still_animates() {
+        let mut app = test_app("local");
+        app.ticks = 0;
+        let first = render_buffer(&mut app, 100, 24);
+        app.ticks = 2;
+
+        assert_ne!(render_buffer(&mut app, 100, 24), first);
+    }
+
+    /// The top bar and the body are two renderings of one fact. A finished
+    /// sample stream with nothing in it must not be described as a live browse
+    /// by either of them.
+    #[test]
+    fn a_complete_session_reports_completion_rather_than_listening() {
+        let mut app = app_in(SessionState::Complete);
+
+        let text = buffer_text(&render_buffer(&mut app, 100, 24));
+
+        assert!(
+            !text.contains("listening for mDNS services"),
+            "a finished stream must not be rendered as a live one: {text}"
+        );
+        assert!(text.contains("sample discovery complete"), "{text}");
+        assert!(text.contains(DONE), "{text}");
+        // Finishing normally is not a failure, and must not be dressed as one.
+        assert!(!text.contains("stopped"), "{text}");
+        assert!(!text.contains(STOPPED), "{text}");
+    }
+
+    /// The failed body already said so; now the top bar agrees with it.
+    #[test]
+    fn a_failed_session_shows_the_stopped_indicator_beside_its_cause() {
+        let mut app = app_in(failure(FailureKind::Stopped, "the browse ended"));
+
+        let text = buffer_text(&render_buffer(&mut app, 100, 24));
+
+        assert!(text.contains(STOPPED), "{text}");
+        assert!(text.contains("discovery stopped"), "{text}");
+        assert!(text.contains("the browse ended"), "{text}");
+        assert!(!text.contains(DONE), "{text}");
+    }
+
+    /// A filtered-empty list is not a statement about discovery, so it keeps
+    /// its own message — but the indicator above it still tells the truth.
+    #[test]
+    fn an_active_filter_explains_an_empty_list_without_contradicting_the_indicator() {
+        let mut app = app_in(SessionState::Complete);
+        app.filter.text_query = "nothing matches this".to_string();
+
+        let text = buffer_text(&render_buffer(&mut app, 100, 24));
+
+        assert!(
+            text.contains("no services match the active filters"),
+            "{text}"
+        );
+        assert!(!text.contains("listening for mDNS services"), "{text}");
+        // The top bar is still the one that says what discovery is doing.
+        assert!(text.contains(DONE), "{text}");
+    }
+
+    /// The real thing, end to end: a finite sample stream, drained to its own
+    /// natural ending through the real `App`, must leave a still frame that
+    /// says it finished — not a spinner over a browse that is already over.
+    #[cfg(feature = "fake")]
+    #[test]
+    fn a_real_finite_fake_stream_ends_on_a_still_complete_frame() {
+        let cli = Cli {
+            domain: "local".to_string(),
+            config_dirs: Vec::new(),
+            // Filtering to one type keeps the stream short.
+            service_type: Some("_ssh._tcp".to_string()),
+            backend: DiscoveryBackend::Fake,
+            command: CliCommand::Run,
+        };
+        let session = crate::discovery::start(
+            &cli.discovery_options()
+                .expect("valid test discovery options"),
+        );
+        let mut app = App::new(cli, Matcher::default(), KeyBindings::default(), session);
+
+        while app.session.state().is_listening() {
+            app.drain_discovery();
+            std::thread::yield_now();
+        }
+        assert_eq!(*app.session.state(), SessionState::Complete);
+
+        app.ticks = 0;
+        let first = render_buffer(&mut app, 100, 24);
+        app.ticks = 5;
+
+        assert_eq!(
+            render_buffer(&mut app, 100, 24),
+            first,
+            "a finished sample stream must not go on animating"
+        );
+        assert!(buffer_text(&first).contains(DONE));
+    }
+
+    /// The indicator is a function of whichever session is current, so the
+    /// replacement a refresh installs animates again — and then follows its own
+    /// ending rather than the one it replaced.
+    #[test]
+    fn the_indicator_follows_the_session_a_refresh_installs() {
+        let mut app = app_in(failure(FailureKind::Stopped, "the browse ended"));
+        assert!(buffer_text(&render_buffer(&mut app, 100, 24)).contains(STOPPED));
+
+        // What `refresh_services` does: install a replacement session.
+        app.session = DiscoverySession::inert();
+        let text = buffer_text(&render_buffer(&mut app, 100, 24));
+        assert!(
+            !text.contains(STOPPED),
+            "a refreshed browse is live: {text}"
+        );
+        assert!(text.contains("listening for mDNS services"), "{text}");
+
+        // The replacement's own ending is the one that shows.
+        app.session = DiscoverySession::ended(SessionState::Complete);
+        let text = buffer_text(&render_buffer(&mut app, 100, 24));
+        assert!(text.contains(DONE), "{text}");
+        assert!(!text.contains(STOPPED), "{text}");
+    }
+
+    /// The indicator sits at the far left of the top bar, so it is the last
+    /// thing to be squeezed out — and squeezing it must not panic.
+    #[test]
+    fn the_indicator_is_safe_in_a_terminal_with_no_room_for_it() {
+        for state in [
+            SessionState::Listening,
+            SessionState::Complete,
+            failure(FailureKind::Startup, "no runtime"),
+        ] {
+            let mut app = app_in(state.clone());
+            for (width, height) in [(100u16, 24u16), (20, 6), (10, 4), (3, 2), (1, 1)] {
+                let buffer = render_buffer(&mut app, width, height);
+                assert_eq!(buffer.area.width, width, "{state:?} at {width}x{height}");
+            }
+        }
     }
 
     #[test]
