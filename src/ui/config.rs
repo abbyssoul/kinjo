@@ -42,6 +42,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::{remove, temp_dir};
+    use crate::ui::keymap::{Action, Mode};
 
     fn test_cli(command: CliCommand, config_dirs: Vec<PathBuf>) -> Cli {
         Cli {
@@ -122,13 +123,15 @@ mode = "execute"
     fn load_keybindings_falls_back_to_defaults_when_no_files_exist() {
         let bindings = KeyBindings::load(&[PathBuf::from("/tmp/kinjo-no-such-keymap")]).unwrap();
 
-        assert!(bindings.is(
-            "browse",
-            "quit",
-            crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char('q'),
-                crossterm::event::KeyModifiers::NONE,
-            )
-        ));
+        assert_eq!(
+            bindings.resolve(
+                Mode::Browse,
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('q'),
+                    crossterm::event::KeyModifiers::NONE,
+                )
+            ),
+            Some(Action::BrowseQuit)
+        );
     }
 }

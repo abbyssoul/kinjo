@@ -10,7 +10,8 @@ use std::{
 
 use color_eyre::eyre::Result;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use ratatui::{
     DefaultTerminal,
@@ -25,7 +26,12 @@ use crate::{
     plumber::{self, ActionMode, CommandConfig, MatchResult, PreparedCommand, RuleEngine},
 };
 
-use super::{cli::Cli, filter::FilterState, keymap::KeyBindings, render};
+use super::{
+    cli::Cli,
+    filter::FilterState,
+    keymap::{Action, KeyBindings, Mode as KeyMode},
+    render,
+};
 
 /// Loads a fresh rule set for a config reload (SIGHUP). Injected by the
 /// composition root so the app stays decoupled from config-file I/O.
@@ -51,6 +57,22 @@ pub enum AppMode {
     InstancePicker,
     ServicePicker,
     Help,
+}
+
+impl AppMode {
+    /// The keybinding mode this UI mode resolves keys in. The three pickers
+    /// differ only in what they list, so they share one set of bindings.
+    pub fn key_mode(self) -> KeyMode {
+        match self {
+            AppMode::Browse => KeyMode::Browse,
+            AppMode::Search => KeyMode::Search,
+            AppMode::TypeFilter => KeyMode::TypeFilter,
+            AppMode::ActionPicker | AppMode::InstancePicker | AppMode::ServicePicker => {
+                KeyMode::Picker
+            }
+            AppMode::Help => KeyMode::Help,
+        }
+    }
 }
 
 pub struct App {
@@ -392,27 +414,31 @@ impl App {
         self.pending_action = None;
     }
 
+    /// Resolve the key to at most one action for the active mode, then act on
+    /// it. Resolution is the keymap's job, so no handler re-checks keys and no
+    /// binding can be shadowed by the order the handlers are written in.
     fn handle_key(&mut self, key: KeyEvent) -> Result<Option<PreparedCommand>> {
-        if self.keybindings.is("common", "quit", key) {
+        let action = self.keybindings.resolve(self.mode.key_mode(), key);
+        if action == Some(Action::Quit) {
             self.should_quit = true;
             return Ok(None);
         }
 
         match self.mode {
-            AppMode::Browse => self.handle_browse_key(key),
+            AppMode::Browse => self.handle_browse_key(action, key),
             AppMode::Search => {
-                self.handle_search_key(key);
+                self.handle_search_key(action, key);
                 Ok(None)
             }
             AppMode::TypeFilter => {
-                self.handle_type_filter_key(key);
+                self.handle_type_filter_key(action);
                 Ok(None)
             }
-            AppMode::ActionPicker => self.handle_action_picker_key(key),
-            AppMode::InstancePicker => self.handle_instance_picker_key(key),
-            AppMode::ServicePicker => self.handle_service_picker_key(key),
+            AppMode::ActionPicker => self.handle_action_picker_key(action),
+            AppMode::InstancePicker => self.handle_instance_picker_key(action),
+            AppMode::ServicePicker => self.handle_service_picker_key(action),
             AppMode::Help => {
-                if self.keybindings.is("help", "close", key) {
+                if action == Some(Action::HelpClose) {
                     self.return_to_browse();
                 }
                 Ok(None)
@@ -420,28 +446,32 @@ impl App {
         }
     }
 
-    fn handle_browse_key(&mut self, key: KeyEvent) -> Result<Option<PreparedCommand>> {
-        match key.code {
-            _ if self.keybindings.is("browse", "quit", key) => self.should_quit = true,
-            _ if self.keybindings.is("browse", "down", key) => self.move_selection(1),
-            _ if self.keybindings.is("browse", "up", key) => self.move_selection(-1),
-            _ if self.keybindings.is("browse", "invoke", key) => return self.invoke_selected(),
-            _ if self.keybindings.is("browse", "search", key) => self.mode = AppMode::Search,
-            _ if self.keybindings.is("browse", "type_filter", key) => {
+    fn handle_browse_key(
+        &mut self,
+        action: Option<Action>,
+        key: KeyEvent,
+    ) -> Result<Option<PreparedCommand>> {
+        match action {
+            Some(Action::BrowseQuit) => self.should_quit = true,
+            Some(Action::MoveDown) => self.move_selection(1),
+            Some(Action::MoveUp) => self.move_selection(-1),
+            Some(Action::Invoke) => return self.invoke_selected(),
+            Some(Action::OpenSearch) => self.mode = AppMode::Search,
+            Some(Action::OpenTypeFilter) => {
                 self.type_filter_index = 0;
                 self.mode = AppMode::TypeFilter;
             }
-            _ if self.keybindings.is("browse", "tab_next", key) => self.cycle_tab(1),
-            _ if self.keybindings.is("browse", "tab_prev", key) => self.cycle_tab(-1),
-            _ if self.keybindings.is("browse", "same_host", key) => {
-                self.toggle_same_host_filter();
-            }
-            _ if self.keybindings.is("browse", "refresh", key) => self.refresh_services(),
-            _ if self.keybindings.is("browse", "details_down", key) => self.scroll_details(1),
-            _ if self.keybindings.is("browse", "details_up", key) => self.scroll_details(-1),
-            _ if self.keybindings.is("browse", "help", key) => self.mode = AppMode::Help,
-            KeyCode::Char(ch) => {
-                if !ch.is_control() {
+            Some(Action::TabNext) => self.cycle_tab(1),
+            Some(Action::TabPrev) => self.cycle_tab(-1),
+            Some(Action::SameHost) => self.toggle_same_host_filter(),
+            Some(Action::Refresh) => self.refresh_services(),
+            Some(Action::DetailsDown) => self.scroll_details(1),
+            Some(Action::DetailsUp) => self.scroll_details(-1),
+            Some(Action::OpenHelp) => self.mode = AppMode::Help,
+            // Typing a character with nothing bound to it starts a search with
+            // it, so the query never loses the keystroke that opened it.
+            None => {
+                if let Some(ch) = typed_char(key) {
                     self.filter.text_query.push(ch);
                     self.mode = AppMode::Search;
                     self.recompute_visible();
@@ -452,38 +482,44 @@ impl App {
         Ok(None)
     }
 
-    fn handle_search_key(&mut self, key: KeyEvent) {
-        match key.code {
-            _ if self.keybindings.is("search", "close", key) => self.return_to_browse(),
-            KeyCode::Backspace => {
-                self.filter.text_query.pop();
-                self.recompute_visible();
-            }
-            _ if self.keybindings.is("search", "clear", key) => {
+    /// Search editing is append-only: the bound actions come first, and any key
+    /// that is not bound falls through to the editor itself.
+    fn handle_search_key(&mut self, action: Option<Action>, key: KeyEvent) {
+        match action {
+            // Leaving search keeps the query: it is the active filter, and
+            // `clear` is the only thing that removes it.
+            Some(Action::SearchClose) => self.return_to_browse(),
+            Some(Action::SearchClear) => {
                 self.filter.clear_text();
                 self.recompute_visible();
             }
-            KeyCode::Char(ch) => {
-                if !ch.is_control() {
-                    self.filter.text_query.push(ch);
+            None => match key.code {
+                KeyCode::Backspace | KeyCode::Delete => {
+                    self.filter.text_query.pop();
                     self.recompute_visible();
                 }
-            }
+                _ => {
+                    if let Some(ch) = typed_char(key) {
+                        self.filter.text_query.push(ch);
+                        self.recompute_visible();
+                    }
+                }
+            },
             _ => {}
         }
     }
 
-    fn handle_type_filter_key(&mut self, key: KeyEvent) {
+    fn handle_type_filter_key(&mut self, action: Option<Action>) {
         let count = self.service_types.len();
-        match key.code {
-            _ if self.keybindings.is("type_filter", "close", key) => self.return_to_browse(),
-            _ if self.keybindings.is("type_filter", "down", key) => {
+        match action {
+            Some(Action::TypeFilterClose) => self.return_to_browse(),
+            Some(Action::TypeFilterDown) => {
                 self.type_filter_index = move_index(self.type_filter_index, count, 1);
             }
-            _ if self.keybindings.is("type_filter", "up", key) => {
+            Some(Action::TypeFilterUp) => {
                 self.type_filter_index = move_index(self.type_filter_index, count, -1);
             }
-            _ if self.keybindings.is("type_filter", "toggle", key) => {
+            Some(Action::TypeFilterToggle) => {
                 if let Some(service_type) = self.service_types.get(self.type_filter_index).cloned()
                 {
                     self.filter.toggle_service_type(&service_type);
@@ -521,19 +557,22 @@ impl App {
         self.select_tab(next);
     }
 
-    fn handle_action_picker_key(&mut self, key: KeyEvent) -> Result<Option<PreparedCommand>> {
+    fn handle_action_picker_key(
+        &mut self,
+        action: Option<Action>,
+    ) -> Result<Option<PreparedCommand>> {
         let len = self.action_matches.len();
-        match key.code {
-            _ if self.keybindings.is("picker", "close", key) => self.return_to_browse(),
-            _ if self.keybindings.is("picker", "down", key) => {
+        match action {
+            Some(Action::PickerClose) => self.return_to_browse(),
+            Some(Action::PickerDown) => {
                 self.action_index = move_index(self.action_index, len, 1);
             }
-            _ if self.keybindings.is("picker", "up", key) => {
+            Some(Action::PickerUp) => {
                 self.action_index = move_index(self.action_index, len, -1);
             }
-            _ if self.keybindings.is("picker", "select", key) => {
-                if let Some(action) = self.action_matches.get(self.action_index).cloned() {
-                    return self.choose_action(action);
+            Some(Action::PickerSelect) => {
+                if let Some(chosen) = self.action_matches.get(self.action_index).cloned() {
+                    return self.choose_action(chosen);
                 }
             }
             _ => {}
@@ -541,30 +580,33 @@ impl App {
         Ok(None)
     }
 
-    fn handle_instance_picker_key(&mut self, key: KeyEvent) -> Result<Option<PreparedCommand>> {
+    fn handle_instance_picker_key(
+        &mut self,
+        action: Option<Action>,
+    ) -> Result<Option<PreparedCommand>> {
         let count = self
             .pending_action
             .as_ref()
             .map(|action| action.matching_records.len())
             .unwrap_or(0);
-        match key.code {
-            _ if self.keybindings.is("picker", "close", key) => self.return_to_browse(),
-            _ if self.keybindings.is("picker", "down", key) => {
+        match action {
+            Some(Action::PickerClose) => self.return_to_browse(),
+            Some(Action::PickerDown) => {
                 self.instance_index = move_index(self.instance_index, count, 1);
             }
-            _ if self.keybindings.is("picker", "up", key) => {
+            Some(Action::PickerUp) => {
                 self.instance_index = move_index(self.instance_index, count, -1);
             }
-            _ if self.keybindings.is("picker", "select", key) => {
-                let Some(action) = self.pending_action.clone() else {
+            Some(Action::PickerSelect) => {
+                let Some(pending) = self.pending_action.clone() else {
                     self.return_to_browse();
                     return Ok(None);
                 };
-                let Some(record) = action.matching_records.get(self.instance_index) else {
+                let Some(record) = pending.matching_records.get(self.instance_index) else {
                     self.return_to_browse();
                     return Ok(None);
                 };
-                return self.execute_action(&action, record);
+                return self.execute_action(&pending, record);
             }
             _ => {}
         }
@@ -712,21 +754,24 @@ impl App {
         self.choose_action(result)
     }
 
-    fn handle_service_picker_key(&mut self, key: KeyEvent) -> Result<Option<PreparedCommand>> {
+    fn handle_service_picker_key(
+        &mut self,
+        action: Option<Action>,
+    ) -> Result<Option<PreparedCommand>> {
         let count = self
             .command_groups
             .get(self.selected)
             .map(|group| group.services.len())
             .unwrap_or(0);
-        match key.code {
-            _ if self.keybindings.is("picker", "close", key) => self.return_to_browse(),
-            _ if self.keybindings.is("picker", "down", key) => {
+        match action {
+            Some(Action::PickerClose) => self.return_to_browse(),
+            Some(Action::PickerDown) => {
                 self.service_picker_index = move_index(self.service_picker_index, count, 1);
             }
-            _ if self.keybindings.is("picker", "up", key) => {
+            Some(Action::PickerUp) => {
                 self.service_picker_index = move_index(self.service_picker_index, count, -1);
             }
-            _ if self.keybindings.is("picker", "select", key) => {
+            Some(Action::PickerSelect) => {
                 let Some(group) = self.command_groups.get(self.selected) else {
                     self.return_to_browse();
                     return Ok(None);
@@ -940,6 +985,22 @@ fn move_index(index: usize, len: usize, delta: isize) -> usize {
     (index as isize + delta).clamp(0, len as isize - 1) as usize
 }
 
+/// The character an unbound key event types into the search query, if any.
+///
+/// A modified key is a shortcut, not text: crossterm reports Ctrl-X as
+/// `Char('x')` with CONTROL set, so an unbound control chord would otherwise
+/// silently type its letter. SHIFT is not excluded — it is already folded into
+/// the character itself.
+fn typed_char(key: KeyEvent) -> Option<char> {
+    let modified = key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Char(ch) if !modified && !ch.is_control() => Some(ch),
+        _ => None,
+    }
+}
+
 /// Index of the item whose key equals `previous` — used to keep the cursor on
 /// the same logical row when a list is rebuilt.
 fn find_selection<T, K: PartialEq>(
@@ -1089,6 +1150,7 @@ mode = "execute"
 
     // ── interaction harness ────────────────────────────────────────────────
     use crate::plumber::MatcherBuilder;
+    use crate::test_support::{remove, temp_file};
     use crossterm::event::KeyModifiers;
 
     const SSH: &str = r#"
@@ -1342,6 +1404,201 @@ mode = "execute"
 
         send(&mut app, KeyCode::Enter);
         assert_eq!(app.mode, AppMode::Browse, "enter closes search");
+    }
+
+    /// Search is append-only, so Delete has nothing after a cursor to remove;
+    /// it removes the last character exactly like Backspace, which is what the
+    /// keybindings documentation promises.
+    #[test]
+    fn delete_removes_the_last_search_character_like_backspace() {
+        let mut app = app_with(Matcher::default(), vec![ssh("zulu", "10.0.0.2")]);
+        send(&mut app, KeyCode::Char('z'));
+        send(&mut app, KeyCode::Char('u'));
+        assert_eq!(app.filter.text_query, "zu");
+
+        send(&mut app, KeyCode::Delete);
+        assert_eq!(app.filter.text_query, "z");
+
+        send(&mut app, KeyCode::Delete);
+        assert_eq!(app.filter.text_query, "");
+
+        // Deleting past the start is a no-op rather than an error.
+        send(&mut app, KeyCode::Delete);
+        assert_eq!(app.filter.text_query, "");
+        assert_eq!(app.mode, AppMode::Search, "editing stays open");
+    }
+
+    /// Deleting re-filters the list; a stale row set would misreport the query.
+    #[test]
+    fn deleting_a_character_recomputes_the_visible_rows() {
+        let mut app = app_with(
+            Matcher::default(),
+            vec![ssh("alpha", "10.0.0.1"), ssh("zulu", "10.0.0.2")],
+        );
+
+        send(&mut app, KeyCode::Char('z'));
+        assert_eq!(app.visible_groups.len(), 1);
+
+        send(&mut app, KeyCode::Delete);
+        assert_eq!(app.filter.text_query, "");
+        assert_eq!(app.visible_groups.len(), 2, "both rows are visible again");
+    }
+
+    /// Escape and Enter leave editing but the query is the active filter: it
+    /// survives, and only the clear action removes it.
+    #[test]
+    fn escape_and_enter_close_search_but_keep_the_query() {
+        for close in [KeyCode::Esc, KeyCode::Enter] {
+            let mut app = app_with(
+                Matcher::default(),
+                vec![ssh("alpha", "10.0.0.1"), ssh("zulu", "10.0.0.2")],
+            );
+            send(&mut app, KeyCode::Char('z'));
+            assert_eq!(app.mode, AppMode::Search);
+
+            send(&mut app, close);
+
+            assert_eq!(app.mode, AppMode::Browse, "{close:?} leaves search");
+            assert_eq!(
+                app.filter.text_query, "z",
+                "{close:?} must keep the active query"
+            );
+            assert_eq!(
+                app.visible_groups.len(),
+                1,
+                "{close:?} keeps the list filtered"
+            );
+        }
+    }
+
+    /// The configured clear action is the only full clear, and it leaves the
+    /// user in search so they can immediately type a new query.
+    #[test]
+    fn clear_empties_the_query_and_restores_every_row() {
+        let mut app = app_with(
+            Matcher::default(),
+            vec![ssh("alpha", "10.0.0.1"), ssh("zulu", "10.0.0.2")],
+        );
+        send(&mut app, KeyCode::Char('z'));
+        assert_eq!(app.visible_groups.len(), 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.filter.text_query, "");
+        assert_eq!(app.mode, AppMode::Search, "clearing stays in search");
+        assert_eq!(app.visible_groups.len(), 2);
+    }
+
+    /// A rebound clear must work and the default `ctrl-u` must stop working,
+    /// otherwise the keymap is not really in charge of the search editor.
+    #[test]
+    fn a_rebound_clear_replaces_the_default_clear_key() {
+        let path = temp_file(
+            "search-clear",
+            r#"
+[search]
+clear = ["ctrl-k"]
+"#,
+        );
+        let mut app = app_with(Matcher::default(), vec![ssh("zulu", "10.0.0.2")]);
+        app.keybindings = KeyBindings::load(std::slice::from_ref(&path)).unwrap();
+        send(&mut app, KeyCode::Char('z'));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(app.filter.text_query, "z", "ctrl-u no longer clears");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(app.filter.text_query, "");
+
+        remove(&path);
+    }
+
+    /// An unbound control chord is a shortcut that did nothing, not text: it
+    /// must not silently type its letter into the query.
+    #[test]
+    fn an_unbound_control_chord_does_not_type_into_the_search_query() {
+        let mut app = app_with(Matcher::default(), vec![ssh("zulu", "10.0.0.2")]);
+        send(&mut app, KeyCode::Char('z'));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(app.filter.text_query, "z");
+    }
+
+    /// Shift is folded into the character, so capitals must still type.
+    #[test]
+    fn shifted_characters_type_into_the_search_query() {
+        let mut app = app_with(Matcher::default(), vec![ssh("Zulu", "10.0.0.2")]);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT))
+            .unwrap();
+
+        assert_eq!(app.mode, AppMode::Search);
+        assert_eq!(app.filter.text_query, "Z");
+    }
+
+    /// Rebinding one action must not disturb the others in its mode: the whole
+    /// point of resolving a key to a single action.
+    #[test]
+    fn rebound_browse_keys_dispatch_and_defaults_stop_working() {
+        let path = temp_file(
+            "browse-rebind",
+            r#"
+[browse]
+down = ["n"]
+up = ["p"]
+help = ["f1"]
+"#,
+        );
+        let mut app = app_with(
+            Matcher::default(),
+            vec![ssh("alpha", "10.0.0.1"), ssh("beta", "10.0.0.2")],
+        );
+        app.keybindings = KeyBindings::load(std::slice::from_ref(&path)).unwrap();
+
+        send(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.selected, 1, "the rebound down key moves the cursor");
+
+        send(&mut app, KeyCode::Char('p'));
+        assert_eq!(app.selected, 0);
+
+        // `j` is no longer navigation, so it falls through to typing a search.
+        send(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.mode, AppMode::Search);
+        assert_eq!(app.filter.text_query, "j");
+        send(&mut app, KeyCode::Esc);
+
+        send(&mut app, KeyCode::F(1));
+        assert_eq!(app.mode, AppMode::Help, "the rebound help key opens help");
+
+        remove(&path);
+    }
+
+    /// Unbinding an action leaves its key inert rather than falling back to a
+    /// default that the configuration deliberately removed.
+    #[test]
+    fn an_unbound_browse_action_does_nothing() {
+        let path = temp_file(
+            "unbind-same-host",
+            r#"
+[browse]
+same_host = []
+"#,
+        );
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+        app.keybindings = KeyBindings::load(std::slice::from_ref(&path)).unwrap();
+
+        send(&mut app, KeyCode::Char('s'));
+
+        // `s` is unbound in browse, so it types instead of filtering by host.
+        assert_eq!(app.filter.host_filter, None);
+        assert_eq!(app.mode, AppMode::Search);
+
+        remove(&path);
     }
 
     #[test]
