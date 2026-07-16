@@ -40,10 +40,10 @@ Status values:
 | 005 | P1 | done | [Compiled command rules](tasks/005-compiled-command-rules.md) | 004 | 006, 007, 015 |
 | 006 | P0 | done | [Grouped action targeting](tasks/006-grouped-action-targeting.md) | 005 | 007, 008, 010 |
 | 007 | P1 | ready | [Transactional config reload](tasks/007-transactional-config-reload.md) | 005 | 006, 015 |
-| 008 | P0 | ready | [Stale picker revalidation](tasks/008-stale-picker-revalidation.md) | 001, 002, 006 | 010, 011, 014, 015 |
+| 008 | P0 | done | [Stale picker revalidation](tasks/008-stale-picker-revalidation.md) | 001, 002, 006 | 010, 011, 014, 015 |
 | 009 | P1 | ready | [CLI config-directory handling](tasks/009-cli-config-directory-handling.md) | — | 003 |
 | 010 | P1 | done | [Mode-aware aggregate views](tasks/010-mode-aware-aggregate-views.md) | 001 | 006, 008, 011, 012, 013, 014, 015 |
-| 011 | P1 | blocked | [Scrollable pickers](tasks/011-scrollable-pickers.md) | 008, 010 | 012, 013, 014, 015 |
+| 011 | P1 | ready | [Scrollable pickers](tasks/011-scrollable-pickers.md) | 008, 010 | 012, 013, 014, 015 |
 | 012 | P0 | done | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014 |
 | 013 | P1 | done | [Keybindings and search consistency](tasks/013-keybindings-and-search-consistency.md) | — | 011, 012, 014 |
 | 014 | P2 | ready | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015 |

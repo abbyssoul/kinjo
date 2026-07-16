@@ -20,8 +20,8 @@ use ratatui::{
 
 use crate::{
     discovery::{
-        BrowseMode, DiscoveryEvent, DiscoverySession, Entry, EntryGroup, EntryId, GroupingMode,
-        RowHost, SessionPoll, SessionState, browse_groups, browse_row_count,
+        BrowseMode, DiscoveryEvent, DiscoverySession, Entry, EntryGroup, EntryGroupId, EntryId,
+        GroupingMode, RowHost, SessionPoll, SessionState, browse_groups, browse_row_count,
     },
     plumber::{ActionOutcome, CommandConfig, MatchResult, PreparedCommand, RuleEngine},
 };
@@ -51,6 +51,28 @@ pub type DiscoveryFactory = Box<dyn Fn() -> DiscoverySession>;
 pub struct CommandGroup {
     pub command: CommandConfig,
     pub services: Vec<EntryGroup>,
+}
+
+/// What an open picker was opened from, as an identity rather than as the data
+/// it listed.
+///
+/// Discovery keeps arriving while a picker is up. A picker that owned a copy of
+/// its matches went on offering services that had already been retracted, and
+/// confirming it ran a command against a hostname or address that no longer
+/// existed. Remembering *what was chosen* lets the matches be rebuilt from
+/// current records whenever they change, so a picker can only ever list — and
+/// only ever run — what discovery still stands behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerAnchor {
+    /// A row of the active browse projection.
+    Row(EntryGroupId),
+    /// A logical service listed under a command row. The command view projects
+    /// rules rather than entries, so its rows are not browse rows and cannot be
+    /// found among them.
+    Service {
+        command: String,
+        service: EntryGroupId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +116,15 @@ pub struct App {
     pub selected: usize,
     pub mode: AppMode,
     pub type_filter_index: usize,
+    /// What an open picker is a view of. Set when a picker opens, cleared when
+    /// it closes, and the handle every rebuild below resolves against.
+    pub picker_anchor: Option<PickerAnchor>,
+    /// The actions an open picker lists. Rebuilt from `picker_anchor` on every
+    /// recompute, never carried across one, so it cannot outlive its records.
     pub action_matches: Vec<MatchResult>,
     pub action_index: usize,
+    /// The action an open instance picker is choosing a target for. Rebuilt
+    /// alongside `action_matches`.
     pub pending_action: Option<MatchResult>,
     pub instance_index: usize,
     pub status: String,
@@ -160,6 +189,7 @@ impl App {
             selected: 0,
             mode: AppMode::Browse,
             type_filter_index: 0,
+            picker_anchor: None,
             action_matches: Vec::new(),
             action_index: 0,
             pending_action: None,
@@ -339,6 +369,143 @@ impl App {
             Some(index) => self.selected = index,
             None => self.clamp_selection(),
         }
+        self.reconcile_action_pickers();
+    }
+
+    /// The rules matching an anchor, freshly matched against current records.
+    ///
+    /// Empty when the anchor no longer resolves — its row was filtered away, its
+    /// service was retracted, or its rule stopped matching — which is exactly the
+    /// signal reconciliation needs.
+    fn resolve_anchor(&self, anchor: &PickerAnchor) -> Vec<MatchResult> {
+        match anchor {
+            PickerAnchor::Row(id) => self
+                .visible_groups
+                .iter()
+                .position(|group| group.id() == id)
+                .and_then(|index| self.group_matches.get(index))
+                .cloned()
+                .unwrap_or_default(),
+            PickerAnchor::Service { command, service } => self
+                .command_groups
+                .iter()
+                .find(|group| group.command.name == *command)
+                .and_then(|group| group.services.iter().find(|s| s.id() == service))
+                .map(|group| {
+                    self.matcher
+                        .matches_group(group)
+                        .into_iter()
+                        .filter(|result| result.command.name == *command)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// What an anchor is called, for a status line the user can act on.
+    fn anchor_label(&self, anchor: &PickerAnchor) -> String {
+        match anchor {
+            PickerAnchor::Row(id) => self
+                .visible_groups
+                .iter()
+                .find(|group| group.id() == id)
+                .map(|group| group.label().to_string())
+                .unwrap_or_else(|| "the selected service".to_string()),
+            PickerAnchor::Service { service, .. } => self
+                .command_groups
+                .iter()
+                .flat_map(|group| &group.services)
+                .find(|s| s.id() == service)
+                .map(|group| group.label().to_string())
+                .unwrap_or_else(|| "the selected service".to_string()),
+        }
+    }
+
+    /// Rebuild an open action/instance picker from current records, keeping its
+    /// cursor on the identity the user chose.
+    ///
+    /// Called after every recompute, which is the only thing that can change the
+    /// records underneath. The picker therefore always lists what discovery
+    /// currently says, and the key handler — which runs against the same state
+    /// the frame was drawn from — cannot confirm anything else.
+    fn reconcile_action_pickers(&mut self) {
+        let Some(anchor) = self.picker_anchor.clone() else {
+            return;
+        };
+
+        // The identities under the cursors, read from the caches before they are
+        // replaced. Positions mean nothing across a rebuild; these do.
+        let chosen_action = self
+            .action_matches
+            .get(self.action_index)
+            .map(|result| result.command.name.clone());
+        let pending_command = self
+            .pending_action
+            .as_ref()
+            .map(|result| result.command.name.clone());
+        // A target's identity is the command it would run — task 006's own
+        // dedup key. An occurrence id would not do: address-expanded candidates
+        // all share one, so the cursor would snap back to the first address.
+        // This also makes "the argv changed under the cursor" indistinguishable
+        // from "the target is gone", which is what it should mean here.
+        let chosen_target = self.pending_action.as_ref().and_then(|result| {
+            result
+                .targets
+                .get(self.instance_index)
+                .map(|target| result.command.action.prepare(target).ok())
+        });
+
+        let matches = self.resolve_anchor(&anchor);
+        if matches.is_empty() {
+            let label = self.anchor_label(&anchor);
+            self.abandon_picker(format!("`{label}` is no longer available"));
+            return;
+        }
+        self.action_matches = matches;
+
+        if self.mode == AppMode::ActionPicker {
+            // An action the user was not on disappearing is not their problem;
+            // the one they were on disappearing is.
+            match chosen_action.and_then(|name| self.position_of_action(&name)) {
+                Some(index) => self.action_index = index,
+                None => self.abandon_picker("the selected action no longer matches".to_string()),
+            }
+            return;
+        }
+
+        // Instance picker: the rule must still match, and the occurrence the
+        // cursor is on must still be one of its targets.
+        let Some(name) = pending_command else {
+            self.abandon_picker("the selected action no longer matches".to_string());
+            return;
+        };
+        let Some(live) = self
+            .action_matches
+            .iter()
+            .find(|result| result.command.name == name)
+            .cloned()
+        else {
+            self.abandon_picker(format!("`{name}` no longer matches"));
+            return;
+        };
+        let position = chosen_target.and_then(|chosen| {
+            live.targets
+                .iter()
+                .position(|target| live.command.action.prepare(target).ok() == chosen)
+        });
+        match position {
+            Some(index) => {
+                self.pending_action = Some(live);
+                self.instance_index = index;
+            }
+            None => self.abandon_picker("the selected target is gone".to_string()),
+        }
+    }
+
+    fn position_of_action(&self, name: &str) -> Option<usize> {
+        self.action_matches
+            .iter()
+            .position(|result| result.command.name == name)
     }
 
     /// How many rows each tab would list, in [`GroupingMode::TABS`] order: the
@@ -358,6 +525,13 @@ impl App {
             .command_groups
             .get(self.selected)
             .map(|group| group.command.name.clone());
+        // Read before the rows go: an index into the old service list means
+        // nothing once it has been rebuilt.
+        let chosen_service = self
+            .command_groups
+            .get(self.selected)
+            .and_then(|group| group.services.get(self.service_picker_index))
+            .map(|service| service.id().clone());
 
         let service_groups = browse_groups(filtered, BrowseMode::LogicalService);
         let mut command_groups: Vec<CommandGroup> = self
@@ -391,6 +565,28 @@ impl App {
             Some(index) => self.selected = index,
             None => self.clamp_selection(),
         }
+        self.reconcile_service_picker(chosen_service);
+        self.reconcile_action_pickers();
+    }
+
+    /// Keep an open service picker on the service the user chose, after the
+    /// command rows underneath it have been rebuilt.
+    ///
+    /// The cursor was an index into a list discovery can reorder or shorten, so
+    /// without this a removed service hands its position — and the user's
+    /// pending Enter — to whichever service slid into it.
+    fn reconcile_service_picker(&mut self, chosen: Option<EntryGroupId>) {
+        if self.mode != AppMode::ServicePicker {
+            return;
+        }
+        let Some(services) = self.command_groups.get(self.selected).map(|g| &g.services) else {
+            self.abandon_picker("the selected command is gone".to_string());
+            return;
+        };
+        match chosen.and_then(|id| services.iter().position(|service| *service.id() == id)) {
+            Some(index) => self.service_picker_index = index,
+            None => self.abandon_picker("the selected service is gone".to_string()),
+        }
     }
 
     /// Number of rows in the currently active left-hand list.
@@ -415,8 +611,19 @@ impl App {
     /// already-empty action state on plain closes (search/help) is harmless.
     fn return_to_browse(&mut self) {
         self.mode = AppMode::Browse;
+        self.picker_anchor = None;
         self.action_matches.clear();
         self.pending_action = None;
+    }
+
+    /// Close an open picker because what it was showing is gone, saying so.
+    ///
+    /// Reconciliation calls this rather than quietly moving the cursor onto a
+    /// neighbour: the user chose a specific service, and silently retargeting
+    /// their pending Enter to a different one is the failure this guards.
+    fn abandon_picker(&mut self, reason: String) {
+        self.return_to_browse();
+        self.status = reason;
     }
 
     /// Resolve the key to at most one action for the active mode, then act on
@@ -706,8 +913,13 @@ impl App {
                 self.status = format!("no configured actions match `{}`", group.label());
                 Ok(None)
             }
-            1 => self.choose_action(matches.into_iter().next().unwrap()),
             _ => {
+                // Anchor to the row itself, not to its position: whatever the
+                // picker goes on to show is rebuilt from this.
+                self.picker_anchor = Some(PickerAnchor::Row(group.id().clone()));
+                if matches.len() == 1 {
+                    return self.choose_action(matches.into_iter().next().unwrap());
+                }
                 self.action_matches = matches;
                 self.action_index = 0;
                 self.mode = AppMode::ActionPicker;
@@ -756,6 +968,12 @@ impl App {
             self.return_to_browse();
             return Ok(None);
         };
+        // The command view lists rules, not browse rows, so an instance picker
+        // opened from here anchors to the service the user picked.
+        self.picker_anchor = Some(PickerAnchor::Service {
+            command: command.name.clone(),
+            service: service.id().clone(),
+        });
         self.choose_action(result)
     }
 
@@ -2408,6 +2626,247 @@ mode = "execute"
 
         assert_eq!(app.mode, AppMode::Browse);
         assert!(app.records.is_empty());
+    }
+
+    // ── pickers against live discovery ──────────────────────────────────────
+
+    /// The heart of this task: a picker listed a service, discovery retracted
+    /// it, and confirming the picker ran a command at a host that had gone.
+    #[test]
+    fn removing_the_selected_service_closes_an_open_action_picker() {
+        let alpha = ssh("alpha", "10.0.0.1");
+        let (mut app, tx) = app_with_session(matcher_from(&[SSH, PING]), vec![alpha.clone()]);
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::ActionPicker);
+
+        tx.send(DiscoveryEvent::Remove(alpha.id())).unwrap();
+        app.drain_discovery();
+
+        assert_eq!(app.mode, AppMode::Browse, "the picker must not survive");
+        assert!(
+            send(&mut app, KeyCode::Enter).is_none(),
+            "confirming must not run the retracted service"
+        );
+    }
+
+    /// The instance picker's targets are occurrences. Losing the one under the
+    /// cursor must not hand the user's pending Enter to a sibling.
+    #[test]
+    fn removing_the_selected_target_closes_an_open_instance_picker() {
+        let alpha = service_on("alpha", "_ssh._tcp", "alpha.local", 22);
+        let beta = service_on("beta", "_ssh._tcp", "beta.local", 22);
+        let (mut app, tx) =
+            app_with_session(matcher_from(&[SSH]), vec![alpha.clone(), beta.clone()]);
+        app.filter.grouping = GroupingMode::ServiceType;
+        app.recompute_visible();
+
+        // Two hosts prepare two different commands, so the picker opens.
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::InstancePicker);
+        assert_eq!(app.pending_action.as_ref().unwrap().targets.len(), 2);
+
+        // Move to beta, then have discovery retract exactly beta.
+        send(&mut app, KeyCode::Down);
+        tx.send(DiscoveryEvent::Remove(beta.id())).unwrap();
+        app.drain_discovery();
+
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.status.contains("gone"), "status was: {}", app.status);
+    }
+
+    /// The stale-argv case. A service keeps its identity — the registration and
+    /// endpoint are untouched — while an address it advertises is replaced. A
+    /// picker holding cloned candidates would still list, and run, the address
+    /// that has gone.
+    #[test]
+    fn updating_the_selected_address_cannot_execute_the_stale_argv() {
+        let original = ssh_multi("alpha", &["10.0.0.1", "10.0.0.2"]);
+        let (mut app, tx) = app_with_session(matcher_from(&[PING_ADDR]), vec![original.clone()]);
+
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::InstancePicker);
+        // Address order gives index 1 = 10.0.0.2.
+        send(&mut app, KeyCode::Down);
+
+        // The same occurrence renumbers: .2 is gone, .9 is new. Addresses are
+        // not part of an occurrence's identity, so this is an update.
+        let mut renumbered = original.clone();
+        renumbered.addresses = ["10.0.0.1", "10.0.0.9"]
+            .iter()
+            .map(|a| a.parse().unwrap())
+            .collect();
+        assert_eq!(
+            renumbered.id(),
+            original.id(),
+            "the occurrence must keep its identity"
+        );
+        tx.send(DiscoveryEvent::Upsert(renumbered)).unwrap();
+        app.drain_discovery();
+
+        assert_eq!(
+            app.mode,
+            AppMode::Browse,
+            "the chosen address is gone, so the picker must not stand"
+        );
+        assert!(
+            send(&mut app, KeyCode::Enter).is_none(),
+            "`echo 10.0.0.2` must be unrunnable once .2 is retracted"
+        );
+    }
+
+    /// The inverse: an address the user was not on changing leaves their choice
+    /// alone, still selected and still runnable.
+    #[test]
+    fn updating_an_unselected_address_keeps_the_instance_picker() {
+        let original = ssh_multi("alpha", &["10.0.0.1", "10.0.0.2"]);
+        let (mut app, tx) = app_with_session(matcher_from(&[PING_ADDR]), vec![original.clone()]);
+
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        send(&mut app, KeyCode::Down); // 10.0.0.2
+
+        // Replace the *other* address.
+        let mut renumbered = original.clone();
+        renumbered.addresses = ["10.0.0.7", "10.0.0.2"]
+            .iter()
+            .map(|a| a.parse().unwrap())
+            .collect();
+        tx.send(DiscoveryEvent::Upsert(renumbered)).unwrap();
+        app.drain_discovery();
+
+        assert_eq!(app.mode, AppMode::InstancePicker, "the picker must survive");
+        let command = send(&mut app, KeyCode::Enter).expect("the chosen address runs");
+        assert_eq!(
+            command.argv,
+            vec!["echo", "10.0.0.2"],
+            "the cursor must still be on the address the user chose"
+        );
+    }
+
+    /// A service the user was not on disappearing is not a reason to throw away
+    /// their picker.
+    #[test]
+    fn an_unrelated_removal_keeps_the_picker_and_its_selection() {
+        let alpha = ssh("alpha", "10.0.0.1");
+        let unrelated = http("web");
+        let (mut app, tx) = app_with_session(
+            matcher_from(&[SSH, PING]),
+            vec![alpha.clone(), unrelated.clone()],
+        );
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::ActionPicker);
+        // Move onto `ping`, so the retained selection is observable.
+        send(&mut app, KeyCode::Down);
+        let chosen = app.action_matches[app.action_index].command.name.clone();
+
+        tx.send(DiscoveryEvent::Remove(unrelated.id())).unwrap();
+        app.drain_discovery();
+
+        assert_eq!(app.mode, AppMode::ActionPicker, "the picker must survive");
+        assert_eq!(
+            app.action_matches[app.action_index].command.name, chosen,
+            "the cursor must stay on the action the user chose"
+        );
+    }
+
+    /// The sharpest form of the defect: the cursor is an index into a list
+    /// discovery can shorten. Removing a service *above* the chosen one slides
+    /// a different service into its position, so a pending Enter would run a
+    /// service the user never selected.
+    #[test]
+    fn removing_a_service_above_the_cursor_does_not_retarget_the_service_picker() {
+        let alpha = service_on("alpha", "_ssh._tcp", "alpha.local", 22);
+        let (mut app, tx) = app_with_session(
+            matcher_from(&[SSH]),
+            vec![
+                alpha.clone(),
+                service_on("beta", "_ssh._tcp", "beta.local", 22),
+                service_on("gamma", "_ssh._tcp", "gamma.local", 22),
+            ],
+        );
+        app.filter.grouping = GroupingMode::Command;
+        app.recompute_visible();
+
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::ServicePicker);
+        assert_eq!(app.command_groups[0].services.len(), 3);
+
+        // Index 1 of [alpha, beta, gamma] is beta.
+        send(&mut app, KeyCode::Down);
+        assert_eq!(app.service_picker_index, 1);
+
+        // alpha goes; beta is now index 0 and gamma inherits index 1.
+        tx.send(DiscoveryEvent::Remove(alpha.id())).unwrap();
+        app.drain_discovery();
+
+        assert_eq!(app.mode, AppMode::ServicePicker, "the picker must survive");
+        assert_eq!(
+            app.service_picker_index, 0,
+            "the cursor must follow beta, not stay on the index gamma now holds"
+        );
+        let command = send(&mut app, KeyCode::Enter).expect("the chosen service runs");
+        assert_eq!(
+            command.argv,
+            vec!["ssh", "beta.local"],
+            "the service the user chose must run, never the one that inherited its index"
+        );
+    }
+
+    /// A rule can stop matching without its service going anywhere: a TXT value
+    /// the predicate depends on simply changes. The action under the cursor then
+    /// refers to something that no longer exists, and must not be confirmable.
+    #[test]
+    fn a_txt_update_that_unmatches_the_rule_closes_the_action_picker() {
+        const TXT_RULE: &str = r#"
+[metadata]
+name = "open-admin"
+[match.txt.role]
+equals = "admin"
+[action]
+command = "open {hostname}"
+mode = "execute"
+"#;
+        const ANY_HTTP: &str = r#"
+[metadata]
+name = "curl"
+[match.service_type]
+equals = "_http._tcp"
+[action]
+command = "curl {hostname}"
+mode = "execute"
+"#;
+        let mut record = Entry::new("nas", "_http._tcp", "local");
+        record.hostname = Some("nas.local".to_string());
+        record.txt.insert("role".to_string(), "admin".to_string());
+        // Two matching rules, so invoking opens the action picker.
+        let (mut app, tx) =
+            app_with_session(matcher_from(&[TXT_RULE, ANY_HTTP]), vec![record.clone()]);
+
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::ActionPicker);
+        assert_eq!(
+            app.action_matches[app.action_index].command.name,
+            "open-admin"
+        );
+
+        // The role changes; `open-admin` stops matching, `curl` still does.
+        let mut demoted = record.clone();
+        demoted.txt.insert("role".to_string(), "guest".to_string());
+        assert_eq!(demoted.id(), record.id(), "the service itself is unchanged");
+        tx.send(DiscoveryEvent::Upsert(demoted)).unwrap();
+        app.drain_discovery();
+
+        assert_eq!(
+            app.mode,
+            AppMode::Browse,
+            "the action under the cursor no longer matches, so the picker must go"
+        );
+        assert!(
+            app.status.contains("no longer matches"),
+            "status was: {}",
+            app.status
+        );
+        // And it must not have quietly slid onto `curl`.
+        assert!(app.action_matches.is_empty());
     }
 
     /// Explicit fake discovery: running out of samples is the normal ending of

@@ -244,6 +244,14 @@ which host, because it would otherwise pick one for you. The same rule on a row
 whose services all share one host does not ask, because both candidates would
 run the very same command.
 
+Discovery carries on while you are choosing. The list you are shown is rebuilt
+as services appear, change, and go, so it always reflects what is currently
+advertised. If the target you had selected is retracted, or changes such that it
+would now run a different command, the picker closes and says so rather than
+letting you confirm something that no longer exists — and it never moves your
+selection onto a neighbouring service. Changes elsewhere leave your selection
+alone.
+
 A command using `{address}` needs one concrete address. With no
 `[match.address]` predicate, every advertised address is offered for selection;
 with predicates, only the addresses satisfying all of them are. A service whose
