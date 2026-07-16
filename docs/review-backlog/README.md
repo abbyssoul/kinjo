@@ -43,7 +43,7 @@ Status values:
 | 008 | P0 | done | [Stale picker revalidation](tasks/008-stale-picker-revalidation.md) | 001, 002, 006 | 010, 011, 014, 015 |
 | 009 | P1 | done | [CLI config-directory handling](tasks/009-cli-config-directory-handling.md) | — | 003, 020 |
 | 010 | P1 | done | [Mode-aware aggregate views](tasks/010-mode-aware-aggregate-views.md) | 001 | 006, 008, 011, 012, 013, 014, 015 |
-| 011 | P1 | ready | [Scrollable modal content and pickers](tasks/011-scrollable-pickers.md) | 008, 010 | 012, 013, 014, 015 |
+| 011 | P1 | done | [Scrollable modal content and pickers](tasks/011-scrollable-pickers.md) | 008, 010 | 012, 013, 014, 015 |
 | 012 | P0 | done | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014, 020 |
 | 013 | P1 | done | [Keybindings and search consistency](tasks/013-keybindings-and-search-consistency.md) | — | 011, 012, 014 |
 | 014 | P2 | ready | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015, 021 |
