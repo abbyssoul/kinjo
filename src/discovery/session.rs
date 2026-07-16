@@ -212,15 +212,17 @@ impl DiscoverySession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discovery::{DiscoveryBackend, DiscoveryConfig, Entry, start};
+    use crate::discovery::{DiscoveryBackend, DiscoveryConfig, DiscoveryOptions, Entry, start};
 
-    fn fake_config(service_type: Option<&str>) -> DiscoveryConfig {
+    fn fake_options(service_type: Option<&str>) -> DiscoveryOptions {
         DiscoveryConfig {
             fake: true,
             backend: DiscoveryBackend::default(),
             domain: "local".to_string(),
             service_type: service_type.map(str::to_string),
         }
+        .validate()
+        .expect("valid test options")
     }
 
     /// Drain a session to its ending, collecting the events it produced.
@@ -309,7 +311,7 @@ mod tests {
     /// its records stay trustworthy.
     #[test]
     fn the_fake_session_completes_normally_after_its_finite_stream() {
-        let mut session = start(&fake_config(Some("_ssh._tcp")));
+        let mut session = start(&fake_options(Some("_ssh._tcp")));
 
         let (events, state) = drain_to_end(&mut session);
 
@@ -324,7 +326,7 @@ mod tests {
     /// the fake adapter, whose sample stream sleeps between records.
     #[test]
     fn dropping_a_fake_session_cancels_its_delayed_stream() {
-        let mut session = start(&fake_config(None));
+        let mut session = start(&fake_options(None));
 
         // Wait for the stream to actually start, so the cancellation lands
         // during one of its inter-record sleeps rather than before it began.
@@ -344,7 +346,7 @@ mod tests {
     /// Shutting a session down stops its producer and is safe to repeat.
     #[test]
     fn shutdown_stops_the_producer_and_is_idempotent() {
-        let mut session = start(&fake_config(None));
+        let mut session = start(&fake_options(None));
 
         session.shutdown();
         session.shutdown();
@@ -366,7 +368,7 @@ mod tests {
     /// short and must not be labelled as a finished stream.
     #[test]
     fn a_cancelled_producer_ends_as_stopped_not_complete() {
-        let mut session = start(&fake_config(None));
+        let mut session = start(&fake_options(None));
         session.shutdown();
 
         let (_events, state) = drain_to_end(&mut session);

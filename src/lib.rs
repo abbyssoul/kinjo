@@ -37,13 +37,22 @@ pub fn run() -> Result<()> {
     }
 
     let keybindings = ui::config::load_keybindings()?;
+    // Validate the discovery options once, here, before any adapter starts: a
+    // malformed service type or a domain the chosen backend cannot honor is a
+    // usage error, not something to quietly reinterpret into a broader browse.
+    // `list-commands` has already returned above, so it never has to answer for
+    // discovery options it was never going to use.
+    let options = cli.discovery_options().unwrap_or_else(|err| err.exit());
     // One value carries the running adapter and its events, so composition has
     // nothing to take apart and reattach.
-    let session = discovery::start(&cli.discovery_config());
+    let session = discovery::start(&options);
 
     let mut app = App::new(cli, matcher, keybindings, session)
-        // The factory lets the app's refresh command start a replacement session.
-        .with_discovery_factory(Box::new(discovery::start))
+        // The factory lets the app's refresh command start a replacement
+        // session. It captures the validated options, so a refresh re-runs
+        // exactly the browse that startup did and cannot re-derive a different
+        // (or unchecked) one.
+        .with_discovery_factory(Box::new(move || discovery::start(&options)))
         .with_config_loader(Box::new(|cli| {
             ui::config::load_matcher(cli)
                 .map(|(matcher, warnings)| (Box::new(matcher) as Box<dyn RuleEngine>, warnings))

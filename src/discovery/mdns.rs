@@ -14,7 +14,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::session::DiscoverySession;
 use super::worker::{BrowseOutcome, DiscoveryWorker, RuntimeFlavor};
-use super::{DiscoveryConfig, DiscoveryEvent, Entry, EntryId, OccurrenceId, Registration};
+use super::{
+    DEFAULT_DOMAIN, DiscoveryEvent, DiscoveryOptions, Entry, EntryId, OccurrenceId, Registration,
+    ServiceTypeFilter,
+};
 
 /// How often known services are re-confirmed with a one-shot resolve.
 const PROBE_INTERVAL: Duration = Duration::from_secs(30);
@@ -144,24 +147,32 @@ impl LivenessTracker {
 /// list of types in parallel. The probe futures are not `Send` on every
 /// platform (Windows holds raw pointers across awaits), so the loop runs on a
 /// current-thread runtime and drives them itself.
-pub(super) fn start(config: &DiscoveryConfig) -> DiscoverySession {
-    let (worker, rx) = DiscoveryWorker::spawn(config, RuntimeFlavor::CurrentThread, browse_loop);
+///
+/// This backend can browse a custom domain: `mdns-sd-discovery` takes one, so a
+/// non-default domain is honored exactly rather than rejected (compare the
+/// `zeroconf` backend, whose browser has no domain setter).
+pub(super) fn start(options: &DiscoveryOptions) -> DiscoverySession {
+    let (worker, rx) = DiscoveryWorker::spawn(options, RuntimeFlavor::CurrentThread, browse_loop);
     DiscoverySession::from_worker(rx, worker)
 }
 
 async fn browse_loop(
     domain: String,
-    service_type_filter: Option<String>,
+    service_type_filter: Option<ServiceTypeFilter>,
     tx: mpsc::Sender<DiscoveryEvent>,
     shutdown: CancellationToken,
 ) -> BrowseOutcome {
+    // The filter arrives validated and canonical, so it is browsed as given;
+    // there is no "unparseable, so browse everything" case to consider.
+    let service_type_filter = service_type_filter.map(|filter| filter.to_string());
+
     let mut builder = ServiceBrowserBuilder::new();
     if let Some(service_type) = &service_type_filter {
         builder.service_type(service_type);
     }
-    // An empty or `local` domain means "use the default browse domain", which
-    // the crate handles when no domain is set.
-    if !domain.is_empty() && domain != "local" {
+    // The domain is canonical (see `DiscoveryOptions`), so the default domain is
+    // spelled exactly one way. The crate browses it when no domain is set.
+    if domain != DEFAULT_DOMAIN {
         builder.domain(&domain);
     }
 

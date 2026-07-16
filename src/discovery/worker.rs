@@ -8,7 +8,7 @@ use std::{
 
 use tokio_util::sync::CancellationToken;
 
-use super::{DiscoveryConfig, DiscoveryEvent};
+use super::{DiscoveryEvent, DiscoveryOptions, ServiceTypeFilter};
 
 /// Which tokio runtime a backend's browse loop needs.
 pub(super) enum RuntimeFlavor {
@@ -73,21 +73,29 @@ impl DiscoveryWorker {
     /// and the receiving end of its event channel: handing the receiver over
     /// once, at construction, is what removes the need for a take-once
     /// accessor that panics on a second call.
+    ///
+    /// The loop is handed the *validated* domain and filter, so it browses what
+    /// was asked for without re-deciding what the values mean.
     pub(super) fn spawn<F, Fut>(
-        config: &DiscoveryConfig,
+        options: &DiscoveryOptions,
         flavor: RuntimeFlavor,
         browse: F,
     ) -> (Self, mpsc::Receiver<DiscoveryEvent>)
     where
-        F: FnOnce(String, Option<String>, mpsc::Sender<DiscoveryEvent>, CancellationToken) -> Fut
+        F: FnOnce(
+                String,
+                Option<ServiceTypeFilter>,
+                mpsc::Sender<DiscoveryEvent>,
+                CancellationToken,
+            ) -> Fut
             + Send
             + 'static,
         Fut: Future<Output = BrowseOutcome>,
     {
         let (tx, rx) = mpsc::channel();
         let shutdown = CancellationToken::new();
-        let domain = config.domain.clone();
-        let service_type_filter = config.service_type.clone();
+        let domain = options.domain().to_string();
+        let service_type_filter = options.service_type().cloned();
         let token = shutdown.clone();
         let outcome = Arc::new(Mutex::new(None));
         let slot = outcome.clone();
@@ -151,7 +159,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::discovery::DiscoveryBackend;
+    use crate::discovery::{DiscoveryBackend, DiscoveryConfig};
 
     fn config() -> DiscoveryConfig {
         DiscoveryConfig {
@@ -162,13 +170,17 @@ mod tests {
         }
     }
 
+    fn options() -> DiscoveryOptions {
+        config().validate().expect("valid test options")
+    }
+
     /// A backend's browse startup failure (mdns-sd browse error, zeroconf
     /// browser creation error, or the runtime itself failing to build) must
     /// leave the worker reporting only its outcome, never fabricating an entry.
     #[test]
     fn browse_startup_failure_reports_the_cause_and_no_upsert() {
         let (worker, rx) = DiscoveryWorker::spawn(
-            &config(),
+            &options(),
             RuntimeFlavor::CurrentThread,
             |_domain, _service_type_filter, _tx, _shutdown| async move {
                 BrowseOutcome::Startup("simulated browse startup failure".to_string())
@@ -191,7 +203,7 @@ mod tests {
     #[test]
     fn the_outcome_is_published_before_the_channel_disconnects() {
         let (worker, rx) = DiscoveryWorker::spawn(
-            &config(),
+            &options(),
             RuntimeFlavor::CurrentThread,
             |_domain, _service_type_filter, _tx, _shutdown| async move { BrowseOutcome::Complete },
         );
@@ -203,20 +215,23 @@ mod tests {
         assert_eq!(worker.outcome(), Some(BrowseOutcome::Complete));
     }
 
-    /// The browse loop receives the configured domain and service-type filter.
+    /// The browse loop receives the validated domain and service-type filter,
+    /// canonicalized — not whatever text the caller happened to type.
     #[test]
-    fn the_loop_is_handed_the_configured_domain_and_filter() {
+    fn the_loop_is_handed_the_validated_domain_and_filter() {
         let mut config = config();
         config.domain = "corp".to_string();
-        config.service_type = Some("_ssh._tcp".to_string());
+        config.service_type = Some("_SSH._tcp".to_string());
 
         let (_worker, rx) = DiscoveryWorker::spawn(
-            &config,
+            &config.validate().expect("valid test options"),
             RuntimeFlavor::CurrentThread,
             |domain, service_type_filter, tx, _shutdown| async move {
                 let _ = tx.send(DiscoveryEvent::Status(format!(
                     "{domain}/{}",
-                    service_type_filter.unwrap_or_default()
+                    service_type_filter
+                        .map(|filter| filter.to_string())
+                        .unwrap_or_default()
                 )));
                 BrowseOutcome::Stopped
             },
@@ -233,7 +248,7 @@ mod tests {
     #[test]
     fn shutdown_cancels_a_running_loop_and_joins_it() {
         let (mut worker, rx) = DiscoveryWorker::spawn(
-            &config(),
+            &options(),
             RuntimeFlavor::CurrentThread,
             |_domain, _service_type_filter, tx, shutdown| async move {
                 let _ = tx.send(DiscoveryEvent::Status("browsing".to_string()));
@@ -258,7 +273,7 @@ mod tests {
     #[test]
     fn shutdown_is_idempotent() {
         let (mut worker, _rx) = DiscoveryWorker::spawn(
-            &config(),
+            &options(),
             RuntimeFlavor::CurrentThread,
             |_domain, _service_type_filter, _tx, shutdown| async move {
                 shutdown.cancelled().await;
@@ -276,7 +291,7 @@ mod tests {
     #[test]
     fn dropping_the_worker_stops_its_producer() {
         let (worker, rx) = DiscoveryWorker::spawn(
-            &config(),
+            &options(),
             RuntimeFlavor::CurrentThread,
             |_domain, _service_type_filter, tx, shutdown| async move {
                 let _ = tx.send(DiscoveryEvent::Status("browsing".to_string()));
@@ -298,7 +313,7 @@ mod tests {
     #[test]
     fn a_loop_that_never_runs_still_publishes_an_outcome() {
         let (worker, rx) = DiscoveryWorker::spawn(
-            &config(),
+            &options(),
             RuntimeFlavor::CurrentThread,
             |_domain, _service_type_filter, _tx, _shutdown| async move { BrowseOutcome::Stopped },
         );

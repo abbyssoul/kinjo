@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::session::DiscoverySession;
 use super::worker::{BrowseOutcome, DiscoveryWorker, RuntimeFlavor};
-use super::{DiscoveryConfig, DiscoveryEvent, Entry};
+use super::{DiscoveryEvent, DiscoveryOptions, Entry, ServiceTypeFilter};
 
 /// Pause between sample records, so the list populates visibly rather than
 /// appearing all at once.
@@ -19,8 +19,11 @@ const SAMPLE_INTERVAL: Duration = Duration::from_millis(150);
 /// adapters so that it is cancellable mid-stream and dropping its session stops
 /// it, and so that running out of samples is reported as a normal
 /// [`BrowseOutcome::Complete`] rather than as a discovery failure.
-pub(super) fn start(config: &DiscoveryConfig) -> DiscoverySession {
-    let (worker, rx) = DiscoveryWorker::spawn(config, RuntimeFlavor::CurrentThread, sample_loop);
+///
+/// Sample records exercise no real adapter, so this backend accepts any
+/// configured domain — including one no real backend could browse.
+pub(super) fn start(options: &DiscoveryOptions) -> DiscoverySession {
+    let (worker, rx) = DiscoveryWorker::spawn(options, RuntimeFlavor::CurrentThread, sample_loop);
     DiscoverySession::from_worker(rx, worker)
 }
 
@@ -28,7 +31,7 @@ pub(super) fn start(config: &DiscoveryConfig) -> DiscoverySession {
 /// cancellation while paused.
 async fn sample_loop(
     domain: String,
-    service_type_filter: Option<String>,
+    service_type_filter: Option<ServiceTypeFilter>,
     tx: mpsc::Sender<DiscoveryEvent>,
     shutdown: CancellationToken,
 ) -> BrowseOutcome {
@@ -42,7 +45,9 @@ async fn sample_loop(
     }
 
     let mut records = fake_records(&domain);
-    if let Some(service_type) = service_type_filter {
+    // The filter is canonical, and so are the sample types, so this compares
+    // like with like instead of hoping the user matched the samples' spelling.
+    if let Some(service_type) = service_type_filter.map(|filter| filter.to_string()) {
         records.retain(|record| record.service_type == service_type);
     }
 
@@ -114,7 +119,7 @@ mod tests {
 
         let outcome = sample_loop(
             "local".to_string(),
-            Some("_ssh._tcp".to_string()),
+            Some(ServiceTypeFilter::parse("_ssh._tcp").unwrap()),
             tx,
             CancellationToken::new(),
         )

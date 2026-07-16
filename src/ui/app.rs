@@ -19,8 +19,8 @@ use ratatui::{
 
 use crate::{
     discovery::{
-        BrowseMode, DiscoveryConfig, DiscoveryEvent, DiscoverySession, Entry, EntryGroup, EntryId,
-        GroupingMode, RowHost, SessionPoll, SessionState, browse_groups, browse_row_count,
+        BrowseMode, DiscoveryEvent, DiscoverySession, Entry, EntryGroup, EntryId, GroupingMode,
+        RowHost, SessionPoll, SessionState, browse_groups, browse_row_count,
     },
     plumber::{self, ActionMode, CommandConfig, MatchResult, PreparedCommand, RuleEngine},
 };
@@ -32,7 +32,12 @@ use super::{cli::Cli, filter::FilterState, keymap::KeyBindings, render};
 pub type ConfigLoader = Box<dyn Fn(&Cli) -> Result<(Box<dyn RuleEngine>, Vec<String>)>>;
 
 /// Starts a replacement discovery session for a service-list refresh.
-pub type DiscoveryFactory = Box<dyn Fn(&DiscoveryConfig) -> DiscoverySession>;
+///
+/// Takes nothing: the composition root builds it around the same validated
+/// discovery options the startup session used. A refresh therefore repeats that
+/// browse exactly, and the app never handles — or could re-derive — unvalidated
+/// discovery inputs.
+pub type DiscoveryFactory = Box<dyn Fn() -> DiscoverySession>;
 
 /// One row of the "group by command" view: a configured command together with
 /// the distinct logical services it matches.
@@ -836,7 +841,7 @@ impl App {
         // Stop the old producer (cancel + join) before starting the
         // replacement, so two browsers never feed the link at once.
         self.session.shutdown();
-        let replacement = factory(&self.cli.discovery_config());
+        let replacement = factory();
 
         // Only now that a replacement exists do the old session and its records
         // go. The old session's receiver is dropped with it, so its events can
@@ -1947,7 +1952,7 @@ mode = "execute"
             Arc::new(Mutex::new(Vec::new()));
         let factory = {
             let spawned = spawned.clone();
-            Box::new(move |_config: &DiscoveryConfig| {
+            Box::new(move || {
                 let (tx, rx) = mpsc::channel();
                 spawned.lock().unwrap().push(tx);
                 DiscoverySession::detached(rx)
@@ -2120,7 +2125,10 @@ mode = "execute"
         cli.fake_discovery = true;
         // One sample record keeps the stream short.
         cli.service_type = Some("_ssh._tcp".to_string());
-        let session = crate::discovery::start(&cli.discovery_config());
+        let session = crate::discovery::start(
+            &cli.discovery_options()
+                .expect("valid test discovery options"),
+        );
         let mut app = App::new(cli, Matcher::default(), KeyBindings::default(), session);
 
         // Drain until the stream ends, as the event loop would.
