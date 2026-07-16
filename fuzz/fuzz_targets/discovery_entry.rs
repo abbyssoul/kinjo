@@ -11,11 +11,16 @@
 //!  2. Grouping neither loses nor duplicates entries, group ids stay unique,
 //!     and every instance agrees with its group on the fields the mode
 //!     groups by.
+//!  3. A row's facts are true of every occurrence it aggregates. A row never
+//!     reports a host or service type that only its first child has: an
+//!     aggregate says `Varies` instead.
 
 use std::{collections::HashSet, num::NonZeroU32};
 
 use arbitrary::Arbitrary;
-use kinjo::discovery::{Entry, GroupingMode, OccurrenceId, group_entries};
+use kinjo::discovery::{
+    BrowseMode, Entry, GroupFacts, OccurrenceId, RowHost, RowServiceType, browse_groups,
+};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
@@ -83,34 +88,74 @@ fuzz_target!(|raw: Vec<RawEntry>| {
     }
 
     for mode in [
-        GroupingMode::LogicalService,
-        GroupingMode::Host,
-        GroupingMode::ServiceType,
-        GroupingMode::Command,
+        BrowseMode::LogicalService,
+        BrowseMode::Host,
+        BrowseMode::ServiceType,
     ] {
-        let groups = group_entries(&records, mode);
+        let groups = browse_groups(&records, mode);
 
-        let total: usize = groups.iter().map(|g| g.instances.len()).sum();
+        let total: usize = groups.iter().map(|g| g.occurrence_count()).sum();
         assert_eq!(total, records.len(), "grouping lost or duplicated entries");
 
-        let ids: HashSet<_> = groups.iter().map(|g| g.id.0.as_str()).collect();
+        let ids: HashSet<_> = groups.iter().map(|g| g.id()).collect();
         assert_eq!(ids.len(), groups.len(), "group ids collided");
 
         for group in &groups {
-            for instance in &group.instances {
-                match mode {
-                    GroupingMode::LogicalService | GroupingMode::Command => {
-                        assert_eq!(instance.base_display_name(), group.label);
-                        assert_eq!(instance.service_type, group.service_type);
-                        assert_eq!(instance.domain, group.domain);
-                        assert_eq!(instance.hostname, group.hostname);
-                        assert_eq!(instance.port, group.port);
+            // The label is derived from the facts, so it can never contradict
+            // them, whatever a name contains.
+            assert_eq!(group.label(), group.facts().label(), "label left its facts");
+
+            for instance in group.instances() {
+                match group.facts() {
+                    GroupFacts::LogicalService(service) => {
+                        assert_eq!(mode, BrowseMode::LogicalService, "facts/mode disagree");
+                        assert_eq!(instance.base_display_name(), service.name);
+                        assert_eq!(instance.service_type, service.service_type);
+                        assert_eq!(instance.domain, service.domain);
+                        assert_eq!(instance.hostname, service.hostname);
+                        assert_eq!(instance.port, service.port);
                     }
-                    GroupingMode::Host => assert_eq!(instance.hostname, group.hostname),
-                    GroupingMode::ServiceType => {
-                        assert_eq!(instance.service_type, group.service_type);
+                    GroupFacts::Host(host) => {
+                        assert_eq!(mode, BrowseMode::Host, "facts/mode disagree");
+                        assert_eq!(instance.hostname, host.hostname);
+                    }
+                    GroupFacts::ServiceType(aggregate) => {
+                        assert_eq!(mode, BrowseMode::ServiceType, "facts/mode disagree");
+                        assert_eq!(instance.service_type, aggregate.service_type);
                     }
                 }
+            }
+
+            // A row may only claim a host or type that every occurrence shares.
+            // `Varies` is always available as the honest answer, so a claim is
+            // never forced — which is what stops a first child's value from
+            // standing in for the aggregate.
+            match group.facts().host() {
+                RowHost::Resolved(host) => assert!(
+                    group
+                        .instances()
+                        .iter()
+                        .all(|record| record.hostname.as_deref() == Some(host)),
+                    "row claimed a host its occurrences do not share"
+                ),
+                RowHost::Unresolved => assert!(
+                    group
+                        .instances()
+                        .iter()
+                        .all(|record| record.hostname.is_none()),
+                    "row claimed no host while an occurrence resolved one"
+                ),
+                RowHost::Varies => {}
+            }
+
+            if let RowServiceType::Invariant(service_type) = group.facts().service_type() {
+                assert!(
+                    group
+                        .instances()
+                        .iter()
+                        .all(|record| record.service_type == service_type),
+                    "row claimed a service type its occurrences do not share"
+                );
             }
         }
     }
