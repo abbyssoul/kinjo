@@ -2099,6 +2099,48 @@ mode = "execute"
         remove(&dir);
     }
 
+    /// A directory that cannot be enumerated is not an empty directory. Reading
+    /// it must fail or warn under the caller's policy, never quietly contribute
+    /// nothing: an overlay silently missing its rules looks identical to one
+    /// that was never configured, and a reload would then be free to install it
+    /// over a working rule set.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_fails_strictly_and_warns_leniently() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("unreadable");
+        fs::write(dir.join("good.toml"), command_toml("good", "true")).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&dir).is_ok() {
+            // Running as root, where file permissions do not apply: this test
+            // has nothing to observe.
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+            remove(&dir);
+            return;
+        }
+
+        let mut strict = MatcherBuilder::new();
+        let err = load_from_dirs(&mut strict, std::slice::from_ref(&dir))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot read"), "{err}");
+        assert!(err.contains(&dir.display().to_string()), "{err}");
+
+        let mut lenient = MatcherBuilder::new();
+        let warnings = load_from_dirs_lenient(&mut lenient, std::slice::from_ref(&dir));
+
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains(&dir.display().to_string()),
+            "{warnings:?}"
+        );
+        assert_eq!(lenient.build().command_count(), 0);
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        remove(&dir);
+    }
+
     #[test]
     fn load_from_dirs_skips_missing_directories() {
         let mut builder = MatcherBuilder::new();

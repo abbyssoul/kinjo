@@ -24,6 +24,7 @@ use color_eyre::eyre::{Report, Result, WrapErr, eyre};
 
 use plumber::{Matcher, RuleEngine};
 use ui::App;
+use ui::app::ReloadOutcome;
 use ui::cli::CliCommand;
 
 /// Source-compatible library entrypoint.
@@ -136,9 +137,13 @@ fn run_invocation(
         // exactly the browse that startup did and cannot re-derive a different
         // (or unchecked) one.
         .with_discovery_factory(Box::new(move || discovery::start(&options)))
-        .with_config_loader(Box::new(|cli| {
-            ui::config::load_matcher(cli)
-                .map(|(matcher, warnings)| (Box::new(matcher) as Box<dyn RuleEngine>, warnings))
+        // Startup above loaded leniently; a reload loads transactionally. The
+        // app is handed a rule set only when the whole configured overlay
+        // compiled, so it never has to choose between a partial rule set and
+        // the working one it already has.
+        .with_config_loader(Box::new(|cli| match ui::config::reload_matcher(cli) {
+            Ok(matcher) => ReloadOutcome::Loaded(Box::new(matcher) as Box<dyn RuleEngine>),
+            Err(diagnostics) => ReloadOutcome::Rejected(diagnostics),
         }));
     #[cfg(unix)]
     sighup::install(app.reload_requested.clone());
@@ -151,13 +156,21 @@ fn run_invocation(
     }
     let exec_action = ratatui::run(|terminal| app.run(terminal))?;
 
+    // Take the diagnostics of the last rejected reload out before the app goes:
+    // they are the only record of it, and the status line that announced it is
+    // already gone with the terminal.
+    let reload_diagnostics = std::mem::take(&mut app.reload_diagnostics);
+
     // The app owns the discovery session; dropping it cancels and joins the
     // browse worker before a potential exec hand-off replaces the process.
     drop(app);
 
-    // The status line is transient; repeat skipped-config details somewhere
-    // they survive — the terminal scrollback after the TUI has been torn down.
-    write_config_warnings(stderr, &config_warnings)?;
+    // The status line is transient; repeat config details somewhere they
+    // survive — the terminal scrollback after the TUI has been torn down.
+    write_config_diagnostics(stderr, "warning", &config_warnings)?;
+    // A rejected reload is not a warning about what was skipped: it is why the
+    // rules the user edited never took effect. Distinguish the two.
+    write_config_diagnostics(stderr, "reload rejected", &reload_diagnostics)?;
 
     if let Some(action) = exec_action {
         let command_line = action.argv.join(" ");
@@ -299,12 +312,16 @@ fn write_padding(writer: &mut impl std::io::Write, columns: usize) -> std::io::R
     write!(writer, "{:columns$}", "")
 }
 
-fn write_config_warnings(
+/// Print config diagnostics under `label`, one per line. Every message quotes a
+/// path and an error from a file the process did not write, so each goes through
+/// the same escaping as any other untrusted text.
+fn write_config_diagnostics(
     writer: &mut impl std::io::Write,
-    warnings: &[String],
+    label: &str,
+    diagnostics: &[String],
 ) -> std::io::Result<()> {
-    for warning in warnings {
-        writeln!(writer, "warning: {}", terminal::text(warning))?;
+    for diagnostic in diagnostics {
+        writeln!(writer, "{label}: {}", terminal::text(diagnostic))?;
     }
     Ok(())
 }
@@ -389,11 +406,42 @@ mod terminal_output_tests {
         let warnings = vec!["bad\x1b[31m/path\nconfig\x07error".to_string()];
         let mut output = Vec::new();
 
-        write_config_warnings(&mut output, &warnings).unwrap();
+        write_config_diagnostics(&mut output, "warning", &warnings).unwrap();
 
         assert_eq!(
             String::from_utf8(output).unwrap(),
             "warning: bad\\x1B[31m/path\\x0Aconfig\\x07error\n"
+        );
+    }
+
+    /// The exit report is the only place a rejected reload's detail survives to,
+    /// and it must say which reload it is talking about: a file skipped at
+    /// startup and a reload that never took effect call for different actions.
+    #[test]
+    fn rejected_reload_details_are_labelled_apart_from_startup_warnings() {
+        let mut output = Vec::new();
+
+        write_config_diagnostics(
+            &mut output,
+            "warning",
+            &["/etc/kinjo/commands/old.toml: bad".to_string()],
+        )
+        .unwrap();
+        write_config_diagnostics(
+            &mut output,
+            "reload rejected",
+            &["/home/u/.config/kinjo/commands/ssh.toml: unterminated quote".to_string()],
+        )
+        .unwrap();
+
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(
+            output.lines().collect::<Vec<_>>(),
+            [
+                "warning: /etc/kinjo/commands/old.toml: bad",
+                "reload rejected: /home/u/.config/kinjo/commands/ssh.toml: unterminated quote",
+            ],
+            "each diagnostic keeps its full source path and message"
         );
     }
 

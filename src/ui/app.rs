@@ -33,9 +33,25 @@ use super::{
     render,
 };
 
+/// What a reload attempt came back with. There is no third case: a reload
+/// either produces a rule set complete enough to replace the running one, or it
+/// produces the reasons it does not, and the running one stays.
+pub enum ReloadOutcome {
+    /// The whole configured overlay compiled. Safe to install.
+    Loaded(Box<dyn RuleEngine>),
+    /// At least one file or directory was invalid, so no rule set was built.
+    /// Each diagnostic names its source and what was wrong with it.
+    Rejected(Vec<String>),
+}
+
 /// Loads a fresh rule set for a config reload (SIGHUP). Injected by the
 /// composition root so the app stays decoupled from config-file I/O.
-pub type ConfigLoader = Box<dyn Fn(&Cli) -> Result<(Box<dyn RuleEngine>, Vec<String>)>>;
+///
+/// The loader validates; the app installs or does not. Deciding *outside* the
+/// app whether a candidate rule set is complete is what makes the swap
+/// transactional: by the time the app sees a [`ReloadOutcome::Loaded`], nothing
+/// is left to go wrong half way through.
+pub type ConfigLoader = Box<dyn Fn(&Cli) -> ReloadOutcome>;
 
 /// Starts a replacement discovery session for a service-list refresh.
 ///
@@ -135,6 +151,16 @@ pub struct App {
     pub reload_requested: Arc<AtomicBool>,
     /// Reloads command configs on request; reload is unavailable when unset.
     pub config_loader: Option<ConfigLoader>,
+    /// Why the most recent reload was rejected, in full: one entry per invalid
+    /// source, naming it and what was wrong with it.
+    ///
+    /// The status line is transient — the next tick's message replaces it — but
+    /// a rejected reload is something the user has to act on, so the detail is
+    /// kept here until it is either superseded or printed on exit. The policy is
+    /// latest-only: a reload reports on the configuration as it is *now*, so a
+    /// successful reload clears this, and a later failure replaces it rather
+    /// than piling up a history of edits already fixed.
+    pub reload_diagnostics: Vec<String>,
     /// Starts a replacement discovery session; refresh is unavailable when unset.
     pub discovery_factory: Option<DiscoveryFactory>,
     /// Per-group action matches, parallel to `visible_groups`. Computed once
@@ -198,6 +224,7 @@ impl App {
             should_quit: false,
             reload_requested: Arc::new(AtomicBool::new(false)),
             config_loader: None,
+            reload_diagnostics: Vec::new(),
             discovery_factory: None,
             group_matches: Vec::new(),
             service_types: Vec::new(),
@@ -1061,28 +1088,44 @@ impl App {
         }
     }
 
-    /// Reload command configs through the injected loader, keeping the current
-    /// rule set when the reload fails. A reload failure must not tear down the
-    /// TUI — it is reported on the status line like action failures.
+    /// Reload command configs through the injected loader, atomically or not at
+    /// all. A reload failure must not tear down the TUI — it is reported on the
+    /// status line like action failures, and the rules already in force stay in
+    /// force.
+    ///
+    /// The loader has already decided whether the configuration on disk is
+    /// complete, so there is exactly one moment here where anything changes:
+    /// either the whole candidate rule set replaces the whole active one, or
+    /// nothing is touched. A reload the user is midway through writing leaves
+    /// the session exactly as it was, still able to run every command it could a
+    /// moment ago.
     fn reload_config(&mut self) {
         let Some(loader) = &self.config_loader else {
             self.status = "config reload is not available".to_string();
             return;
         };
         match loader(&self.cli) {
-            Ok((matcher, warnings)) => {
+            ReloadOutcome::Loaded(matcher) => {
                 self.matcher = matcher;
+                // The reload spoke for the whole configuration, and it is valid:
+                // whatever the last one complained about is either fixed or gone.
+                self.reload_diagnostics.clear();
                 self.close_pickers();
                 self.recompute_visible();
-                self.status = match warnings.len() {
-                    0 => format!("reloaded {} command(s)", self.matcher.command_count()),
-                    skipped => format!(
-                        "reloaded {} command(s); skipped {skipped} config file(s)",
-                        self.matcher.command_count()
-                    ),
-                };
+                self.status = format!("reloaded {} command(s)", self.matcher.command_count());
             }
-            Err(err) => self.status = format!("config reload failed: {err}"),
+            ReloadOutcome::Rejected(diagnostics) => {
+                // Say what is still true — the old rules are running — rather
+                // than only what failed. The detail is kept for the exit report;
+                // the status line cannot hold it and will not survive the tick.
+                self.status = format!(
+                    "config reload rejected: {} invalid config file(s); \
+                     keeping the {} command(s) already loaded; details printed on exit",
+                    diagnostics.len(),
+                    self.matcher.command_count()
+                );
+                self.reload_diagnostics = diagnostics;
+            }
         }
     }
 
@@ -2449,8 +2492,6 @@ mode = "execute"
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
-    use color_eyre::eyre::eyre;
-
     /// A factory whose spawned sessions' senders are captured, so a test can
     /// feed events through whichever session a refresh started — and prove that
     /// events sent to a superseded one never arrive.
@@ -3039,15 +3080,23 @@ mode = "execute"
         assert!(matches!(app.session.state(), SessionState::Failed(_)));
     }
 
+    /// A loader that hands back a complete rule set built from `sources`.
+    fn loads(sources: &'static [&'static str]) -> ConfigLoader {
+        Box::new(move |_cli| ReloadOutcome::Loaded(Box::new(matcher_from(sources))))
+    }
+
+    /// A loader that rejects the configuration with `diagnostics`, as a reload
+    /// does for any invalid file in the overlay.
+    fn rejects(diagnostics: &'static [&'static str]) -> ConfigLoader {
+        Box::new(move |_cli| {
+            ReloadOutcome::Rejected(diagnostics.iter().map(|d| d.to_string()).collect())
+        })
+    }
+
     #[test]
     fn requested_reload_swaps_commands_and_recomputes_matches() {
         let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")])
-            .with_config_loader(Box::new(|_cli| {
-                Ok((
-                    Box::new(matcher_from(&[SSH])) as Box<dyn RuleEngine>,
-                    Vec::new(),
-                ))
-            }));
+            .with_config_loader(loads(&[SSH]));
         assert_eq!(app.matcher.command_count(), 0);
         assert_eq!(app.group_matches[0].len(), 0);
 
@@ -3075,10 +3124,7 @@ mode = "execute"
                 let calls = calls.clone();
                 Box::new(move |_cli| {
                     calls.fetch_add(1, Ordering::Relaxed);
-                    Ok((
-                        Box::new(Matcher::default()) as Box<dyn RuleEngine>,
-                        Vec::new(),
-                    ))
+                    ReloadOutcome::Loaded(Box::new(Matcher::default()))
                 })
             });
         let status = app.status.clone();
@@ -3089,43 +3135,146 @@ mode = "execute"
         assert_eq!(app.status, status);
     }
 
+    /// The sole command file is being edited and is momentarily malformed. A
+    /// reload that skipped it would leave a session that can no longer do
+    /// anything; the rules already in force must simply stay, action and all.
     #[test]
-    fn failed_reload_keeps_the_current_commands() {
+    fn rejected_reload_keeps_the_working_rules_runnable() {
         let mut app = app_with(matcher_from(&[SSH]), vec![ssh("alpha", "10.0.0.1")])
-            .with_config_loader(Box::new(|_cli| Err(eyre!("boom"))));
+            .with_config_loader(rejects(&["/cfg/ssh.toml: unterminated quote"]));
 
         app.reload_requested.store(true, Ordering::Relaxed);
         app.poll_reload();
 
         assert_eq!(app.matcher.command_count(), 1, "old rules stay in force");
-        assert!(app.status.contains("config reload failed"));
-        assert!(app.status.contains("boom"));
+        assert_eq!(
+            app.group_matches[0].len(),
+            1,
+            "and still match the discovered services"
+        );
+        let command = send(&mut app, KeyCode::Enter).expect("the working action still runs");
+        assert_eq!(command.argv, vec!["ssh", "alpha.local"]);
     }
 
+    /// The one the old lenient reload got wrong: a valid file next to an invalid
+    /// one used to install *half* the configuration over a complete rule set,
+    /// silently dropping whatever the broken file defined.
     #[test]
-    fn reload_reports_skipped_config_files() {
-        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")])
-            .with_config_loader(Box::new(|_cli| {
-                Ok((
-                    Box::new(matcher_from(&[SSH])) as Box<dyn RuleEngine>,
-                    vec!["bad.toml: not toml".to_string()],
-                ))
-            }));
+    fn a_mixed_valid_and_invalid_overlay_does_not_partially_swap() {
+        let mut app = app_with(matcher_from(&[SSH, PING]), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader(rejects(&["/cfg/ping.toml: unknown placeholder `{bogus}`"]));
 
         app.reload_requested.store(true, Ordering::Relaxed);
         app.poll_reload();
 
-        assert!(app.status.contains("skipped 1 config file"));
+        assert_eq!(
+            app.matcher.command_count(),
+            2,
+            "a rule set is installed whole or not at all"
+        );
+        assert_eq!(app.group_matches[0].len(), 2);
+        assert!(
+            app.status
+                .contains("keeping the 2 command(s) already loaded")
+        );
+    }
+
+    /// Diagnostics outlive the status line that announced them: the next tick
+    /// overwrites the message, and the detail is what the user needs on exit.
+    #[test]
+    fn rejected_reload_retains_full_diagnostics_across_status_updates() {
+        let mut app = app_with(matcher_from(&[SSH]), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader(rejects(&[
+                "/etc/kinjo/commands/a.toml: unterminated quote",
+                "/home/u/.config/kinjo/commands/b.toml: unsupported match field `typ`",
+            ]));
+
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+        assert!(app.status.contains("2 invalid config file(s)"));
+
+        // Anything at all happening in the UI replaces the status line.
+        app.fail("something else entirely".to_string()).unwrap();
+        assert!(!app.status.contains("invalid config file"));
+
+        assert_eq!(
+            app.reload_diagnostics,
+            [
+                "/etc/kinjo/commands/a.toml: unterminated quote",
+                "/home/u/.config/kinjo/commands/b.toml: unsupported match field `typ`",
+            ],
+            "full source paths and messages survive for the exit report"
+        );
+    }
+
+    /// Latest-only: a reload reports on the configuration as it is now, so a
+    /// fix leaves nothing behind to print about edits already corrected.
+    #[test]
+    fn a_successful_reload_clears_the_previous_failures_diagnostics() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader(rejects(&["/cfg/ssh.toml: unterminated quote"]));
+
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+        assert!(!app.reload_diagnostics.is_empty());
+
+        // The user fixes the file and signals again.
+        app.config_loader = Some(loads(&[SSH]));
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+
+        assert!(app.reload_diagnostics.is_empty(), "latest reload only");
+        assert_eq!(app.matcher.command_count(), 1);
+        assert!(app.status.contains("reloaded 1 command"));
+    }
+
+    /// A later failure replaces the earlier one rather than accumulating.
+    #[test]
+    fn a_second_rejected_reload_replaces_the_earlier_diagnostics() {
+        let mut app = app_with(matcher_from(&[SSH]), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader(rejects(&["/cfg/first.toml: unterminated quote"]));
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+
+        app.config_loader = Some(rejects(&["/cfg/second.toml: invalid action mode `frok`"]));
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+
+        assert_eq!(
+            app.reload_diagnostics,
+            ["/cfg/second.toml: invalid action mode `frok`"]
+        );
+    }
+
+    /// The command view projects rules, so an atomic swap has to be visible in
+    /// its rows — not just in the matcher's count.
+    #[test]
+    fn a_valid_reload_swaps_every_rule_together_and_rebuilds_command_groups() {
+        let mut app = app_with(matcher_from(&[SSH]), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader(loads(&[SSH, PING]));
+        app.filter.grouping = GroupingMode::Command;
+        app.recompute_visible();
+        assert_eq!(app.command_groups.len(), 1);
+
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+
+        assert_eq!(
+            app.command_groups
+                .iter()
+                .map(|group| group.command.name.as_str())
+                .collect::<Vec<_>>(),
+            ["ssh", "ping"],
+            "both new rules arrive at once, projected against current records"
+        );
+        assert!(app.reload_diagnostics.is_empty());
     }
 
     #[test]
     fn reload_closes_a_picker_built_from_the_old_rules() {
         let mut app = app_with(matcher_from(&[SSH, PING]), vec![ssh("alpha", "10.0.0.1")])
             .with_config_loader(Box::new(|_cli| {
-                Ok((
-                    Box::new(Matcher::default()) as Box<dyn RuleEngine>,
-                    Vec::new(),
-                ))
+                ReloadOutcome::Loaded(Box::new(Matcher::default()))
             }));
         assert!(send(&mut app, KeyCode::Enter).is_none());
         assert_eq!(app.mode, AppMode::ActionPicker);
@@ -3135,6 +3284,23 @@ mode = "execute"
 
         assert_eq!(app.mode, AppMode::Browse);
         assert!(app.action_matches.is_empty());
+    }
+
+    /// The mirror of the test above: a picker is stale only because the rules
+    /// under it changed. A rejected reload changes nothing, so the choice the
+    /// user is in the middle of making is still valid and must not be dropped.
+    #[test]
+    fn a_rejected_reload_leaves_an_open_picker_alone() {
+        let mut app = app_with(matcher_from(&[SSH, PING]), vec![ssh("alpha", "10.0.0.1")])
+            .with_config_loader(rejects(&["/cfg/ssh.toml: unterminated quote"]));
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.mode, AppMode::ActionPicker);
+
+        app.reload_requested.store(true, Ordering::Relaxed);
+        app.poll_reload();
+
+        assert_eq!(app.mode, AppMode::ActionPicker);
+        assert_eq!(app.action_matches.len(), 2);
     }
 
     #[test]

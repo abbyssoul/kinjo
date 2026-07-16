@@ -407,6 +407,11 @@ reload signal), so edits apply without restarting the TUI:
 pkill -HUP kinjo
 ```
 
+The reload is transactional: it applies only if every configured command file is
+valid. If one is not, the commands already loaded stay in force and the reason is
+reported, rather than a half-saved edit taking away a command you were using. See
+[docs/actions.md](docs/actions.md#reloading-while-it-runs).
+
 Keybindings can be overridden at:
 
 ```sh
