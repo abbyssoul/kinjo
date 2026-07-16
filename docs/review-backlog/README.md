@@ -49,7 +49,7 @@ Status values:
 | 014 | P2 | ready | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015 |
 | 015 | P2 | blocked | [App and RuleEngine refactoring](tasks/015-app-and-rule-engine-refactoring.md) | 001–014, 016 | all prior tasks; run last |
 | 016 | P0 | done | [Remove implicit fake fallback](tasks/016-remove-implicit-fake-fallback.md) | — | 002 |
-| 017 | P2 | ready | [Fake backend heterogeneous SSH row](tasks/017-fake-backend-heterogeneous-ssh-row.md) | 006 | — |
+| 017 | P2 | done | [Fake backend heterogeneous SSH row](tasks/017-fake-backend-heterogeneous-ssh-row.md) | 006 | — |
 
 Priority meanings:
 

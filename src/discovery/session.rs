@@ -318,8 +318,14 @@ mod tests {
         assert_eq!(state, SessionState::Complete);
         assert!(!state.is_listening());
         let records = upserts(&events);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].service_type, "_ssh._tcp");
+        // The sample set advertises SSH on two hosts.
+        assert_eq!(records.len(), 2);
+        assert!(
+            records
+                .iter()
+                .all(|record| record.service_type == "_ssh._tcp"),
+            "the filter must admit only the requested type"
+        );
     }
 
     /// Dropping a session must stop its producer even mid-stream — including

@@ -116,6 +116,11 @@ Pass `--fake-discovery` for sample records on demand. Those samples are a short,
 finite stream; when it ends the status line reports normal completion and the
 samples remain listed.
 
+The sample set is chosen to exercise the behavior the real app has: a service
+reachable at several addresses, a service with no resolved host yet, and SSH on
+two different hosts — so the `_ssh._tcp` service-type row aggregates children
+whose commands differ and asks which host to act on.
+
 ## Privacy
 
 `kinjo` browses your local network, so it's worth being explicit about what it

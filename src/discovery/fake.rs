@@ -75,6 +75,16 @@ fn fake_records(domain: &str) -> Vec<Entry> {
     ];
     ssh.port = Some(22);
 
+    // A second SSH service, on its own host. The `_ssh._tcp` service-type row
+    // therefore aggregates two hosts that do not agree on a hostname, which is
+    // what makes a rule like `ssh {hostname}` ask which host to act on. Without
+    // it the sample set can only ever produce rows whose children all prepare
+    // the same command, and that question never arises.
+    let mut ssh_pi = Entry::new("raspberry-pi", "_ssh._tcp", domain);
+    ssh_pi.hostname = Some("raspberry-pi.local".to_string());
+    ssh_pi.addresses = vec!["192.168.1.40".parse().unwrap()];
+    ssh_pi.port = Some(22);
+
     let mut http = Entry::new("nas", "_http._tcp", domain);
     http.hostname = Some("nas.local".to_string());
     http.addresses = vec!["192.168.1.30".parse().unwrap()];
@@ -88,11 +98,13 @@ fn fake_records(domain: &str) -> Vec<Entry> {
 
     let unresolved = Entry::new("pending-printer", "_ipp._tcp", domain);
 
-    vec![ssh, http, https, unresolved]
+    vec![ssh, ssh_pi, http, https, unresolved]
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -104,13 +116,28 @@ mod tests {
             records.iter().any(|record| !record.has_instance_data()),
             "expected at least one pending/unresolved record"
         );
-        // The SSH service is one logical entry carrying both of its addresses.
         let ssh: Vec<_> = records
             .iter()
             .filter(|record| record.service_type == "_ssh._tcp")
             .collect();
-        assert_eq!(ssh.len(), 1);
-        assert_eq!(ssh[0].addresses.len(), 2);
+
+        // The `workstation` service is one logical entry carrying both of its
+        // addresses, so address selection stays demonstrable.
+        let workstation = ssh
+            .iter()
+            .find(|record| record.name == "workstation")
+            .expect("the multi-address SSH service");
+        assert_eq!(workstation.addresses.len(), 2);
+
+        // Two SSH services on two hosts, so the `_ssh._tcp` service-type row
+        // aggregates children whose `{hostname}` commands differ and a target
+        // must be chosen.
+        assert_eq!(ssh.len(), 2);
+        let hosts: BTreeSet<_> = ssh
+            .iter()
+            .filter_map(|record| record.hostname.as_deref())
+            .collect();
+        assert_eq!(hosts.len(), 2, "the SSH services must be on distinct hosts");
     }
 
     #[tokio::test]

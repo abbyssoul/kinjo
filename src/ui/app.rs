@@ -2875,7 +2875,7 @@ mode = "execute"
     fn finite_fake_completion_keeps_its_samples_and_reports_completion() {
         let mut cli = test_cli();
         cli.fake_discovery = true;
-        // One sample record keeps the stream short.
+        // Filtering to one type keeps the stream short.
         cli.service_type = Some("_ssh._tcp".to_string());
         let session = crate::discovery::start(
             &cli.discovery_options()
@@ -2892,7 +2892,7 @@ mode = "execute"
         assert_eq!(*app.session.state(), SessionState::Complete);
         assert_eq!(
             app.records.len(),
-            1,
+            2,
             "a finished sample stream keeps its records"
         );
         assert!(app.status.contains("complete"));
@@ -2901,6 +2901,52 @@ mode = "execute"
             "finishing a finite stream is not a failure: {}",
             app.status
         );
+    }
+
+    /// Fake discovery is the smoke-test surface, so it has to be able to show
+    /// the behavior the app actually has. Task 006 makes an aggregate row ask
+    /// which host to act on when its children would run different commands —
+    /// which the sample set could not produce while it advertised a single SSH
+    /// service. This pins the sample set against that behavior, so `--backend
+    /// fake` stays enough to exercise the picker by hand.
+    #[test]
+    fn fake_samples_offer_host_selection_on_the_service_type_row() {
+        let mut cli = test_cli();
+        cli.fake_discovery = true;
+        cli.service_type = Some("_ssh._tcp".to_string());
+        let session = crate::discovery::start(
+            &cli.discovery_options()
+                .expect("valid test discovery options"),
+        );
+        let mut app = App::new(cli, matcher_from(&[SSH]), KeyBindings::default(), session);
+        while app.session.state().is_listening() {
+            app.drain_discovery();
+            std::thread::yield_now();
+        }
+
+        app.filter.grouping = GroupingMode::ServiceType;
+        app.recompute_visible();
+
+        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.visible_groups[0].label(), "_ssh._tcp");
+        assert_eq!(
+            app.visible_groups[0].resolved_host_count(),
+            2,
+            "the sample set must put SSH on two hosts"
+        );
+
+        // `ssh {hostname}` over two hosts is two different commands.
+        assert!(send(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(
+            app.mode,
+            AppMode::InstancePicker,
+            "the row must ask which host rather than run one"
+        );
+
+        // Occurrences sort by registration name: raspberry-pi, then workstation.
+        send(&mut app, KeyCode::Down);
+        let command = send(&mut app, KeyCode::Enter).expect("the chosen host runs");
+        assert_eq!(command.argv, vec!["ssh", "workstation.local"]);
     }
 
     /// Refresh is the recovery action: it must work *from* a failed session.
