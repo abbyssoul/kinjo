@@ -10,6 +10,7 @@
 #   scripts/drive-tui.sh start [-- kinjo-args...]        # build, then start
 #   scripts/drive-tui.sh keys <key> [key ...]            # send keys, then settle
 #   scripts/drive-tui.sh shot                            # print the screen
+#   scripts/drive-tui.sh pid                             # print the app's pid
 #   scripts/drive-tui.sh wait-text <text> [seconds]      # wait for rendered text
 #   scripts/drive-tui.sh wait-exit [seconds]             # require a clean exit
 #   scripts/drive-tui.sh stop                            # end the session
@@ -107,6 +108,13 @@ cmd_keys() {
 cmd_shot() {
     require_session
     tmux capture-pane -p -t "$SESSION"
+}
+
+# The pid of the app itself, for asking questions the screen cannot answer —
+# whether it is still running, and what it is doing with the CPU.
+cmd_pid() {
+    require_session
+    tmux display-message -p -t "$SESSION" '#{pane_pid}'
 }
 
 wait_timeout() {
@@ -207,6 +215,7 @@ case "$subcommand" in
         ;;
     keys) cmd_keys "$@" ;;
     shot) cmd_shot ;;
+    pid) cmd_pid ;;
     wait-text) cmd_wait_text "$@" ;;
     wait-exit) cmd_wait_exit "$@" ;;
     stop) cmd_stop ;;

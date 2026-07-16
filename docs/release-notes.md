@@ -196,6 +196,20 @@ real failures in command lines that previously appeared to pass.
   that shortens — or a terminal that grows — pulls the view back to the end of
   the content instead of leaving it past the end.
 
+### Fixes
+
+- **Kinjo no longer outlives the terminal it was started in.** Closing a
+  terminal, ending a `tmux` session, or dropping an SSH connection left Kinjo
+  running — orphaned, invisible, and spinning at 100% CPU on a terminal that no
+  longer existed. It now exits, as it would have before it learned to reload on
+  `SIGHUP`.
+
+  The cause was that reload feature: handling `SIGHUP` also replaced its default
+  action, which was to terminate. Kinjo now tells the two meanings of that one
+  signal apart — a `SIGHUP` that arrives while the terminal is still there is a
+  reload request, and one that arrives because the terminal has gone is a
+  hangup. Reloading with `kill -HUP` is unchanged.
+
 ### Packaging and tooling
 
 - **Nix flake.** Kinjo can be installed and run through Nix; see the Nix / NixOS

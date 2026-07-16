@@ -201,6 +201,12 @@ fn report_cli_error(
 /// SIGHUP → reload command configs: the conventional "re-read your
 /// configuration" signal for long-running programs. Unix-only; other
 /// platforms simply never set the app's reload flag.
+///
+/// SIGHUP means two unrelated things to a program that owns a terminal, and
+/// Kinjo is on the receiving end of both: an administrator asking a
+/// long-running process to re-read its configuration, and the kernel reporting
+/// that the terminal has hung up. Telling them apart is this module's whole
+/// job, because getting it wrong is not survivable — see [`on_sighup`].
 #[cfg(unix)]
 mod sighup {
     use std::sync::{
@@ -212,18 +218,61 @@ mod sighup {
     /// state, so the app's flag is stashed in a process-global.
     static RELOAD_REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
-    /// Only async-signal-safe work is allowed in a handler; setting an atomic
-    /// flag that the event loop polls is the safe idiom.
+    /// Whether Kinjo had a terminal when the handler was installed.
+    ///
+    /// A process that never had one cannot be hung up on, so its SIGHUP is
+    /// unambiguously a reload request. This is what keeps the reload path
+    /// working when Kinjo's input is not a terminal at all — a test binary,
+    /// most obviously, where treating a plain `raise(SIGHUP)` as a hangup would
+    /// take the whole run down.
+    static HAD_TERMINAL: AtomicBool = AtomicBool::new(false);
+
+    /// Whether the terminal Kinjo reads from is still there.
+    ///
+    /// Asked of `STDIN_FILENO` specifically: that is the descriptor the input
+    /// source polls, so it is the one whose death matters. A live terminal
+    /// answers; one whose other end has gone fails with `EIO`. POSIX lists
+    /// `tcgetattr` as async-signal-safe, so the handler is allowed to ask.
+    fn terminal_is_alive() -> bool {
+        // SAFETY: `tcgetattr` only writes through the pointer we give it, and
+        // is async-signal-safe.
+        unsafe {
+            let mut termios = std::mem::zeroed::<libc::termios>();
+            libc::tcgetattr(libc::STDIN_FILENO, &mut termios) == 0
+        }
+    }
+
+    /// Reload, or die with the terminal.
+    ///
+    /// Installing a handler at all replaced SIGHUP's default action, which was
+    /// to terminate the process — and for a TUI that default was load-bearing.
+    /// A hangup leaves the event loop with no terminal, and it cannot recover:
+    /// crossterm's input source busy-reads the EOF a dead tty reports and never
+    /// returns, so nothing downstream — not the next draw, not the next poll —
+    /// ever gets the chance to notice and exit. What is left is an orphan
+    /// spinning at 100% CPU, outliving the terminal that started it.
+    ///
+    /// So a hangup ends the process here, which is exactly what would have
+    /// happened had this handler never been installed. Only a SIGHUP that
+    /// arrives while the terminal is still there is a reload request.
     extern "C" fn on_sighup(_signal: libc::c_int) {
+        if HAD_TERMINAL.load(Ordering::Relaxed) && !terminal_is_alive() {
+            // `_exit` is async-signal-safe, and there is no terminal left to
+            // restore or report to. 128 + the signal number is the conventional
+            // encoding for "died of this signal".
+            unsafe { libc::_exit(128 + libc::SIGHUP) };
+        }
+        // Only async-signal-safe work is allowed in a handler; setting an
+        // atomic flag that the event loop polls is the safe idiom.
         if let Some(flag) = RELOAD_REQUESTED.get() {
             flag.store(true, Ordering::Relaxed);
         }
     }
 
-    /// Route SIGHUP to `flag`. Installing the handler also replaces SIGHUP's
-    /// default action, which would terminate the process.
+    /// Route SIGHUP to `flag`, and record whether there is a terminal to lose.
     pub(crate) fn install(flag: Arc<AtomicBool>) {
         let _ = RELOAD_REQUESTED.set(flag);
+        HAD_TERMINAL.store(terminal_is_alive(), Ordering::Relaxed);
         unsafe {
             libc::signal(
                 libc::SIGHUP,
@@ -236,6 +285,15 @@ mod sighup {
     mod tests {
         use super::*;
 
+        /// This test is also the hangup path's canary. It runs in-process, so
+        /// if the handler ever misread a plain `raise` as a hangup it would
+        /// `_exit` and take the whole run with it — a failure far louder than
+        /// an assertion.
+        ///
+        /// It passes either way the runner is started, and that is the point of
+        /// the two-part condition in [`on_sighup`]: under a pipe there is no
+        /// terminal to lose, and under a tty the terminal is still there.
+        /// Neither is a hangup.
         #[test]
         fn sighup_sets_the_reload_flag_instead_of_terminating() {
             let flag = Arc::new(AtomicBool::new(false));
@@ -246,6 +304,16 @@ mod sighup {
             unsafe { libc::raise(libc::SIGHUP) };
 
             assert!(flag.load(Ordering::Relaxed));
+        }
+
+        /// The handler's entire decision rests on this, so it must be total —
+        /// answering for a pipe or a file rather than erroring — and it must
+        /// agree with the independent question "is stdin a terminal?".
+        #[test]
+        fn terminal_liveness_agrees_with_whether_stdin_is_a_terminal() {
+            let is_a_terminal = unsafe { libc::isatty(libc::STDIN_FILENO) == 1 };
+
+            assert_eq!(terminal_is_alive(), is_a_terminal);
         }
     }
 }
