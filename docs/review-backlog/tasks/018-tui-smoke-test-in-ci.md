@@ -4,12 +4,12 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `ready` |
+| Status | `done` |
 | Priority | `P2` |
 | Workstream | UI / CI |
 | Depends on | 017, 019 |
 | Likely conflicts | 015 |
-| Owner | Unclaimed |
+| Owner | Codex (`agent/task-018`) |
 
 ## Why This Matters
 
@@ -93,12 +93,12 @@ interface instead of immediately rewriting a legacy-flag invocation.
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] CI runs the real binary and asserts on rendered output.
-- [ ] The job fails when rendering is broken, demonstrated deliberately.
-- [ ] A non-default terminal size is covered.
-- [ ] Failure output includes the captured screen.
-- [ ] Waits are bounded; the job does not flake on a healthy tree.
-- [ ] `actionlint` passes and `CONTRIBUTING.md` mentions the job.
+- [x] CI runs the real binary and asserts on rendered output.
+- [x] The job fails when rendering is broken, demonstrated deliberately.
+- [x] A non-default terminal size is covered.
+- [x] Failure output includes the captured screen.
+- [x] Waits are bounded; the job does not flake on a healthy tree.
+- [x] `actionlint` passes and `CONTRIBUTING.md` mentions the job.
 
 ## Required Tests
 
@@ -120,8 +120,19 @@ cargo test --locked --all-targets --all-features
 
 ## Completion Record
 
-- **Implemented:**
-- **Tests added/updated:**
-- **Documentation updated:**
-- **Validation evidence:**
-- **Follow-ups:**
+- **Implemented:** Added bounded `wait-text` and zero-status `wait-exit` modes to
+  the shared tmux driver, plus a locally runnable smoke script. The CI test
+  workflow explicitly installs tmux and runs that script at 100×30 and 60×18.
+- **Tests added/updated:** `scripts/smoke-tui.sh` starts the real fake-backend
+  binary, checks stable chrome and sample-data text, switches from services to
+  types and verifies the screen changed, then requires `q` to exit with status
+  zero.
+- **Documentation updated:** Documented the CI smoke coverage, exact local
+  commands, bounded waits, and captured failure output in `CONTRIBUTING.md`.
+- **Validation evidence:** Healthy smoke runs passed at 100×30 and 60×18. A
+  temporary impossible `__missing_smoke_marker__` assertion failed after a
+  one-second bound with exit status 1 and the full rendered frame in its output;
+  the assertion was then restored. `bash -n`, ShellCheck, `actionlint`,
+  `git diff --check`, format, and all-feature Clippy passed. Default tests passed
+  377/377 and all-feature tests passed 402/402.
+- **Follow-ups:** None.

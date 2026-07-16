@@ -50,7 +50,7 @@ Status values:
 | 015 | P2 | blocked | [App and RuleEngine refactoring](tasks/015-app-and-rule-engine-refactoring.md) | 001–014, 016–021 | all prior tasks; run last |
 | 016 | P0 | done | [Remove implicit fake fallback](tasks/016-remove-implicit-fake-fallback.md) | — | 002 |
 | 017 | P2 | done | [Fake backend heterogeneous SSH row](tasks/017-fake-backend-heterogeneous-ssh-row.md) | 006 | — |
-| 018 | P2 | ready | [TUI smoke test in CI](tasks/018-tui-smoke-test-in-ci.md) | 017, 019 | 015 |
+| 018 | P2 | done | [TUI smoke test in CI](tasks/018-tui-smoke-test-in-ci.md) | 017, 019 | 015 |
 | 019 | P2 | done | [Fake as a selectable backend](tasks/019-fake-as-a-selectable-backend.md) | 017 | — |
 | 020 | P0 | done | [Safe process-owned terminal output](tasks/020-safe-process-terminal-output.md) | 012 | 007, 009, 015 |
 | 021 | P2 | blocked | [Session-aware activity indicator](tasks/021-session-aware-activity-indicator.md) | 002, 010, 014 | 014, 015 |
@@ -113,18 +113,18 @@ correct heterogeneous SSH picker. No regression in a completed task was found.
 The review did identify remaining or newly exposed work, now recorded rather
 than hidden in completion notes:
 
-- tasks 007 and 009 still reproduce on the current branch and are ready;
-- task 011 now owns short-terminal help clipping as well as picker visibility;
+- tasks 007 and 009 reproduced at midpoint and have since been completed;
+- task 011 took ownership of short-terminal help clipping as well as picker
+  visibility and is now done;
 - task 020 followed task 012 for direct stdout/stderr and post-TUI error safety
   and is now done;
 - task 021 follows task 014 for the still-unconditional session spinner;
-- task 019 is now done, so task 018 is ready to add CI coverage against the
-  final fake-backend CLI;
+- tasks 019 and 018 are now done, so CI covers the final fake-backend CLI at
+  default and narrow terminal sizes;
 - stale fuzz warnings in tasks 003 and 005 are marked resolved.
 
-The current claimable queue is 007, 009, 011, 014, and 018. Task 021 remains
-blocked on 014, and task 015 remains the final refactor after all other open
-tasks are complete.
+Task 014 is the only remaining ready task. Task 021 remains blocked on 014, and
+task 015 remains the final refactor after all other open tasks are complete.
 
 The original midpoint normalization changed backlog documentation only.
 Subsequent implementations are reflected in the task index and completion

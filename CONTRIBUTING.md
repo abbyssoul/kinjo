@@ -110,6 +110,18 @@ advertised on two hosts, so the `_ssh._tcp` service-type row asks which host to
 act on, and one service carries several addresses. If you change them, keep them
 able to demonstrate what the app does.
 
+CI runs shallow assertions against the same driver at 100×30 and 60×18. Run the
+exact smoke check locally with:
+
+```sh
+scripts/smoke-tui.sh
+KINJO_COLS=60 KINJO_ROWS=18 scripts/smoke-tui.sh
+```
+
+The smoke check waits with a bounded timeout, verifies stable semantic text and
+a view change, then requires a clean quit. On failure it prints the captured
+screen so the CI log contains the evidence rather than only an assertion name.
+
 ## Fuzzing
 
 The parser and the discovery entry model are exercised by [`cargo-fuzz`]

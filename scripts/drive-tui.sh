@@ -10,6 +10,8 @@
 #   scripts/drive-tui.sh start [-- kinjo-args...]        # build, then start
 #   scripts/drive-tui.sh keys <key> [key ...]            # send keys, then settle
 #   scripts/drive-tui.sh shot                            # print the screen
+#   scripts/drive-tui.sh wait-text <text> [seconds]      # wait for rendered text
+#   scripts/drive-tui.sh wait-exit [seconds]             # require a clean exit
 #   scripts/drive-tui.sh stop                            # end the session
 #   scripts/drive-tui.sh run '<keys>' [-- kinjo-args...] # all of the above
 #
@@ -36,6 +38,7 @@
 #   KINJO_ROWS      pane height (default: 30)
 #   KINJO_SETTLE    seconds to wait after a key batch (default: 0.6)
 #   KINJO_STARTUP   seconds to wait after start, for discovery (default: 2.5)
+#   KINJO_TIMEOUT   maximum wait-text/wait-exit seconds (default: 10)
 #
 # The default arguments are `--backend fake --config-dir actions`: the sample
 # backend plus the bundled rules, which is the reproducible way to exercise the
@@ -50,6 +53,7 @@ COLS="${KINJO_COLS:-100}"
 ROWS="${KINJO_ROWS:-30}"
 SETTLE="${KINJO_SETTLE:-0.6}"
 STARTUP="${KINJO_STARTUP:-2.5}"
+TIMEOUT="${KINJO_TIMEOUT:-10}"
 BIN="target/debug/kinjo"
 DEFAULT_ARGS=(--backend fake --config-dir actions)
 
@@ -59,7 +63,7 @@ die() {
 }
 
 usage() {
-    sed -n '3,44p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,/^set -euo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//'
 }
 
 require_session() {
@@ -105,6 +109,72 @@ cmd_shot() {
     tmux capture-pane -p -t "$SESSION"
 }
 
+wait_timeout() {
+    local value="${1:-$TIMEOUT}"
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || ((value <= 0)); then
+        die "timeout must be a positive whole number of seconds"
+    fi
+    printf '%s' "$value"
+}
+
+pane_dead() {
+    tmux display-message -p -t "$SESSION" '#{pane_dead}'
+}
+
+pane_status() {
+    tmux display-message -p -t "$SESSION" '#{pane_dead_status}'
+}
+
+cmd_wait_text() {
+    require_session
+    local expected="${1-}"
+    [[ -n "$expected" ]] || die "wait-text requires text to find"
+    local timeout
+    timeout=$(wait_timeout "${2-}")
+    local deadline=$((SECONDS + timeout))
+    local screen
+
+    while ((SECONDS <= deadline)); do
+        screen=$(cmd_shot)
+        if [[ "$screen" == *"$expected"* ]]; then
+            printf '%s\n' "$screen"
+            return 0
+        fi
+        if [[ "$(pane_dead)" == "1" ]]; then
+            printf '%s\n' "$screen" >&2
+            die "pane exited with status $(pane_status) before rendering '$expected'"
+        fi
+        sleep 0.1
+    done
+
+    printf '%s\n' "$screen" >&2
+    die "timed out after ${timeout}s waiting for '$expected'"
+}
+
+cmd_wait_exit() {
+    require_session
+    local timeout
+    timeout=$(wait_timeout "${1-}")
+    local deadline=$((SECONDS + timeout))
+
+    while ((SECONDS <= deadline)); do
+        if [[ "$(pane_dead)" == "1" ]]; then
+            local status
+            status=$(pane_status)
+            if [[ "$status" != "0" ]]; then
+                cmd_shot >&2
+                die "pane exited with status $status"
+            fi
+            printf '%s\n' "$status"
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    cmd_shot >&2
+    die "timed out after ${timeout}s waiting for the pane to exit"
+}
+
 cmd_stop() {
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
@@ -137,6 +207,8 @@ case "$subcommand" in
         ;;
     keys) cmd_keys "$@" ;;
     shot) cmd_shot ;;
+    wait-text) cmd_wait_text "$@" ;;
+    wait-exit) cmd_wait_exit "$@" ;;
     stop) cmd_stop ;;
     run) cmd_run "$@" ;;
     -h | --help | help | "") usage ;;

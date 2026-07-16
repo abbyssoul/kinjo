@@ -72,3 +72,25 @@ jobs:
     - name: Run tests (all features)
       if: matrix.os == 'ubuntu-latest'
       run: cargo test --locked --all-features
+
+  tui-smoke:
+    name: Smoke-test the rendered TUI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      KINJO_TIMEOUT: "15"
+
+    steps:
+    - uses: actions/checkout@v7
+    - name: Set up build environment
+      uses: ./.github/actions/setup
+    - name: Install tmux
+      run: sudo apt-get install -y tmux
+    - name: Smoke-test the default terminal size
+      run: scripts/smoke-tui.sh
+    - name: Smoke-test a short, narrow terminal
+      env:
+        KINJO_COLS: "60"
+        KINJO_ROWS: "18"
+      run: scripts/smoke-tui.sh
