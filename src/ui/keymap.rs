@@ -78,10 +78,12 @@ pub enum Action {
     PickerDown,
     PickerSelect,
     HelpClose,
+    HelpUp,
+    HelpDown,
 }
 
 impl Action {
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 27] = [
         Action::Quit,
         Action::BrowseQuit,
         Action::MoveUp,
@@ -107,6 +109,8 @@ impl Action {
         Action::PickerDown,
         Action::PickerSelect,
         Action::HelpClose,
+        Action::HelpUp,
+        Action::HelpDown,
     ];
 
     /// The mode this action is bound in, and its command name within it.
@@ -137,6 +141,8 @@ impl Action {
             Action::PickerDown => (Mode::Picker, "down"),
             Action::PickerSelect => (Mode::Picker, "select"),
             Action::HelpClose => (Mode::Help, "close"),
+            Action::HelpUp => (Mode::Help, "up"),
+            Action::HelpDown => (Mode::Help, "down"),
         }
     }
 
@@ -208,6 +214,8 @@ impl Default for KeyBindings {
         bindings.set(Action::PickerDown, &["down", "j"]);
         bindings.set(Action::PickerSelect, &["enter"]);
         bindings.set(Action::HelpClose, &["esc", "?", "q"]);
+        bindings.set(Action::HelpUp, &["up", "k", "pageup"]);
+        bindings.set(Action::HelpDown, &["down", "j", "pagedown"]);
         bindings.set(Action::Quit, &["ctrl-c"]);
         bindings
     }

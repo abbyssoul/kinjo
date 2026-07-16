@@ -205,6 +205,11 @@ down = ["down", "j"]
 select = ["enter"]
 ```
 
+`up` and `down` move the selection, and the picker follows it: the selected
+entry is on screen at every terminal size, so the target you are about to run is
+always the one you can see. A picker with more entries than fit shows a
+`first-last/total` chip in its title and a scrollbar on its right border.
+
 ### Help Mode
 
 These commands apply in the help overlay:
@@ -212,7 +217,16 @@ These commands apply in the help overlay:
 ```toml
 [help]
 close = ["esc", "?", "q"]
+up = ["up", "k", "pageup"]
+down = ["down", "j", "pagedown"]
 ```
+
+The help overlay lists every key bound to every command, so how tall it is
+depends on your bindings. When it does not all fit — on a short terminal, or
+after adding aliases — `up` and `down` scroll it a line at a time, the title
+shows which lines you are looking at, and the bottom border names the keys that
+scroll. Help that fits on screen says none of that, because there is nowhere to
+scroll to.
 
 ### Common Commands
 
@@ -250,6 +264,10 @@ up = ["up", "ctrl-p"]
 down = ["down", "ctrl-n"]
 
 [picker]
+up = ["up", "ctrl-p"]
+down = ["down", "ctrl-n"]
+
+[help]
 up = ["up", "ctrl-p"]
 down = ["down", "ctrl-n"]
 ```

@@ -21,6 +21,7 @@ use super::{
     app::{App, AppMode, CommandGroup},
     display,
     keymap::Action,
+    viewport::Window,
 };
 
 // ── palette ──────────────────────────────────────────────────────────────
@@ -962,14 +963,16 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 // ── modals ───────────────────────────────────────────────────────────────
 /// A modal's bottom-border hint, spelled from the keys bound to each action.
-/// Unbound actions drop out rather than leaving a stale key on the border.
-fn modal_hint(app: &App, parts: &[(Action, &str)]) -> String {
+/// Each part may name several actions covered by one verb (the down/up pair
+/// behind "scrolls"). Parts with nothing bound drop out rather than leaving a
+/// stale key on the border.
+fn modal_hint(app: &App, parts: &[(&[Action], &str)]) -> String {
     parts
         .iter()
-        .filter_map(|(action, verb)| {
+        .filter_map(|(actions, verb)| {
             app.keybindings
-                .compact(*action)
-                .map(|key| format!("{key} {verb}"))
+                .compact_group(actions)
+                .map(|keys| format!("{keys} {verb}"))
         })
         .collect::<Vec<_>>()
         .join(" · ")
@@ -980,61 +983,62 @@ fn picker_hint(app: &App) -> String {
     modal_hint(
         app,
         &[
-            (Action::PickerSelect, "runs"),
-            (Action::PickerClose, "closes"),
+            (&[Action::PickerSelect], "runs"),
+            (&[Action::PickerClose], "closes"),
         ],
     )
 }
 
 fn render_type_filter(frame: &mut Frame<'_>, app: &App) {
-    let service_types = &app.service_types;
-    let items: Vec<ListItem> = if service_types.is_empty() {
-        vec![ListItem::new(Line::from(Span::styled(
-            "  no service types discovered yet",
-            Style::default().fg(FG_DIM),
-        )))]
-    } else {
-        build_list_items(
-            service_types,
-            app.type_filter_index,
-            |service_type, selected, base| {
-                let enabled = app.filter.enabled_service_types.contains(service_type);
-                let check = if enabled {
-                    Span::styled(" ✓ ", base.fg(GOOD).add_modifier(Modifier::BOLD))
-                } else {
-                    Span::styled(" ○ ", base.fg(FG_DIM))
-                };
-                Line::from(vec![
-                    gutter_span(selected),
-                    check,
-                    Span::styled(" ● ", base.fg(category_color(service_type))),
-                    Span::styled(display::text(service_type), base.fg(Color::White)),
-                ])
-            },
-        )
-    };
-    render_popup(
+    render_picker(
         frame,
-        " service types ",
-        &modal_hint(
-            app,
-            &[
-                (Action::TypeFilterToggle, "toggles"),
-                (Action::TypeFilterClose, "closes"),
-            ],
-        ),
-        List::new(items),
-        58,
-        60,
+        PickerSpec {
+            title: " service types ",
+            hint: &modal_hint(
+                app,
+                &[
+                    (&[Action::TypeFilterToggle], "toggles"),
+                    (&[Action::TypeFilterClose], "closes"),
+                ],
+            ),
+            empty: "  no service types discovered yet",
+            selected: app.type_filter_index,
+            total: app.service_types.len(),
+            width: 58,
+            height: 60,
+        },
+        |index, selected, base| {
+            let service_type = &app.service_types[index];
+            let enabled = app.filter.enabled_service_types.contains(service_type);
+            let check = if enabled {
+                Span::styled(" ✓ ", base.fg(GOOD).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(" ○ ", base.fg(FG_DIM))
+            };
+            Line::from(vec![
+                gutter_span(selected),
+                check,
+                Span::styled(" ● ", base.fg(category_color(service_type))),
+                Span::styled(display::text(service_type), base.fg(Color::White)),
+            ])
+        },
     );
 }
 
 fn render_action_picker(frame: &mut Frame<'_>, app: &App) {
-    let items = build_list_items(
-        &app.action_matches,
-        app.action_index,
-        |action, selected, base| {
-            let needs = action.needs_selection();
+    render_picker(
+        frame,
+        PickerSpec {
+            title: " matching actions ",
+            hint: &picker_hint(app),
+            empty: "  no matching actions",
+            selected: app.action_index,
+            total: app.action_matches.len(),
+            width: 70,
+            height: 50,
+        },
+        |index, selected, base| {
+            let action = &app.action_matches[index];
             let description = action
                 .command
                 .action
@@ -1054,19 +1058,11 @@ fn render_action_picker(frame: &mut Frame<'_>, app: &App) {
                     base.fg(Color::White),
                 ),
             ];
-            if needs {
+            if action.needs_selection() {
                 spans.push(Span::styled("  ⊙ choose instance", base.fg(WARN)));
             }
             Line::from(spans)
         },
-    );
-    render_popup(
-        frame,
-        " matching actions ",
-        &picker_hint(app),
-        List::new(items),
-        70,
-        50,
     );
 }
 
@@ -1076,34 +1072,48 @@ fn render_instance_picker(frame: &mut Frame<'_>, app: &App) {
         .as_ref()
         .map(|action| action.targets.as_slice())
         .unwrap_or(&[]);
-    let items = build_list_items(records, app.instance_index, |record, selected, base| {
-        Line::from(vec![
-            gutter_span(selected),
-            Span::styled("● ", base.fg(category_color(&record.service_type))),
-            Span::styled(
-                display::text(&instance_endpoint(record)),
-                base.fg(Color::White),
-            ),
-        ])
-    });
-    render_popup(
+    render_picker(
         frame,
-        " select instance ",
-        &picker_hint(app),
-        List::new(items),
-        72,
-        55,
+        PickerSpec {
+            title: " select instance ",
+            hint: &picker_hint(app),
+            empty: "  no instance to choose from",
+            selected: app.instance_index,
+            total: records.len(),
+            width: 72,
+            height: 55,
+        },
+        |index, selected, base| {
+            let record = &records[index];
+            Line::from(vec![
+                gutter_span(selected),
+                Span::styled("● ", base.fg(category_color(&record.service_type))),
+                Span::styled(
+                    display::text(&instance_endpoint(record)),
+                    base.fg(Color::White),
+                ),
+            ])
+        },
     );
 }
 
 fn render_service_picker(frame: &mut Frame<'_>, app: &App) {
     let group = app.command_groups.get(app.selected);
-    let command_name = group.map(|g| g.command.name.clone()).unwrap_or_default();
+    let command_name = group.map(|g| g.command.name.as_str()).unwrap_or_default();
     let services = group.map(|g| g.services.as_slice()).unwrap_or(&[]);
-    let items = build_list_items(
-        services,
-        app.service_picker_index,
-        |service, selected, base| {
+    render_picker(
+        frame,
+        PickerSpec {
+            title: &format!(" run {command_name} on "),
+            hint: &picker_hint(app),
+            empty: "  no service to run this on",
+            selected: app.service_picker_index,
+            total: services.len(),
+            width: 72,
+            height: 55,
+        },
+        |index, selected, base| {
+            let service = &services[index];
             Line::from(vec![
                 gutter_span(selected),
                 Span::styled("● ", base.fg(row_color(service.facts()))),
@@ -1114,15 +1124,6 @@ fn render_service_picker(frame: &mut Frame<'_>, app: &App) {
                 ),
             ])
         },
-    );
-
-    render_popup(
-        frame,
-        &format!(" run {command_name} on "),
-        &picker_hint(app),
-        List::new(items),
-        72,
-        55,
     );
 }
 
@@ -1159,7 +1160,11 @@ fn help_rows(app: &App) -> Vec<(String, &'static str)> {
     .collect()
 }
 
-fn render_help(frame: &mut Frame<'_>, app: &App) {
+/// Every line of the help overlay, in order: the key rows the bindings generate,
+/// then the badges legend. The content exists independently of the popup that
+/// shows it, so [`App`] can size a scroll action against the same lines the user
+/// is looking at.
+pub(crate) fn help_lines(app: &App) -> Vec<Line<'static>> {
     let rows = help_rows(app);
     let width = rows
         .iter()
@@ -1183,45 +1188,182 @@ fn render_help(frame: &mut Frame<'_>, app: &App) {
         "   badges:  ×N occurrences   ★N matching commands",
         Style::default().fg(FG_DIM),
     )));
-    // Wider and taller than a picker: the key column now lists every alias of
-    // every action, so the rows are longer than the old hard-coded ones.
+    lines
+}
+
+/// The help popup's share of the screen. Wider and taller than a picker: the
+/// key column lists every alias of every action, so the rows are longer than the
+/// old hard-coded ones.
+const HELP_POPUP: (u16, u16) = (72, 80);
+
+fn help_popup_area(frame_area: Rect) -> Rect {
+    centered_rect(HELP_POPUP.0, HELP_POPUP.1, frame_area)
+}
+
+/// How many help lines a `frame_area`-sized screen can show at once.
+///
+/// The scroll bound belongs to whoever handles the key, but the height it
+/// depends on is a fact about this layout. Exposing it as a pure function lets
+/// [`App`] clamp a scroll against the same geometry the next frame will use,
+/// instead of the renderer writing the bound back into the app.
+pub(crate) fn help_viewport(frame_area: Rect) -> usize {
+    popup_inner(help_popup_area(frame_area)).height as usize
+}
+
+/// The help overlay: a window onto [`help_lines`] rather than all of them.
+///
+/// Help is generated from the user's bindings, so its length is not something
+/// the layout can be sized for in advance — a few extra aliases, or a short
+/// terminal, and the tail falls off the bottom. Windowing it means the rows the
+/// popup cannot show are scrolled to instead of lost.
+fn render_help(frame: &mut Frame<'_>, app: &App) {
+    let lines = help_lines(app);
+    let area = help_popup_area(frame.area());
+    let window = Window::at(lines.len(), help_viewport(frame.area()), app.help_scroll);
+    let visible: Vec<Line> = lines
+        .into_iter()
+        .skip(window.offset())
+        .take(window.range().len())
+        .collect();
+
     render_popup(
         frame,
-        " help ",
-        &modal_hint(app, &[(Action::HelpClose, "closes")]),
-        Paragraph::new(lines).alignment(Alignment::Left),
-        72,
-        80,
+        PopupSpec {
+            area,
+            title: " help ",
+            hint: &help_hint(app, window),
+            window,
+        },
+        Paragraph::new(visible).alignment(Alignment::Left),
     );
 }
 
-fn render_popup<W>(
-    frame: &mut Frame<'_>,
-    title: &str,
-    hint: &str,
-    widget: W,
+/// The help overlay's bottom-border hint. The scroll keys are named only while
+/// there is something to scroll to, and always with the keys bound to the scroll
+/// actions, so a rebinding moves the hint with it.
+fn help_hint(app: &App, window: Window) -> String {
+    let mut parts: Vec<(&[Action], &str)> = Vec::new();
+    if window.is_clipped() {
+        parts.push((&[Action::HelpDown, Action::HelpUp], "scrolls"));
+    }
+    parts.push((&[Action::HelpClose], "closes"));
+    modal_hint(app, &parts)
+}
+
+/// A keyboard-selected modal list.
+struct PickerSpec<'a> {
+    title: &'a str,
+    hint: &'a str,
+    /// Shown in place of the list when there is nothing to choose from.
+    empty: &'a str,
+    selected: usize,
+    total: usize,
     width: u16,
     height: u16,
-) where
-    W: ratatui::widgets::Widget,
-{
-    let area = centered_rect(width, height, frame.area());
-    frame.render_widget(Clear, area);
-    let block = Block::default()
+}
+
+/// Render a picker as a window onto its items, never as all of them.
+///
+/// The window is derived from the popup that is actually being drawn, so the
+/// selected item is on screen at any terminal size — including after a resize,
+/// since the next frame simply recomputes it. `line_at` is called only for the
+/// visible indices, which is what makes it safe for it to index the list
+/// directly.
+fn render_picker(
+    frame: &mut Frame<'_>,
+    spec: PickerSpec<'_>,
+    mut line_at: impl FnMut(usize, bool, Style) -> Line<'static>,
+) {
+    let area = centered_rect(spec.width, spec.height, frame.area());
+    let inner = popup_inner(area);
+    let window = Window::containing(spec.total, inner.height as usize, spec.selected);
+
+    let items: Vec<ListItem> = if spec.total == 0 {
+        vec![ListItem::new(Line::from(Span::styled(
+            display::text(spec.empty),
+            Style::default().fg(FG_DIM),
+        )))]
+    } else {
+        window
+            .range()
+            .map(|index| {
+                let selected = index == spec.selected;
+                let base = selection_style(selected);
+                ListItem::new(line_at(index, selected, base).style(base))
+            })
+            .collect()
+    };
+
+    render_popup(
+        frame,
+        PopupSpec {
+            area,
+            title: spec.title,
+            hint: spec.hint,
+            window,
+        },
+        List::new(items),
+    );
+}
+
+/// A modal popup: where it is, what it says, and how much of its content it is
+/// showing.
+struct PopupSpec<'a> {
+    area: Rect,
+    title: &'a str,
+    hint: &'a str,
+    window: Window,
+}
+
+/// The content rectangle inside a popup's border. Kept in step with the block
+/// built by [`render_popup`], so the window is computed for the height the
+/// content will really get.
+fn popup_inner(area: Rect) -> Rect {
+    popup_block().inner(area)
+}
+
+fn popup_block() -> Block<'static> {
+    Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            display::text(title),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ))
-        .title_bottom(Span::styled(
-            display::text(&format!(" {hint} ")),
+}
+
+fn render_popup<W>(frame: &mut Frame<'_>, spec: PopupSpec<'_>, widget: W)
+where
+    W: ratatui::widgets::Widget,
+{
+    frame.render_widget(Clear, spec.area);
+    let mut title = vec![Span::styled(
+        display::text(spec.title),
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )];
+    // Say where in the content this window is — but only when some of it is out
+    // of sight, so a modal that shows everything stays uncluttered.
+    if spec.window.is_clipped()
+        && let Some(range) = spec.window.range_label()
+    {
+        title.push(Span::styled(
+            format!("{range} "),
             Style::default().fg(FG_DIM),
         ));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    }
+    let block = popup_block()
+        .title(Line::from(title))
+        .title_bottom(Span::styled(
+            display::text(&format!(" {} ", spec.hint)),
+            Style::default().fg(FG_DIM),
+        ));
+    let inner = block.inner(spec.area);
+    frame.render_widget(block, spec.area);
     frame.render_widget(widget, inner);
+    render_scrollbar(
+        frame,
+        spec.area,
+        spec.window.total(),
+        spec.window.range().len(),
+        spec.window.offset(),
+    );
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -1356,15 +1498,10 @@ fn render_scrollbar(
     );
 }
 
+/// Where the browse list's window starts. The same calculation the modals use,
+/// so a list row and a picker row stay visible for the same reason.
 pub(crate) fn scroll_offset(selected: usize, total: usize, view_h: usize) -> usize {
-    if view_h == 0 || total <= view_h {
-        return 0;
-    }
-    if selected < view_h {
-        0
-    } else {
-        (selected + 1 - view_h).min(total - view_h)
-    }
+    Window::containing(total, view_h, selected).offset()
 }
 
 /// Background highlight for the currently selected row/item.
@@ -1395,11 +1532,9 @@ fn list_title(label: &str, total: usize, selected: usize, inner_h: usize) -> Lin
         display::text(label),
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )];
-    if total > 0 {
-        let first = scroll_offset(selected, total, inner_h) + 1;
-        let last = (first + inner_h - 1).min(total);
+    if let Some(range) = Window::containing(total, inner_h, selected).range_label() {
         spans.push(Span::styled(
-            format!("{first}-{last}/{total} "),
+            format!("{range} "),
             Style::default().fg(FG_DIM),
         ));
     }
@@ -1466,24 +1601,6 @@ fn render_detail_rows<'a>(
         area,
     );
     render_scrollbar(frame, area, total, inner_h, offset);
-}
-
-/// Build modal list items: compute the per-item `selected`/`base` style, let
-/// `line` produce the row content, and apply the selection background.
-fn build_list_items<T>(
-    items: &[T],
-    selected_index: usize,
-    mut line: impl FnMut(&T, bool, Style) -> Line<'static>,
-) -> Vec<ListItem<'static>> {
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, item)| {
-            let selected = index == selected_index;
-            let base = selection_style(selected);
-            ListItem::new(line(item, selected, base).style(base))
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -2102,6 +2219,385 @@ help = ["f1"]
         assert!(!text.contains("clear search"), "{text}");
         assert!(text.contains("leave search, keep filter"), "{text}");
         assert!(text.contains("clear the search filter"), "{text}");
+    }
+
+    // ── modal viewports ────────────────────────────────────────────────────
+    //
+    // The sample backend cannot produce a picker taller than its popup, so the
+    // oversized cases live here, where the list length is ours to choose.
+
+    /// A modal so short that only a few of its rows can be on screen at once.
+    const SHORT: (u16, u16) = (60, 18);
+
+    fn command_named(name: &str) -> CommandConfig {
+        CommandConfig {
+            name: name.to_string(),
+            description: Some(format!("run {name}")),
+            requirements: Vec::new(),
+            predicates: Vec::new(),
+            action: CommandAction::compile(None, "tool".to_string(), ActionMode::Fork).unwrap(),
+        }
+    }
+
+    /// An entry whose rendered line names `index` unmistakably.
+    fn numbered_entry(index: usize) -> Entry {
+        let mut record = Entry::new(&format!("svc-{index:02}"), "_ssh._tcp", "local");
+        record.hostname = Some(format!("host-{index:02}.local"));
+        record.addresses = vec!["192.0.2.1".parse().unwrap()];
+        record.port = Some(22);
+        record
+    }
+
+    /// Which rows of a picker over `count` items are on screen when `selected`
+    /// is the cursor, as row labels found in the rendered buffer.
+    fn visible_labels(text: &str, count: usize, label: impl Fn(usize) -> String) -> Vec<usize> {
+        (0..count)
+            .filter(|index| text.contains(&label(*index)))
+            .collect()
+    }
+
+    /// The safety core of task 011: a picker whose selected row is off-screen
+    /// invites the user to run a target they cannot see. At every index of an
+    /// oversized list, the selected row must be rendered.
+    #[test]
+    fn an_oversized_type_filter_shows_the_selected_row_at_every_index() {
+        let mut app = test_app("local");
+        app.mode = AppMode::TypeFilter;
+        app.service_types = (0..40).map(|i| format!("_type{i:02}._tcp")).collect();
+
+        for index in 0..app.service_types.len() {
+            app.type_filter_index = index;
+            let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+
+            assert!(
+                text.contains(&app.service_types[index]),
+                "type {index} is selected but not on screen:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_action_picker_shows_the_selected_row_at_every_index() {
+        let mut app = test_app("local");
+        app.mode = AppMode::ActionPicker;
+        app.action_matches = (0..30)
+            .map(|i| MatchResult {
+                command: command_named(&format!("act-{i:02}")),
+                targets: vec![numbered_entry(i)],
+            })
+            .collect();
+
+        for index in 0..app.action_matches.len() {
+            app.action_index = index;
+            let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+
+            assert!(
+                text.contains(&format!("act-{index:02}")),
+                "action {index} is selected but not on screen:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_instance_picker_shows_the_selected_row_at_every_index() {
+        let mut app = test_app("local");
+        app.mode = AppMode::InstancePicker;
+        app.pending_action = Some(MatchResult {
+            command: command_named("ssh"),
+            targets: (0..30).map(numbered_entry).collect(),
+        });
+
+        for index in 0..30 {
+            app.instance_index = index;
+            let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+
+            assert!(
+                text.contains(&format!("host-{index:02}.local")),
+                "instance {index} is selected but not on screen:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_service_picker_shows_the_selected_row_at_every_index() {
+        let mut app = test_app("local");
+        app.mode = AppMode::ServicePicker;
+        app.filter.grouping = GroupingMode::Command;
+        let services: Vec<EntryGroup> = (0..30)
+            .map(|i| {
+                browse_groups(&[numbered_entry(i)], BrowseMode::LogicalService)
+                    .pop()
+                    .expect("one group")
+            })
+            .collect();
+        app.command_groups = vec![CommandGroup {
+            command: command_named("ssh"),
+            services,
+        }];
+        app.selected = 0;
+
+        for index in 0..30 {
+            app.service_picker_index = index;
+            let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+
+            assert!(
+                text.contains(&format!("svc-{index:02}")),
+                "service {index} is selected but not on screen:\n{text}"
+            );
+        }
+    }
+
+    /// Moving within the visible window must not scroll: the list would jump
+    /// under a user who is only stepping down one row.
+    #[test]
+    fn a_picker_scrolls_only_once_the_selection_leaves_the_window() {
+        let mut app = test_app("local");
+        app.mode = AppMode::TypeFilter;
+        app.service_types = (0..40).map(|i| format!("_type{i:02}._tcp")).collect();
+        let label = |index: usize| format!("_type{index:02}._tcp");
+
+        app.type_filter_index = 0;
+        let top = visible_labels(
+            &buffer_text(&render_buffer(&app, SHORT.0, SHORT.1)),
+            40,
+            label,
+        );
+        // Stepping onto the last visible row shows exactly the same rows.
+        app.type_filter_index = *top.last().expect("a visible row");
+        let unmoved = visible_labels(
+            &buffer_text(&render_buffer(&app, SHORT.0, SHORT.1)),
+            40,
+            label,
+        );
+        assert_eq!(top, unmoved);
+
+        // One row further scrolls by exactly one row.
+        app.type_filter_index += 1;
+        let scrolled = visible_labels(
+            &buffer_text(&render_buffer(&app, SHORT.0, SHORT.1)),
+            40,
+            label,
+        );
+        assert_eq!(scrolled.first(), Some(&1));
+        assert_eq!(scrolled.last(), Some(&app.type_filter_index));
+    }
+
+    /// Shrinking the terminal until the selection would fall outside the popup
+    /// must bring it back into view, not leave it behind.
+    #[test]
+    fn shrinking_the_terminal_keeps_the_picker_selection_visible() {
+        let mut app = test_app("local");
+        app.mode = AppMode::TypeFilter;
+        app.service_types = (0..40).map(|i| format!("_type{i:02}._tcp")).collect();
+        app.type_filter_index = 25;
+
+        for height in 6..40u16 {
+            let text = buffer_text(&render_buffer(&app, 60, height));
+
+            assert!(
+                text.contains("_type25._tcp"),
+                "selection lost at height {height}:\n{text}"
+            );
+        }
+    }
+
+    /// A picker that is showing all of its items has nothing to say about
+    /// position, and a range chip there would be noise.
+    #[test]
+    fn a_picker_shows_a_range_chip_only_when_it_is_clipped() {
+        let mut app = test_app("local");
+        app.mode = AppMode::TypeFilter;
+
+        app.service_types = (0..3).map(|i| format!("_type{i:02}._tcp")).collect();
+        let fits = buffer_text(&render_buffer(&app, 60, 24));
+        assert!(!fits.contains("1-3/3"), "{fits}");
+
+        app.service_types = (0..40).map(|i| format!("_type{i:02}._tcp")).collect();
+        app.type_filter_index = 39;
+        let clipped = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+        assert!(clipped.contains("-40/40"), "{clipped}");
+    }
+
+    /// Wide glyphs are the list's business, not the window's: the selected row
+    /// is still the one on screen.
+    #[test]
+    fn a_picker_with_unicode_labels_keeps_its_selection_visible() {
+        let mut app = test_app("local");
+        app.mode = AppMode::TypeFilter;
+        app.service_types = (0..30).map(|i| format!("_型{i:02}界._tcp")).collect();
+        app.type_filter_index = 29;
+
+        let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+
+        // A wide glyph owns two cells, the second of which reads back blank, so
+        // the label is matched by the part that cannot be split.
+        assert!(text.contains("29界"), "{text}");
+        assert!(text.contains("-30/30"), "{text}");
+    }
+
+    /// An empty picker and a popup with no room for a single row are both
+    /// arithmetic edge cases in the window; neither may panic.
+    #[test]
+    fn empty_and_tiny_modals_render_safely() {
+        for mode in [
+            AppMode::TypeFilter,
+            AppMode::ActionPicker,
+            AppMode::InstancePicker,
+            AppMode::ServicePicker,
+            AppMode::Help,
+        ] {
+            let mut app = test_app("local");
+            app.mode = mode;
+
+            for (width, height) in [(60u16, 18u16), (20, 5), (10, 3), (4, 2), (1, 1)] {
+                let buffer = render_buffer(&app, width, height);
+                assert_eq!(buffer.area.height, height, "{mode:?} at {width}x{height}");
+            }
+        }
+    }
+
+    /// The dangerous half of the same edge: a popup squeezed below one content
+    /// row while the list behind it is long and the cursor is at the far end.
+    /// The window, the range chip, and the scrollbar all do arithmetic on a
+    /// viewport of zero here.
+    #[test]
+    fn a_long_picker_in_a_terminal_with_no_room_renders_safely() {
+        let mut app = test_app("local");
+        app.mode = AppMode::TypeFilter;
+        app.service_types = (0..40).map(|i| format!("_type{i:02}._tcp")).collect();
+        app.type_filter_index = 39;
+        app.help_scroll = 999;
+
+        for (width, height) in [(60u16, 6u16), (20, 4), (10, 3), (4, 2), (2, 1), (1, 1)] {
+            let buffer = render_buffer(&app, width, height);
+            assert_eq!(buffer.area.height, height, "at {width}x{height}");
+        }
+
+        app.mode = AppMode::Help;
+        for (width, height) in [(60u16, 6u16), (10, 3), (1, 1)] {
+            let buffer = render_buffer(&app, width, height);
+            assert_eq!(buffer.area.height, height, "help at {width}x{height}");
+        }
+    }
+
+    // ── help viewport ──────────────────────────────────────────────────────
+
+    /// The defect reproduced by the midpoint review: at 60×18 the tail of the
+    /// help — including the badges legend — was rendered into a popup too short
+    /// to show it, and no key could reveal it. Every generated row must now be
+    /// reachable by scrolling.
+    #[test]
+    fn every_help_row_is_reachable_on_a_short_terminal() {
+        let mut app = test_app("local");
+        app.mode = AppMode::Help;
+        let expected: Vec<String> = help_rows(&app)
+            .iter()
+            .map(|(_, label)| label.to_string())
+            .chain(["badges:".to_string()])
+            .collect();
+
+        let mut seen = std::collections::BTreeSet::new();
+        let max = Window::max_scroll(
+            help_lines(&app).len(),
+            help_viewport(Rect::new(0, 0, 60, 18)),
+        );
+        for scroll in 0..=max {
+            app.help_scroll = scroll;
+            let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+            for row in &expected {
+                // The popup is narrow, so a long label is truncated; its head is
+                // what proves the row was drawn.
+                let head: String = row.chars().take(18).collect();
+                if text.contains(&head) {
+                    seen.insert(row.clone());
+                }
+            }
+        }
+
+        for row in &expected {
+            assert!(seen.contains(row), "help row `{row}` is never reachable");
+        }
+    }
+
+    #[test]
+    fn the_help_overlay_reports_its_range_and_scrolls_to_the_end() {
+        let mut app = test_app("local");
+        app.mode = AppMode::Help;
+        let total = help_lines(&app).len();
+
+        let top = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+        assert!(top.contains(&format!("/{total}")), "{top}");
+
+        app.help_scroll = Window::max_scroll(total, help_viewport(Rect::new(0, 0, 60, 18)));
+        let bottom = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+        assert!(bottom.contains(&format!("-{total}/{total}")), "{bottom}");
+        assert!(bottom.contains("badges:"), "{bottom}");
+    }
+
+    /// Help that fits needs neither a range chip nor a scroll hint: there is
+    /// nowhere to scroll to, and saying otherwise would advertise a key that
+    /// appears to do nothing.
+    #[test]
+    fn help_that_fits_advertises_no_scrolling() {
+        let mut app = test_app("local");
+        app.mode = AppMode::Help;
+
+        let text = buffer_text(&render_buffer(&app, 160, 44));
+
+        assert!(text.contains("esc closes"), "{text}");
+        assert!(!text.contains("scrolls"), "{text}");
+    }
+
+    /// Scrolling to the bottom and then growing the terminal must not leave the
+    /// content stranded above a band of blank rows.
+    #[test]
+    fn help_scrolled_to_the_end_reflows_when_the_terminal_grows() {
+        let mut app = test_app("local");
+        app.mode = AppMode::Help;
+        let total = help_lines(&app).len();
+        app.help_scroll = Window::max_scroll(total, help_viewport(Rect::new(0, 0, 60, 18)));
+
+        let grown = buffer_text(&render_buffer(&app, 160, 44));
+
+        // The taller popup shows everything, so the window is back at the top.
+        assert!(grown.contains("move selection down"), "{grown}");
+        assert!(grown.contains("badges:"), "{grown}");
+    }
+
+    #[test]
+    fn the_help_scroll_hint_follows_the_configured_bindings() {
+        let mut app = app_with_bindings(
+            r#"
+[help]
+down = ["ctrl-n"]
+up = ["ctrl-p"]
+"#,
+        );
+        app.mode = AppMode::Help;
+
+        let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+
+        assert!(text.contains("^n/^p scrolls"), "{text}");
+        assert!(!text.contains("↓/↑ scrolls"), "{text}");
+    }
+
+    /// An unbound scroll action has no key to name, so the hint must go rather
+    /// than promise a way to reach the rest of the content.
+    #[test]
+    fn unbound_help_scrolling_has_no_hint() {
+        let mut app = app_with_bindings(
+            r#"
+[help]
+down = []
+up = []
+"#,
+        );
+        app.mode = AppMode::Help;
+
+        let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+
+        assert!(!text.contains("scrolls"), "{text}");
+        assert!(text.contains("esc closes"), "{text}");
     }
 
     /// Every hint the footer offers must name a key the keymap resolves back to
