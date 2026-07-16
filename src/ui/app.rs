@@ -1,5 +1,4 @@
 use std::{
-    cell::Cell,
     collections::{BTreeMap, HashMap},
     sync::{
         Arc,
@@ -30,6 +29,7 @@ use super::{
     cli::Cli,
     filter::FilterState,
     keymap::{Action, KeyBindings, Mode as KeyMode},
+    layout::{Content, LayoutSnapshot},
     render,
     viewport::Window,
 };
@@ -168,9 +168,6 @@ pub struct App {
     /// per recompute so rendering and invocation share one result instead of
     /// re-running the matcher (regexes included) every frame.
     pub group_matches: Vec<Vec<MatchResult>>,
-    /// Sorted service types across all discovered records, recomputed with
-    /// the visible groups (rendering reads it several times per frame).
-    pub service_types: Vec<String>,
     /// How many rows each top-panel tab lists, in [`GroupingMode::TABS`] order.
     /// Recomputed with the visible rows from the same filtered records, so a
     /// tab's count always matches the list it would show.
@@ -188,15 +185,13 @@ pub struct App {
     pub help_scroll: usize,
     /// Top line shown in the details pane (0 = unscrolled).
     pub details_scroll: usize,
-    /// Largest valid `details_scroll`, recomputed by the renderer each frame.
-    pub details_max_scroll: Cell<usize>,
-    /// Visible height of the details pane, recomputed by the renderer each frame.
-    pub details_viewport: Cell<usize>,
-    /// Screen rectangle of the left list panel, recorded by the renderer each
-    /// frame so mouse events can be hit-tested against it.
-    pub list_area: Cell<Rect>,
-    /// Screen rectangle of the details pane, recorded by the renderer each frame.
-    pub details_area: Cell<Rect>,
+    /// Where this frame's panels are and what bounds they impose.
+    ///
+    /// Computed by [`App::update_layout`] from the terminal area and the
+    /// current content, before both drawing and input, so the frame the user
+    /// clicked on and the geometry the click is resolved against are the same
+    /// one. Rendering reads it and writes nothing back.
+    pub(crate) layout: LayoutSnapshot,
 }
 
 impl App {
@@ -234,17 +229,16 @@ impl App {
             reload_diagnostics: Vec::new(),
             discovery_factory: None,
             group_matches: Vec::new(),
-            service_types: Vec::new(),
             tab_counts: [0; GroupingMode::TABS.len()],
             ticks: 0,
             command_groups: Vec::new(),
             service_picker_index: 0,
             help_scroll: 0,
             details_scroll: 0,
-            details_max_scroll: Cell::new(0),
-            details_viewport: Cell::new(0),
-            list_area: Cell::new(Rect::default()),
-            details_area: Cell::new(Rect::default()),
+            // Nothing has been drawn yet, and a layout claiming otherwise would
+            // let a click land on a row that does not exist. The event loop
+            // replaces this before the first frame.
+            layout: LayoutSnapshot::default(),
         }
     }
 
@@ -269,10 +263,13 @@ impl App {
             self.ticks = self.ticks.wrapping_add(1);
             self.poll_reload();
             self.drain_discovery();
+
+            // Settle the terminal size before measuring against it, so a resize
+            // is a new layout for this frame rather than the previous frame's
+            // one applied to a screen that has already changed shape.
+            terminal.autoresize()?;
+            self.update_layout(terminal.get_frame().area());
             terminal.draw(|frame| render::render(frame, self))?;
-            // The screen the frame just drawn used, and the one the next frame
-            // will use: what a key that moves a modal window is bounded by.
-            let area = terminal.get_frame().area();
 
             if event::poll(Duration::from_millis(120))? {
                 match event::read()? {
@@ -280,7 +277,10 @@ impl App {
                         if key.kind == KeyEventKind::Release {
                             continue;
                         }
-                        if let Some(command) = self.handle_key(key, area)? {
+                        // The screen the frame just drawn used: a key that moves
+                        // a modal window is bounded by the geometry the user is
+                        // looking at, from the same snapshot render drew from.
+                        if let Some(command) = self.handle_key(key, self.layout.area())? {
                             return Ok(Some(command));
                         }
                         if self.should_quit {
@@ -292,6 +292,25 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Work out where this frame's panels are, and bring the details scroll
+    /// back inside them.
+    ///
+    /// Called once per tick before drawing and before any event is handled, so
+    /// the geometry render draws with, the bounds a scroll key is clamped to,
+    /// and the rectangles a click is tested against are all the same snapshot.
+    /// A resize or a shorter selection therefore cannot strand the reader below
+    /// the end of the content: the next snapshot pulls the scroll back up.
+    pub(crate) fn update_layout(&mut self, area: Rect) {
+        self.layout = LayoutSnapshot::compute(
+            area,
+            Content {
+                list_total: self.active_count(),
+                details_total: render::details_content_height(self),
+            },
+        );
+        self.details_scroll = self.details_scroll.min(self.layout.details_max_scroll());
     }
 
     fn drain_discovery(&mut self) {
@@ -378,8 +397,7 @@ impl App {
 
     fn recompute_visible(&mut self) {
         let records = self.records.values().cloned().collect::<Vec<_>>();
-        self.service_types = FilterState::discovered_types(&records);
-        self.filter.sync_service_types(&records);
+        self.filter.observe_types(&records);
         let filtered = self.filter.apply(&records);
         self.tab_counts = self.count_tabs(&filtered);
 
@@ -403,11 +421,37 @@ impl App {
             .collect();
         // Structured row identity, not the list position: the cursor stays on
         // the row the user chose even when rows appear, vanish, or re-sort.
-        match find_selection(&self.visible_groups, previous, |group| group.id().clone()) {
+        match find_selection(&self.visible_groups, previous.clone(), |group| {
+            group.id().clone()
+        }) {
             Some(index) => self.selected = index,
             None => self.clamp_selection(),
         }
+        self.refocus_details(previous, |app| {
+            app.visible_groups.get(app.selected).map(|g| g.id().clone())
+        });
         self.reconcile_action_pickers();
+    }
+
+    /// Settle the details scroll after the rows underneath the cursor have been
+    /// rebuilt, given what was focused `before`.
+    ///
+    /// Scroll position is a place inside one row's details, so it only means
+    /// anything for as long as that row is the one in focus. When the identity
+    /// under the cursor changes — the row was removed, filtered away, or the
+    /// clamp moved the cursor onto a neighbour — the reader is looking at a
+    /// different service, and starting them part-way down its details is at best
+    /// arbitrary. The same identity keeps its scroll; the next
+    /// [`App::update_layout`] clamps it to whatever the new content is tall
+    /// enough for.
+    fn refocus_details<K: PartialEq>(
+        &mut self,
+        before: Option<K>,
+        focused: impl Fn(&Self) -> Option<K>,
+    ) {
+        if focused(self) != before {
+            self.details_scroll = 0;
+        }
     }
 
     /// The rules matching an anchor, freshly matched against current records.
@@ -597,12 +641,17 @@ impl App {
         self.command_groups = command_groups;
         self.visible_groups = Vec::new();
         self.group_matches = Vec::new();
-        match find_selection(&self.command_groups, previous, |group| {
+        match find_selection(&self.command_groups, previous.clone(), |group| {
             group.command.name.clone()
         }) {
             Some(index) => self.selected = index,
             None => self.clamp_selection(),
         }
+        self.refocus_details(previous, |app| {
+            app.command_groups
+                .get(app.selected)
+                .map(|group| group.command.name.clone())
+        });
         self.reconcile_service_picker(chosen_service);
         self.reconcile_action_pickers();
     }
@@ -789,7 +838,7 @@ impl App {
     }
 
     fn handle_type_filter_key(&mut self, action: Option<Action>) {
-        let count = self.service_types.len();
+        let count = self.filter.discovered_types().len();
         match action {
             Some(Action::TypeFilterClose) => self.return_to_browse(),
             Some(Action::TypeFilterDown) => {
@@ -799,7 +848,11 @@ impl App {
                 self.type_filter_index = move_index(self.type_filter_index, count, -1);
             }
             Some(Action::TypeFilterToggle) => {
-                if let Some(service_type) = self.service_types.get(self.type_filter_index).cloned()
+                if let Some(service_type) = self
+                    .filter
+                    .discovered_types()
+                    .get(self.type_filter_index)
+                    .cloned()
                 {
                     self.filter.toggle_service_type(&service_type);
                     self.recompute_visible();
@@ -901,13 +954,15 @@ impl App {
     /// Scroll the details pane by half its visible height (vim/tig `u`/`d`).
     /// `direction` is +1 to scroll down, -1 to scroll up.
     fn scroll_details(&mut self, direction: isize) {
-        let step = (self.details_viewport.get() / 2).max(1) as isize;
+        let step = (self.layout.details_viewport() / 2).max(1) as isize;
         self.scroll_details_by(direction * step);
     }
 
-    /// Scroll the details pane by `delta` lines, clamped to the content bounds.
+    /// Scroll the details pane by `delta` lines, clamped to the bounds of the
+    /// pane the user is looking at — the same snapshot it was drawn from, so a
+    /// key cannot scroll past the end of a frame that is on screen.
     fn scroll_details_by(&mut self, delta: isize) {
-        let max = self.details_max_scroll.get() as isize;
+        let max = self.layout.details_max_scroll() as isize;
         self.details_scroll = (self.details_scroll as isize + delta).clamp(0, max) as usize;
     }
 
@@ -922,7 +977,7 @@ impl App {
             MouseEventKind::ScrollDown => self.mouse_scroll(position, 1),
             MouseEventKind::ScrollUp => self.mouse_scroll(position, -1),
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(index) = self.list_row_at(position) {
+                if let Some(index) = self.layout.list_row_at(position, self.selected) {
                     self.selected = index;
                     // A different row is in focus — start its details from the top.
                     self.details_scroll = 0;
@@ -935,31 +990,11 @@ impl App {
     /// A wheel event over the details pane scrolls its content; over the list
     /// it moves the selection (the list window follows the selected row).
     fn mouse_scroll(&mut self, position: Position, direction: isize) {
-        if self.details_area.get().contains(position) {
+        if self.layout.is_over_details(position) {
             self.scroll_details_by(direction);
-        } else if self.list_area.get().contains(position) {
+        } else if self.layout.list().contains(position) {
             self.move_selection(direction);
         }
-    }
-
-    /// The list index under `position`, when it falls on a rendered row of the
-    /// left panel — accounting for the panel border and the scroll window the
-    /// renderer derives from the current selection.
-    fn list_row_at(&self, position: Position) -> Option<usize> {
-        let area = self.list_area.get();
-        if !area.contains(position) {
-            return None;
-        }
-        // First content row sits below the top border; the bottom border and
-        // anything past the last row are not selectable.
-        let row = (position.y.checked_sub(area.y + 1))? as usize;
-        let inner_h = area.height.saturating_sub(2) as usize;
-        if row >= inner_h {
-            return None;
-        }
-        let total = self.active_count();
-        let index = render::scroll_offset(self.selected, total, inner_h) + row;
-        (index < total).then_some(index)
     }
 
     fn invoke_selected(&mut self) -> Result<Option<PreparedCommand>> {
@@ -1526,18 +1561,31 @@ mode = "execute"
         }
     }
 
-    /// An app with `count` distinct services and the pane rectangles a render
-    /// pass would have recorded: a bordered list panel at y = 2..=8 whose five
-    /// content rows sit at y = 3..=7, and the details pane to its right.
+    /// The screen every mouse and detail-scroll test below is resolved against.
+    /// Deliberately short: its body leaves a bordered list panel with five
+    /// content rows at y = 3..=7, so a list of eight has to scroll and a click
+    /// has a window to be wrong about.
+    const MOUSE_SCREEN: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 10,
+    };
+
+    /// An app with `count` distinct services, laid out for [`MOUSE_SCREEN`] the
+    /// way the event loop lays one out before a frame: the list panel occupies
+    /// x = 0..58 and the details pane x = 58..100, both at y = 2..=9.
+    ///
+    /// The layout is computed rather than asserted into place, so these tests
+    /// hit-test against the same geometry a real frame would be drawn with.
     fn mouse_app(count: usize) -> App {
         let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
         let records = names[..count]
             .iter()
             .map(|name| ssh(name, "10.0.0.1"))
             .collect();
-        let app = app_with(Matcher::default(), records);
-        app.list_area.set(Rect::new(0, 2, 60, 7));
-        app.details_area.set(Rect::new(60, 2, 40, 7));
+        let mut app = app_with(Matcher::default(), records);
+        app.update_layout(MOUSE_SCREEN);
         app
     }
 
@@ -1561,18 +1609,22 @@ mode = "execute"
     #[test]
     fn wheel_over_details_scrolls_content_line_by_line() {
         let mut app = mouse_app(8);
-        app.details_max_scroll.set(3);
+        // The bound the wheel is clamped to is the one the layout worked out
+        // from the pane and the selected row's details, not a number this test
+        // asserted into place.
+        let max = app.layout.details_max_scroll();
+        assert!(max > 2, "the fixture's details must overflow its pane");
 
         app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 70, 4));
         app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 70, 4));
         assert_eq!(app.details_scroll, 2);
 
         // Clamped to the content bounds on both ends.
-        for _ in 0..5 {
+        for _ in 0..max + 5 {
             app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 70, 4));
         }
-        assert_eq!(app.details_scroll, 3);
-        for _ in 0..9 {
+        assert_eq!(app.details_scroll, max);
+        for _ in 0..max + 5 {
             app.handle_mouse(mouse_event(MouseEventKind::ScrollUp, 70, 4));
         }
         assert_eq!(app.details_scroll, 0);
@@ -3579,17 +3631,188 @@ mode = "execute"
     #[test]
     fn scroll_details_steps_by_half_viewport_and_clamps() {
         let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
-        app.details_viewport.set(10);
-        app.details_max_scroll.set(5);
+        // A pane too short for the details, so half a page is a real step and
+        // the far end is reachable. Both come from the layout, not from bounds
+        // pushed into the app by hand.
+        app.update_layout(MOUSE_SCREEN);
+        let max = app.layout.details_max_scroll();
+        let half = app.layout.details_viewport() / 2;
+        assert!(half > 0 && max > half, "max={max} half={half}");
 
         send(&mut app, KeyCode::Char('d'));
-        assert_eq!(app.details_scroll, 5, "half of 10 clamps to the max of 5");
+        assert_eq!(app.details_scroll, half);
 
-        send(&mut app, KeyCode::Char('d'));
-        assert_eq!(app.details_scroll, 5, "cannot scroll past the maximum");
+        for _ in 0..max {
+            send(&mut app, KeyCode::Char('d'));
+        }
+        assert_eq!(app.details_scroll, max, "cannot scroll past the maximum");
 
-        send(&mut app, KeyCode::Char('u'));
+        for _ in 0..max {
+            send(&mut app, KeyCode::Char('u'));
+        }
         assert_eq!(app.details_scroll, 0, "scrolling up returns to the top");
+    }
+
+    /// The bug the layout snapshot exists to make impossible: the details
+    /// bounds used to be written back by the renderer, so a scroll key handled
+    /// before the first frame — or against a terminal that had since been
+    /// resized — was clamped to whatever the last frame happened to leave
+    /// behind. The snapshot is computed before both, so there is no "last
+    /// frame" to be stale.
+    #[test]
+    fn details_scroll_is_bounded_before_anything_has_been_drawn() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+
+        // No layout has been computed: nothing has any room, so nothing scrolls.
+        send(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.details_scroll, 0);
+        app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 70, 4));
+        assert_eq!(app.details_scroll, 0);
+        // And no click can land on a row of a list that was never drawn.
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 3));
+        assert_eq!(app.selected, 0);
+    }
+
+    /// Scrolling to the bottom and then growing the terminal must not strand
+    /// the reader below the content: the next snapshot is what bounds them.
+    #[test]
+    fn a_resize_reclamps_the_details_scroll_before_the_next_input() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+        app.update_layout(MOUSE_SCREEN);
+        let short_max = app.layout.details_max_scroll();
+        app.details_scroll = short_max;
+        assert!(short_max > 0);
+
+        // A terminal tall enough to show the whole thing has nothing to scroll.
+        app.update_layout(SCREEN);
+        assert_eq!(app.layout.details_max_scroll(), 0);
+        assert_eq!(app.details_scroll, 0, "the resize pulled the scroll back");
+
+        send(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.details_scroll, 0, "there is nothing below to scroll to");
+    }
+
+    // ── selection identity and detail scroll ───────────────────────────────
+
+    /// Scroll position is a place inside one row's details. When the row the
+    /// user was reading is retracted, the cursor lands on a neighbour — and
+    /// dropping the reader part-way down a *different* service's details is
+    /// nonsense, so the replacement starts from the top.
+    #[test]
+    fn removing_the_selected_row_focuses_a_replacement_at_the_top_of_its_details() {
+        let mut app = app_with(
+            Matcher::default(),
+            vec![
+                ssh("alpha", "10.0.0.1"),
+                ssh("beta", "10.0.0.2"),
+                ssh("gamma", "10.0.0.3"),
+            ],
+        );
+        app.update_layout(MOUSE_SCREEN);
+        app.selected = 1;
+        app.details_scroll = 2;
+        assert_eq!(app.visible_groups[app.selected].label(), "beta");
+
+        app.records.remove(&ssh("beta", "10.0.0.2").id());
+        app.recompute_visible();
+
+        // Deterministic: the row that took beta's place, not beta's old index
+        // pointing at whatever slid into it.
+        assert_eq!(app.visible_groups[app.selected].label(), "gamma");
+        assert_eq!(app.details_scroll, 0);
+    }
+
+    /// Filtering a row away is the same event as it being retracted, as far as
+    /// the reader is concerned: what they were reading is no longer on screen.
+    #[test]
+    fn filtering_out_the_selected_row_resets_the_details_scroll() {
+        let mut app = app_with(
+            Matcher::default(),
+            vec![ssh("alpha", "10.0.0.1"), http("beta")],
+        );
+        app.update_layout(MOUSE_SCREEN);
+        app.selected = app
+            .visible_groups
+            .iter()
+            .position(|group| group.label() == "beta")
+            .expect("beta is listed");
+        app.details_scroll = 2;
+
+        app.filter.toggle_service_type("_http._tcp");
+        app.recompute_visible();
+
+        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.visible_groups[app.selected].label(), "alpha");
+        assert_eq!(app.details_scroll, 0);
+    }
+
+    /// The other half of the rule: an update to the row being read is not a
+    /// change of subject. Discovery re-reports a service constantly, and
+    /// snapping the reader back to the top on every refresh would make the
+    /// details unreadable.
+    #[test]
+    fn updating_the_selected_row_keeps_its_place_in_the_details() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+        app.update_layout(MOUSE_SCREEN);
+        app.details_scroll = 2;
+
+        // The same registration, re-reported with another address.
+        let mut updated = ssh("alpha", "10.0.0.1");
+        updated.port = Some(2222);
+        app.records.insert(updated.id(), updated);
+        app.recompute_visible();
+
+        assert_eq!(app.visible_groups[app.selected].label(), "alpha");
+        assert_eq!(app.details_scroll, 2, "the reader stayed where they were");
+    }
+
+    /// Kept scroll is only kept as far as the new content reaches: an update
+    /// that shortens the details must not leave the reader below the end of
+    /// them. Identity survives a TXT change, so this is the "same row, less to
+    /// say" case rather than a change of subject.
+    #[test]
+    fn a_kept_scroll_is_clamped_to_the_updated_content() {
+        let mut verbose = ssh("alpha", "10.0.0.1");
+        for i in 0..12 {
+            verbose.txt.insert(format!("key{i:02}"), i.to_string());
+        }
+        let mut app = app_with(Matcher::default(), vec![verbose.clone()]);
+        app.update_layout(MOUSE_SCREEN);
+
+        let tall = app.layout.details_max_scroll();
+        app.details_scroll = tall;
+
+        // The same occurrence, re-reported with its TXT data gone.
+        let terse = ssh("alpha", "10.0.0.1");
+        assert_eq!(terse.id(), verbose.id(), "the row's identity is unchanged");
+        app.records.insert(terse.id(), terse);
+        app.recompute_visible();
+        app.update_layout(MOUSE_SCREEN);
+
+        let short = app.layout.details_max_scroll();
+        assert!(
+            short < tall,
+            "the details must have got shorter: {tall} → {short}"
+        );
+        assert_eq!(
+            app.details_scroll, short,
+            "the reader was pulled back to the new end, not stranded past it"
+        );
+    }
+
+    /// An emptied list has no row to focus and nothing to read.
+    #[test]
+    fn losing_every_row_leaves_the_details_at_the_top() {
+        let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+        app.update_layout(MOUSE_SCREEN);
+        app.details_scroll = 2;
+
+        app.records.clear();
+        app.recompute_visible();
+
+        assert!(app.visible_groups.is_empty());
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.details_scroll, 0);
     }
 
     #[test]

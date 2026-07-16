@@ -46,14 +46,14 @@ Status values:
 | 011 | P1 | done | [Scrollable modal content and pickers](tasks/011-scrollable-pickers.md) | 008, 010 | 012, 013, 014, 015 |
 | 012 | P0 | done | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014, 020 |
 | 013 | P1 | done | [Keybindings and search consistency](tasks/013-keybindings-and-search-consistency.md) | — | 011, 012, 014 |
-| 014 | P2 | ready | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015, 021 |
+| 014 | P2 | done | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015, 021 |
 | 015 | P2 | blocked | [App and RuleEngine refactoring](tasks/015-app-and-rule-engine-refactoring.md) | 001–014, 016–021 | all prior tasks; run last |
 | 016 | P0 | done | [Remove implicit fake fallback](tasks/016-remove-implicit-fake-fallback.md) | — | 002 |
 | 017 | P2 | done | [Fake backend heterogeneous SSH row](tasks/017-fake-backend-heterogeneous-ssh-row.md) | 006 | — |
 | 018 | P2 | done | [TUI smoke test in CI](tasks/018-tui-smoke-test-in-ci.md) | 017, 019 | 015 |
 | 019 | P2 | done | [Fake as a selectable backend](tasks/019-fake-as-a-selectable-backend.md) | 017 | — |
 | 020 | P0 | done | [Safe process-owned terminal output](tasks/020-safe-process-terminal-output.md) | 012 | 007, 009, 015 |
-| 021 | P2 | blocked | [Session-aware activity indicator](tasks/021-session-aware-activity-indicator.md) | 002, 010, 014 | 014, 015 |
+| 021 | P2 | ready | [Session-aware activity indicator](tasks/021-session-aware-activity-indicator.md) | 002, 010, 014 | 014, 015 |
 
 Priority meanings:
 
@@ -118,13 +118,21 @@ than hidden in completion notes:
   visibility and is now done;
 - task 020 followed task 012 for direct stdout/stderr and post-TUI error safety
   and is now done;
-- task 021 follows task 014 for the still-unconditional session spinner;
+- task 021 followed task 014 for the still-unconditional session spinner and is
+  now ready;
 - tasks 019 and 018 are now done, so CI covers the final fake-backend CLI at
   default and narrow terminal sizes;
 - stale fuzz warnings in tasks 003 and 005 are marked resolved.
 
-Task 014 is the only remaining ready task. Task 021 remains blocked on 014, and
-task 015 remains the final refactor after all other open tasks are complete.
+Task 014 is now done, which unblocked task 021 — the only remaining ready task.
+Task 015 remains the final refactor once 021 is complete.
+
+Task 014 removed the last of the renderer's write-back into `App`: no
+`Cell`-backed layout fields remain, and `src/ui/layout.rs` owns the browse
+screen's geometry as a value the event loop computes before both drawing and
+input. Task 021 therefore renders its indicator from an immutable `&App`, and
+task 015 should treat that module — with `ui::viewport` from task 011 — as the
+shape to extend rather than revisit.
 
 The original midpoint normalization changed backlog documentation only.
 Subsequent implementations are reflected in the task index and completion

@@ -359,6 +359,18 @@ type, port, and TXT data — rather than presenting one service's fields as the
 host's. A service type's details likewise list every host offering it. Actions
 always run against a concrete discovered service, whichever tab they start from.
 
+The type filter (`t`) lists the service types currently being advertised, and
+its `types n/m` chip counts only those: `m` is how many types are on the link
+right now, and `n` is how many of them you are showing. Switching a type off is
+remembered rather than observed, so a device that drops off the link and comes
+back stays switched off — but a type nobody is advertising is counted on neither
+side of the chip.
+
+The details pane keeps your scroll position while you stay on the same row,
+including as discovery re-reports it. Moving to a different row starts its
+details from the top, and a row that shortens or a terminal that grows pulls the
+view back to the end of the content rather than past it.
+
 The `s` (same-host) filter needs a row with a single host, so it is offered in
 the services and hosts tabs. The types and commands tabs report it unavailable
 instead of guessing a host; an active filter can be cleared from any tab.

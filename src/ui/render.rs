@@ -36,38 +36,26 @@ const STAR: Color = Color::Rgb(0xf7, 0xce, 0x52); // yellow
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Draw the whole screen from `app` and the layout it already computed.
+///
+/// Reads only: every rectangle and bound comes from `app.layout`, which the
+/// event loop worked out before this was called. Nothing here decides geometry,
+/// so nothing here has to be told to input handling afterwards.
 pub fn render(frame: &mut Frame<'_>, app: &App) {
-    let area = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // top stats bar
-            Constraint::Length(1), // filter / search bar
-            Constraint::Min(6),    // body
-            Constraint::Length(1), // footer hints
-        ])
-        .split(area);
+    let layout = app.layout;
 
-    render_top_bar(frame, app, chunks[0]);
-    render_filter_bar(frame, app, chunks[1]);
+    render_top_bar(frame, app, layout.top_bar());
+    render_filter_bar(frame, app, layout.filter_bar());
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(chunks[2]);
-    // Record the pane rectangles so mouse events can be hit-tested against
-    // them (same render→input feedback pattern as `details_viewport`).
-    app.list_area.set(body[0]);
-    app.details_area.set(body[1]);
     if app.filter.grouping == GroupingMode::Command {
-        render_commands(frame, app, body[0]);
-        render_command_details(frame, app, body[1]);
+        render_commands(frame, app, layout.list());
+        render_command_details(frame, app, layout.details());
     } else {
-        render_services(frame, app, body[0]);
-        render_details(frame, app, body[1]);
+        render_services(frame, app, layout.list());
+        render_details(frame, app, layout.details());
     }
 
-    render_footer(frame, app, chunks[3]);
+    render_footer(frame, app, layout.footer());
 
     match app.mode {
         AppMode::TypeFilter => render_type_filter(frame, app),
@@ -166,8 +154,10 @@ fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     // right-side chips: type filter + host filter
     let mut chips: Vec<Span> = Vec::new();
-    let total_types = app.service_types.len();
-    let enabled = app.filter.enabled_service_types.len().min(total_types);
+    // Both numbers from one read of the filter, over the types discovery is
+    // offering now. A count derived here from a set length would go on
+    // counting types that have already gone away.
+    let (enabled, total_types) = app.filter.type_counts();
     if total_types > 0 {
         let narrowed = enabled < total_types;
         chips.push(chip(
@@ -369,13 +359,32 @@ fn host_text(facts: &GroupFacts) -> String {
 }
 
 // ── details / preview ────────────────────────────────────────────────────
+/// How many lines the details pane has for the current selection.
+///
+/// This is the content dimension [`LayoutSnapshot`] needs, and it comes from the
+/// same builders that draw the pane rather than from a count kept alongside
+/// them: the bound a scroll key is clamped to and the rows that end up on screen
+/// cannot disagree about how tall the content is, because they are the same
+/// rows. An unselected pane shows a note rather than a table, so it has no lines
+/// to scroll.
+///
+/// [`LayoutSnapshot`]: super::layout::LayoutSnapshot
+pub(crate) fn details_content_height(app: &App) -> usize {
+    let rows = if app.filter.grouping == GroupingMode::Command {
+        command_detail_rows(app)
+    } else {
+        detail_rows(app)
+    };
+    rows.map_or(0, |rows| rows.len())
+}
+
 fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let block = panel().title(Line::from(Span::styled(
         " details ",
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )));
 
-    let Some(group) = app.visible_groups.get(app.selected) else {
+    let Some(rows) = detail_rows(app) else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  no service selected",
@@ -386,6 +395,14 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         );
         return;
     };
+
+    render_detail_rows(frame, app, area, block, rows);
+}
+
+/// The details of the selected browse row, or `None` when nothing is selected.
+/// Pure: a function of the app's rows and matches, with no geometry in it.
+fn detail_rows(app: &App) -> Option<Vec<Row<'static>>> {
+    let group = app.visible_groups.get(app.selected)?;
 
     // header — name spans the value column, dot sits in the label column
     let mut rows: Vec<Row> = vec![Row::new(vec![
@@ -420,7 +437,7 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .unwrap_or(&[]),
     );
 
-    render_detail_rows(frame, app, area, block, rows);
+    Some(rows)
 }
 
 /// A logical service: the fields all of its occurrences share, its TXT data,
@@ -784,7 +801,7 @@ fn render_command_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )));
 
-    let Some(group) = app.command_groups.get(app.selected) else {
+    let Some(rows) = command_detail_rows(app) else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  no command selected",
@@ -795,6 +812,15 @@ fn render_command_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         );
         return;
     };
+
+    render_detail_rows(frame, app, area, block, rows);
+}
+
+/// The details of the selected command row, or `None` when nothing is selected.
+/// The command view's counterpart to [`detail_rows`], and pure for the same
+/// reason.
+fn command_detail_rows(app: &App) -> Option<Vec<Row<'static>>> {
+    let group = app.command_groups.get(app.selected)?;
 
     let command = &group.command;
     let mut rows: Vec<Row> = vec![Row::new(vec![
@@ -868,7 +894,7 @@ fn render_command_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ]));
     }
 
-    render_detail_rows(frame, app, area, block, rows);
+    Some(rows)
 }
 
 // ── footer ───────────────────────────────────────────────────────────────
@@ -1003,14 +1029,13 @@ fn render_type_filter(frame: &mut Frame<'_>, app: &App) {
             ),
             empty: "  no service types discovered yet",
             selected: app.type_filter_index,
-            total: app.service_types.len(),
+            total: app.filter.discovered_types().len(),
             width: 58,
             height: 60,
         },
         |index, selected, base| {
-            let service_type = &app.service_types[index];
-            let enabled = app.filter.enabled_service_types.contains(service_type);
-            let check = if enabled {
+            let service_type = &app.filter.discovered_types()[index];
+            let check = if app.filter.is_enabled(service_type) {
                 Span::styled(" ✓ ", base.fg(GOOD).add_modifier(Modifier::BOLD))
             } else {
                 Span::styled(" ○ ", base.fg(FG_DIM))
@@ -1577,9 +1602,11 @@ fn render_list_panel(
     render_scrollbar(frame, area, spec.total, inner_h, offset);
 }
 
-/// Render the shared tail of the two detail panes: clamp the requested scroll to
-/// the content height (writing the bounds back for the key handler), slice the
-/// visible window, and draw the table + scrollbar.
+/// Render the shared tail of the two detail panes: slice the window the layout
+/// says is on screen, and draw the table + scrollbar.
+///
+/// The window comes from the snapshot rather than from this pane's rectangle, so
+/// the rows drawn here are the ones the scroll keys were clamped against.
 fn render_detail_rows<'a>(
     frame: &mut Frame<'_>,
     app: &App,
@@ -1587,20 +1614,25 @@ fn render_detail_rows<'a>(
     block: Block<'a>,
     rows: Vec<Row<'a>>,
 ) {
-    let total = rows.len();
-    let inner_h = area.height.saturating_sub(2) as usize;
-    let max_scroll = total.saturating_sub(inner_h);
-    app.details_max_scroll.set(max_scroll);
-    app.details_viewport.set(inner_h);
-    let offset = app.details_scroll.min(max_scroll);
-    let visible: Vec<Row> = rows.into_iter().skip(offset).take(inner_h).collect();
+    let window = app.layout.details_window(app.details_scroll);
+    let visible: Vec<Row> = rows
+        .into_iter()
+        .skip(window.offset())
+        .take(window.range().len())
+        .collect();
 
     let widths = [Constraint::Length(8), Constraint::Fill(1)];
     frame.render_widget(
         Table::new(visible, widths).column_spacing(1).block(block),
         area,
     );
-    render_scrollbar(frame, area, total, inner_h, offset);
+    render_scrollbar(
+        frame,
+        area,
+        window.total(),
+        app.layout.details_viewport(),
+        window.offset(),
+    );
 }
 
 #[cfg(test)]
@@ -1645,11 +1677,29 @@ mod tests {
         )
     }
 
-    fn render_buffer(app: &App, width: u16, height: u16) -> Buffer {
+    /// Draw `app` onto a `width`×`height` terminal exactly as the event loop
+    /// does: compute the layout for that size first, then render from it. Taking
+    /// `&mut App` is the point — a frame cannot be drawn without the app having
+    /// been told what size it is being drawn at.
+    fn render_buffer(app: &mut App, width: u16, height: u16) -> Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
+        app.update_layout(terminal.get_frame().area());
         terminal.draw(|frame| render(frame, app)).unwrap();
         terminal.backend().buffer().clone()
+    }
+
+    /// Put `count` distinct service types in front of the type filter the only
+    /// way it learns any: by observing records that advertise them. Returns the
+    /// type names, in the sorted order the filter lists them in.
+    fn discover_types(app: &mut App, count: usize, name: impl Fn(usize) -> String) -> Vec<String> {
+        let types: Vec<String> = (0..count).map(&name).collect();
+        let records: Vec<Entry> = types
+            .iter()
+            .map(|service_type| Entry::new("svc", service_type, "local"))
+            .collect();
+        app.filter.observe_types(&records);
+        types
     }
 
     fn buffer_text(buffer: &Buffer) -> String {
@@ -1667,9 +1717,9 @@ mod tests {
     /// so is honest.
     #[test]
     fn an_empty_list_on_a_live_session_says_it_is_listening() {
-        let app = test_app("local");
+        let mut app = test_app("local");
 
-        let text = buffer_text(&render_buffer(&app, 100, 24));
+        let text = buffer_text(&render_buffer(&mut app, 100, 24));
 
         assert!(text.contains("listening for mDNS services on local"));
     }
@@ -1686,7 +1736,7 @@ mod tests {
         drop(tx);
         app.session.poll();
 
-        let text = buffer_text(&render_buffer(&app, 100, 24));
+        let text = buffer_text(&render_buffer(&mut app, 100, 24));
 
         assert!(
             !text.contains("listening for mDNS services"),
@@ -1797,12 +1847,12 @@ mod tests {
         app.status = "status\u{7}\r\u{85}".to_string();
         app.mode = AppMode::Search;
         app.filter.text_query = "query\t\u{7f}".to_string();
-        app.service_types = vec![entry.service_type.clone()];
+        app.filter.observe_types(std::slice::from_ref(&entry));
         app.visible_groups = browse_groups(&[entry.clone()], BrowseMode::LogicalService);
         app.group_matches = vec![Vec::new()];
         app.records.insert(entry.id(), entry.clone());
 
-        let buffer = render_buffer(&app, 180, 36);
+        let buffer = render_buffer(&mut app, 180, 36);
         let rendered = buffer_text(&buffer);
 
         assert!(rendered.contains("svc\\x1B[2J\\x07\\x0D\\x0A\\x09\\x7F\\x85終"));
@@ -1859,8 +1909,7 @@ mod tests {
         for record in records {
             app.records.insert(record.id(), record.clone());
         }
-        app.service_types = crate::ui::filter::FilterState::discovered_types(records);
-        app.filter.sync_service_types(records);
+        app.filter.observe_types(records);
         app.visible_groups = browse_groups(records, mode.browse_mode().expect("a browse mode"));
         app.group_matches = vec![Vec::new(); app.visible_groups.len()];
         app
@@ -1869,7 +1918,7 @@ mod tests {
     #[test]
     fn host_details_list_every_service_and_claim_no_representative_metadata() {
         // One host offering SSH and HTTP on different ports with different TXT.
-        let app = browsing(
+        let mut app = browsing(
             GroupingMode::Host,
             &[
                 service_on("shell", "_ssh._tcp", "nas.local", 22, &[("v", "2")]),
@@ -1877,7 +1926,7 @@ mod tests {
             ],
         );
 
-        let rendered = buffer_text(&render_buffer(&app, 180, 36));
+        let rendered = buffer_text(&render_buffer(&mut app, 180, 36));
 
         // Both children are listed with their own type and port.
         assert!(rendered.contains("shell"), "{rendered}");
@@ -1896,7 +1945,7 @@ mod tests {
     fn service_type_details_list_every_host_and_claim_no_representative_metadata() {
         // One type offered by several hosts with different metadata, plus a
         // registration that has not resolved a host yet.
-        let app = browsing(
+        let mut app = browsing(
             GroupingMode::ServiceType,
             &[
                 service_on("alpha", "_ssh._tcp", "alpha.local", 22, &[("os", "linux")]),
@@ -1905,7 +1954,7 @@ mod tests {
             ],
         );
 
-        let rendered = buffer_text(&render_buffer(&app, 180, 36));
+        let rendered = buffer_text(&render_buffer(&mut app, 180, 36));
 
         // Every child host is listed against its own service.
         assert!(rendered.contains("alpha.local:22"), "{rendered}");
@@ -1942,10 +1991,10 @@ mod tests {
         wireless.addresses = vec!["10.0.0.2".parse().unwrap()];
         let wireless = wireless.with_occurrence(Some(OccurrenceId(NonZeroU32::new(2).unwrap())));
 
-        let app = browsing(GroupingMode::LogicalService, &[wired, wireless]);
+        let mut app = browsing(GroupingMode::LogicalService, &[wired, wireless]);
         assert_eq!(app.visible_groups.len(), 1);
 
-        let rendered = buffer_text(&render_buffer(&app, 180, 36));
+        let rendered = buffer_text(&render_buffer(&mut app, 180, 36));
 
         // The value both occurrences agree on is the service's.
         assert!(rendered.contains("rpi5"), "{rendered}");
@@ -1963,12 +2012,12 @@ mod tests {
 
     #[test]
     fn an_unresolved_host_row_renders_as_unresolved_not_as_a_host() {
-        let app = browsing(
+        let mut app = browsing(
             GroupingMode::Host,
             &[Entry::new("ghost", "_ipp._tcp", "local")],
         );
 
-        let rendered = buffer_text(&render_buffer(&app, 180, 36));
+        let rendered = buffer_text(&render_buffer(&mut app, 180, 36));
 
         assert!(rendered.contains("<unresolved host>"), "{rendered}");
         assert!(rendered.contains("not resolved yet"), "{rendered}");
@@ -1981,7 +2030,7 @@ mod tests {
             let mut app = test_app("local");
             app.filter.grouping = mode;
 
-            let rendered = buffer_text(&render_buffer(&app, 120, 24));
+            let rendered = buffer_text(&render_buffer(&mut app, 120, 24));
 
             let expected = if mode == GroupingMode::Command {
                 "no commands configured"
@@ -1997,7 +2046,7 @@ mod tests {
         let mut app = browsing(GroupingMode::LogicalService, &[]);
         app.tab_counts = [4, 3, 2, 1];
 
-        let rendered = buffer_text(&render_buffer(&app, 120, 24));
+        let rendered = buffer_text(&render_buffer(&mut app, 120, 24));
 
         assert!(rendered.contains("services 4"), "{rendered}");
         assert!(rendered.contains("hosts 3"));
@@ -2029,7 +2078,7 @@ mod tests {
             services: Vec::new(),
         }];
 
-        let buffer = render_buffer(&app, 140, 24);
+        let buffer = render_buffer(&mut app, 140, 24);
         let rendered = buffer_text(&buffer);
 
         assert!(rendered.contains("inspect\\x1B"));
@@ -2050,7 +2099,7 @@ mod tests {
         let mut app = test_app("domain\u{1b}[2J-that-is-wider-than-the-screen");
         app.status = "status\u{7}\nthat-is-also-too-wide".to_string();
 
-        let buffer = render_buffer(&app, 1, 4);
+        let buffer = render_buffer(&mut app, 1, 4);
 
         assert_eq!(buffer.area.width, 1);
         assert_eq!(buffer.area.height, 4);
@@ -2071,9 +2120,9 @@ mod tests {
 
     #[test]
     fn the_footer_shows_the_default_browse_bindings() {
-        let app = test_app("local");
+        let mut app = test_app("local");
 
-        let text = buffer_text(&render_buffer(&app, 160, 24));
+        let text = buffer_text(&render_buffer(&mut app, 160, 24));
 
         assert!(text.contains("↓/↑  move"), "{text}");
         assert!(text.contains("⏎  open"), "{text}");
@@ -2086,7 +2135,7 @@ mod tests {
     /// the user to press the keys that actually work.
     #[test]
     fn rebound_browse_keys_change_the_footer_hints() {
-        let app = app_with_bindings(
+        let mut app = app_with_bindings(
             r#"
 [browse]
 down = ["ctrl-n"]
@@ -2097,7 +2146,7 @@ search = ["f"]
 "#,
         );
 
-        let text = buffer_text(&render_buffer(&app, 160, 24));
+        let text = buffer_text(&render_buffer(&mut app, 160, 24));
 
         assert!(text.contains("^n/^p  move"), "{text}");
         assert!(text.contains("space  open"), "{text}");
@@ -2113,7 +2162,7 @@ search = ["f"]
     /// rather than name a key that does nothing.
     #[test]
     fn an_unbound_action_has_no_footer_hint() {
-        let app = app_with_bindings(
+        let mut app = app_with_bindings(
             r#"
 [browse]
 same_host = []
@@ -2121,7 +2170,7 @@ refresh = []
 "#,
         );
 
-        let text = buffer_text(&render_buffer(&app, 160, 24));
+        let text = buffer_text(&render_buffer(&mut app, 160, 24));
 
         assert!(!text.contains("same-host"), "{text}");
         assert!(!text.contains("refresh"), "{text}");
@@ -2132,28 +2181,28 @@ refresh = []
     /// even when the browse quit key is the one that was unbound.
     #[test]
     fn the_footer_falls_back_to_the_common_quit_hint() {
-        let app = app_with_bindings(
+        let mut app = app_with_bindings(
             r#"
 [browse]
 quit = []
 "#,
         );
 
-        let text = buffer_text(&render_buffer(&app, 160, 24));
+        let text = buffer_text(&render_buffer(&mut app, 160, 24));
 
         assert!(text.contains("^c  quit"), "{text}");
     }
 
     #[test]
     fn the_search_placeholder_names_the_configured_search_key() {
-        let app = app_with_bindings(
+        let mut app = app_with_bindings(
             r#"
 [browse]
 search = ["f"]
 "#,
         );
 
-        let text = buffer_text(&render_buffer(&app, 160, 24));
+        let text = buffer_text(&render_buffer(&mut app, 160, 24));
 
         assert!(text.contains("press f to search"), "{text}");
     }
@@ -2169,7 +2218,7 @@ close = ["ctrl-g"]
         );
         app.mode = AppMode::ActionPicker;
 
-        let text = buffer_text(&render_buffer(&app, 160, 24));
+        let text = buffer_text(&render_buffer(&mut app, 160, 24));
 
         assert!(text.contains("space runs · ^g closes"), "{text}");
     }
@@ -2179,7 +2228,7 @@ close = ["ctrl-g"]
         let mut app = test_app("local");
         app.mode = AppMode::Help;
 
-        let text = buffer_text(&render_buffer(&app, 160, 40));
+        let text = buffer_text(&render_buffer(&mut app, 160, 40));
 
         // Help is the reference: it keeps every alias, not just the first.
         assert!(text.contains("↓ / j"), "{text}");
@@ -2199,7 +2248,7 @@ help = ["f1"]
         );
         app.mode = AppMode::Help;
 
-        let text = buffer_text(&render_buffer(&app, 160, 40));
+        let text = buffer_text(&render_buffer(&mut app, 160, 40));
 
         assert!(text.contains("^n / F9"), "{text}");
         assert!(text.contains("F1"), "{text}");
@@ -2214,7 +2263,7 @@ help = ["f1"]
         let mut app = test_app("local");
         app.mode = AppMode::Help;
 
-        let text = buffer_text(&render_buffer(&app, 160, 40));
+        let text = buffer_text(&render_buffer(&mut app, 160, 40));
 
         assert!(!text.contains("clear search"), "{text}");
         assert!(text.contains("leave search, keep filter"), "{text}");
@@ -2263,14 +2312,14 @@ help = ["f1"]
     fn an_oversized_type_filter_shows_the_selected_row_at_every_index() {
         let mut app = test_app("local");
         app.mode = AppMode::TypeFilter;
-        app.service_types = (0..40).map(|i| format!("_type{i:02}._tcp")).collect();
+        let types = discover_types(&mut app, 40, |i| format!("_type{i:02}._tcp"));
 
-        for index in 0..app.service_types.len() {
+        for (index, service_type) in types.iter().enumerate() {
             app.type_filter_index = index;
-            let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+            let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
             assert!(
-                text.contains(&app.service_types[index]),
+                text.contains(service_type),
                 "type {index} is selected but not on screen:\n{text}"
             );
         }
@@ -2289,7 +2338,7 @@ help = ["f1"]
 
         for index in 0..app.action_matches.len() {
             app.action_index = index;
-            let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+            let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
             assert!(
                 text.contains(&format!("act-{index:02}")),
@@ -2309,7 +2358,7 @@ help = ["f1"]
 
         for index in 0..30 {
             app.instance_index = index;
-            let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+            let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
             assert!(
                 text.contains(&format!("host-{index:02}.local")),
@@ -2338,7 +2387,7 @@ help = ["f1"]
 
         for index in 0..30 {
             app.service_picker_index = index;
-            let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+            let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
             assert!(
                 text.contains(&format!("svc-{index:02}")),
@@ -2353,19 +2402,19 @@ help = ["f1"]
     fn a_picker_scrolls_only_once_the_selection_leaves_the_window() {
         let mut app = test_app("local");
         app.mode = AppMode::TypeFilter;
-        app.service_types = (0..40).map(|i| format!("_type{i:02}._tcp")).collect();
+        discover_types(&mut app, 40, |i| format!("_type{i:02}._tcp"));
         let label = |index: usize| format!("_type{index:02}._tcp");
 
         app.type_filter_index = 0;
         let top = visible_labels(
-            &buffer_text(&render_buffer(&app, SHORT.0, SHORT.1)),
+            &buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1)),
             40,
             label,
         );
         // Stepping onto the last visible row shows exactly the same rows.
         app.type_filter_index = *top.last().expect("a visible row");
         let unmoved = visible_labels(
-            &buffer_text(&render_buffer(&app, SHORT.0, SHORT.1)),
+            &buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1)),
             40,
             label,
         );
@@ -2374,12 +2423,37 @@ help = ["f1"]
         // One row further scrolls by exactly one row.
         app.type_filter_index += 1;
         let scrolled = visible_labels(
-            &buffer_text(&render_buffer(&app, SHORT.0, SHORT.1)),
+            &buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1)),
             40,
             label,
         );
         assert_eq!(scrolled.first(), Some(&1));
         assert_eq!(scrolled.last(), Some(&app.type_filter_index));
+    }
+
+    /// The type chip counts what is on screen now.
+    ///
+    /// The regression: a type the user never switched off stayed in the enabled
+    /// set forever, so after the last SSH service went away the chip still read
+    /// `1/1` — "one of one type shown" — over a list showing nothing at all.
+    #[test]
+    fn the_type_chip_counts_only_types_that_are_still_discovered() {
+        let ssh = Entry::new("shell", "_ssh._tcp", "local");
+        let http = Entry::new("site", "_http._tcp", "local");
+        let mut app = test_app("local");
+
+        // Both types discovered, HTTP switched off: one of two shown.
+        app.filter.observe_types(&[ssh, http.clone()]);
+        app.filter.toggle_service_type("_http._tcp");
+        assert!(buffer_text(&render_buffer(&mut app, 100, 24)).contains("types 1/2"));
+
+        // SSH goes away. Only HTTP is left, and it is switched off: nothing is
+        // shown, of the one type there is.
+        app.filter.observe_types(&[http]);
+        let text = buffer_text(&render_buffer(&mut app, 100, 24));
+
+        assert!(text.contains("types 0/1"), "{text}");
+        assert!(!text.contains("types 1/1"), "{text}");
     }
 
     /// Shrinking the terminal until the selection would fall outside the popup
@@ -2388,11 +2462,11 @@ help = ["f1"]
     fn shrinking_the_terminal_keeps_the_picker_selection_visible() {
         let mut app = test_app("local");
         app.mode = AppMode::TypeFilter;
-        app.service_types = (0..40).map(|i| format!("_type{i:02}._tcp")).collect();
+        discover_types(&mut app, 40, |i| format!("_type{i:02}._tcp"));
         app.type_filter_index = 25;
 
         for height in 6..40u16 {
-            let text = buffer_text(&render_buffer(&app, 60, height));
+            let text = buffer_text(&render_buffer(&mut app, 60, height));
 
             assert!(
                 text.contains("_type25._tcp"),
@@ -2408,13 +2482,13 @@ help = ["f1"]
         let mut app = test_app("local");
         app.mode = AppMode::TypeFilter;
 
-        app.service_types = (0..3).map(|i| format!("_type{i:02}._tcp")).collect();
-        let fits = buffer_text(&render_buffer(&app, 60, 24));
+        discover_types(&mut app, 3, |i| format!("_type{i:02}._tcp"));
+        let fits = buffer_text(&render_buffer(&mut app, 60, 24));
         assert!(!fits.contains("1-3/3"), "{fits}");
 
-        app.service_types = (0..40).map(|i| format!("_type{i:02}._tcp")).collect();
+        discover_types(&mut app, 40, |i| format!("_type{i:02}._tcp"));
         app.type_filter_index = 39;
-        let clipped = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+        let clipped = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
         assert!(clipped.contains("-40/40"), "{clipped}");
     }
 
@@ -2424,10 +2498,10 @@ help = ["f1"]
     fn a_picker_with_unicode_labels_keeps_its_selection_visible() {
         let mut app = test_app("local");
         app.mode = AppMode::TypeFilter;
-        app.service_types = (0..30).map(|i| format!("_型{i:02}界._tcp")).collect();
+        discover_types(&mut app, 30, |i| format!("_型{i:02}界._tcp"));
         app.type_filter_index = 29;
 
-        let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+        let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
         // A wide glyph owns two cells, the second of which reads back blank, so
         // the label is matched by the part that cannot be split.
@@ -2450,7 +2524,7 @@ help = ["f1"]
             app.mode = mode;
 
             for (width, height) in [(60u16, 18u16), (20, 5), (10, 3), (4, 2), (1, 1)] {
-                let buffer = render_buffer(&app, width, height);
+                let buffer = render_buffer(&mut app, width, height);
                 assert_eq!(buffer.area.height, height, "{mode:?} at {width}x{height}");
             }
         }
@@ -2464,18 +2538,18 @@ help = ["f1"]
     fn a_long_picker_in_a_terminal_with_no_room_renders_safely() {
         let mut app = test_app("local");
         app.mode = AppMode::TypeFilter;
-        app.service_types = (0..40).map(|i| format!("_type{i:02}._tcp")).collect();
+        discover_types(&mut app, 40, |i| format!("_type{i:02}._tcp"));
         app.type_filter_index = 39;
         app.help_scroll = 999;
 
         for (width, height) in [(60u16, 6u16), (20, 4), (10, 3), (4, 2), (2, 1), (1, 1)] {
-            let buffer = render_buffer(&app, width, height);
+            let buffer = render_buffer(&mut app, width, height);
             assert_eq!(buffer.area.height, height, "at {width}x{height}");
         }
 
         app.mode = AppMode::Help;
         for (width, height) in [(60u16, 6u16), (10, 3), (1, 1)] {
-            let buffer = render_buffer(&app, width, height);
+            let buffer = render_buffer(&mut app, width, height);
             assert_eq!(buffer.area.height, height, "help at {width}x{height}");
         }
     }
@@ -2503,7 +2577,7 @@ help = ["f1"]
         );
         for scroll in 0..=max {
             app.help_scroll = scroll;
-            let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+            let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
             for row in &expected {
                 // The popup is narrow, so a long label is truncated; its head is
                 // what proves the row was drawn.
@@ -2525,11 +2599,11 @@ help = ["f1"]
         app.mode = AppMode::Help;
         let total = help_lines(&app).len();
 
-        let top = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+        let top = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
         assert!(top.contains(&format!("/{total}")), "{top}");
 
         app.help_scroll = Window::max_scroll(total, help_viewport(Rect::new(0, 0, 60, 18)));
-        let bottom = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+        let bottom = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
         assert!(bottom.contains(&format!("-{total}/{total}")), "{bottom}");
         assert!(bottom.contains("badges:"), "{bottom}");
     }
@@ -2542,7 +2616,7 @@ help = ["f1"]
         let mut app = test_app("local");
         app.mode = AppMode::Help;
 
-        let text = buffer_text(&render_buffer(&app, 160, 44));
+        let text = buffer_text(&render_buffer(&mut app, 160, 44));
 
         assert!(text.contains("esc closes"), "{text}");
         assert!(!text.contains("scrolls"), "{text}");
@@ -2557,7 +2631,7 @@ help = ["f1"]
         let total = help_lines(&app).len();
         app.help_scroll = Window::max_scroll(total, help_viewport(Rect::new(0, 0, 60, 18)));
 
-        let grown = buffer_text(&render_buffer(&app, 160, 44));
+        let grown = buffer_text(&render_buffer(&mut app, 160, 44));
 
         // The taller popup shows everything, so the window is back at the top.
         assert!(grown.contains("move selection down"), "{grown}");
@@ -2575,7 +2649,7 @@ up = ["ctrl-p"]
         );
         app.mode = AppMode::Help;
 
-        let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+        let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
         assert!(text.contains("^n/^p scrolls"), "{text}");
         assert!(!text.contains("↓/↑ scrolls"), "{text}");
@@ -2594,7 +2668,7 @@ up = []
         );
         app.mode = AppMode::Help;
 
-        let text = buffer_text(&render_buffer(&app, SHORT.0, SHORT.1));
+        let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
         assert!(!text.contains("scrolls"), "{text}");
         assert!(text.contains("esc closes"), "{text}");
