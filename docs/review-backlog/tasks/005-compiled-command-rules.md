@@ -4,12 +4,12 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `blocked` |
+| Status | `in-progress` |
 | Priority | `P1` |
 | Workstream | Command rules |
-| Depends on | 004 |
+| Depends on | 004 (`done`) |
 | Likely conflicts | 006, 007, 015 |
-| Owner | Unclaimed |
+| Owner | agent-af100d3ff63576edf (branch `worktree-agent-af100d3ff63576edf`) |
 
 ## Why This Matters
 
