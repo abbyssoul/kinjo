@@ -119,39 +119,68 @@ impl AppMode {
     }
 }
 
+/// The running application: the event loop, the state it decides from, and the
+/// terminal it draws to.
+///
+/// # Interface
+///
+/// Everything below is implementation. A caller builds an `App`, optionally
+/// attaches the two capabilities it cannot supply itself, runs it, and collects
+/// what outlived the terminal:
+///
+/// ```text
+/// App::new(cli, engine, keybindings, session)
+///     .with_discovery_factory(..)   // else refresh is unavailable
+///     .with_config_loader(..)       // else reload is unavailable
+/// app.reload_trigger()              // wire to a signal, if you have one
+/// app.note_skipped_configs(n)       // startup warnings, if any
+/// app.run(terminal)                 // -> a command to exec, if the user chose one
+/// app.take_reload_diagnostics()     // why the last reload was refused
+/// ```
+///
+/// That list is the whole supported surface, and `kinjo::run` uses no more than
+/// it. It is deliberately small enough for the [`RuleEngine`] extension path in
+/// `docs/adr/0001-rule-engine-is-a-supported-extension-point.md` to be a real
+/// one: substituting an engine means writing this sequence, not reaching into
+/// the app's state.
+///
+/// The fields are `pub(crate)` rather than private only because [`super::render`]
+/// projects them into a frame. They are not a caller's business, and a change to
+/// any of them is not a change to this crate's public API.
 pub struct App {
-    pub cli: Cli,
-    pub matcher: Box<dyn RuleEngine>,
-    pub keybindings: KeyBindings,
+    pub(crate) cli: Cli,
+    matcher: Box<dyn RuleEngine>,
+    pub(crate) keybindings: KeyBindings,
     /// The running discovery session: its events, its state, and its shutdown.
     /// One value, so the receiver and the adapter behind it cannot drift apart;
     /// dropping or replacing it stops the producer.
-    pub session: DiscoverySession,
-    pub records: BTreeMap<EntryId, Entry>,
-    pub filter: FilterState,
-    pub visible_groups: Vec<EntryGroup>,
-    pub selected: usize,
-    pub mode: AppMode,
-    pub type_filter_index: usize,
+    pub(crate) session: DiscoverySession,
+    pub(crate) records: BTreeMap<EntryId, Entry>,
+    pub(crate) filter: FilterState,
+    pub(crate) visible_groups: Vec<EntryGroup>,
+    pub(crate) selected: usize,
+    pub(crate) mode: AppMode,
+    pub(crate) type_filter_index: usize,
     /// What an open picker is a view of. Set when a picker opens, cleared when
     /// it closes, and the handle every rebuild below resolves against.
-    pub picker_anchor: Option<PickerAnchor>,
+    picker_anchor: Option<PickerAnchor>,
     /// The actions an open picker lists. Rebuilt from `picker_anchor` on every
     /// recompute, never carried across one, so it cannot outlive its records.
-    pub action_matches: Vec<MatchResult>,
-    pub action_index: usize,
+    pub(crate) action_matches: Vec<MatchResult>,
+    pub(crate) action_index: usize,
     /// The action an open instance picker is choosing a target for. Rebuilt
     /// alongside `action_matches`.
-    pub pending_action: Option<MatchResult>,
-    pub instance_index: usize,
-    pub status: String,
+    pub(crate) pending_action: Option<MatchResult>,
+    pub(crate) instance_index: usize,
+    pub(crate) status: String,
     /// Set by the quit keybindings; the event loop exits when it is true.
-    pub should_quit: bool,
+    should_quit: bool,
     /// Set from the SIGHUP handler; the event loop polls it and reloads the
-    /// command configs when it flips to true.
-    pub reload_requested: Arc<AtomicBool>,
+    /// command configs when it flips to true. Handed out by
+    /// [`App::reload_trigger`].
+    reload_requested: Arc<AtomicBool>,
     /// Reloads command configs on request; reload is unavailable when unset.
-    pub config_loader: Option<ConfigLoader>,
+    config_loader: Option<ConfigLoader>,
     /// Why the most recent reload was rejected, in full: one entry per invalid
     /// source, naming it and what was wrong with it.
     ///
@@ -161,30 +190,30 @@ pub struct App {
     /// latest-only: a reload reports on the configuration as it is *now*, so a
     /// successful reload clears this, and a later failure replaces it rather
     /// than piling up a history of edits already fixed.
-    pub reload_diagnostics: Vec<String>,
+    reload_diagnostics: Vec<String>,
     /// Starts a replacement discovery session; refresh is unavailable when unset.
-    pub discovery_factory: Option<DiscoveryFactory>,
+    discovery_factory: Option<DiscoveryFactory>,
     /// Per-group action matches, parallel to `visible_groups`. Computed once
     /// per recompute so rendering and invocation share one result instead of
     /// re-running the matcher (regexes included) every frame.
-    pub group_matches: Vec<Vec<MatchResult>>,
+    pub(crate) group_matches: Vec<Vec<MatchResult>>,
     /// How many rows each top-panel tab lists, in [`GroupingMode::TABS`] order.
     /// Recomputed with the visible rows from the same filtered records, so a
     /// tab's count always matches the list it would show.
-    pub tab_counts: [usize; GroupingMode::TABS.len()],
-    pub ticks: u64,
+    pub(crate) tab_counts: [usize; GroupingMode::TABS.len()],
+    pub(crate) ticks: u64,
     /// Rows of the "group by command" view; populated only in that grouping mode.
-    pub command_groups: Vec<CommandGroup>,
+    pub(crate) command_groups: Vec<CommandGroup>,
     /// Cursor within the service picker opened from a command row.
-    pub service_picker_index: usize,
+    pub(crate) service_picker_index: usize,
     /// Top line shown in the help overlay (0 = unscrolled). Help is generated
     /// from the active bindings, so it can be taller than the popup; this is how
     /// far down it the reader has moved. Clamped against the content when it
     /// changes, and again by the renderer's window, so a resize cannot strand it
     /// past the end.
-    pub help_scroll: usize,
+    pub(crate) help_scroll: usize,
     /// Top line shown in the details pane (0 = unscrolled).
-    pub details_scroll: usize,
+    pub(crate) details_scroll: usize,
     /// Where this frame's panels are and what bounds they impose.
     ///
     /// Computed by [`App::update_layout`] from the terminal area and the
@@ -253,6 +282,44 @@ impl App {
     pub fn with_config_loader(mut self, loader: ConfigLoader) -> Self {
         self.config_loader = Some(loader);
         self
+    }
+
+    /// The flag whose flip asks the running app to reload its command configs.
+    ///
+    /// Handed out rather than installed: a signal handler is the caller's to
+    /// own — it is process-global, platform-specific, and on a non-unix build
+    /// there may be nothing to install. The app's side of the bargain is only
+    /// that it polls this between frames and reloads when it finds it set.
+    /// Setting it without a [`ConfigLoader`] attached is not an error; the app
+    /// reports that reload is unavailable.
+    pub fn reload_trigger(&self) -> Arc<AtomicBool> {
+        self.reload_requested.clone()
+    }
+
+    /// Report that `count` command config files were skipped as invalid while
+    /// loading, so the user is told at startup rather than left wondering why a
+    /// rule they wrote does nothing.
+    ///
+    /// Takes the count, not a message: the status line is this module's to word.
+    /// A count of zero says nothing, so the caller need not ask whether it has
+    /// anything to report.
+    pub fn note_skipped_configs(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        self.status = format!("skipped {count} command config file(s); details printed on exit");
+    }
+
+    /// Take the diagnostics of the most recent rejected reload, leaving none.
+    ///
+    /// Taking rather than borrowing is the point: these outlive the terminal.
+    /// The status line that announced the rejection dies with the TUI, so the
+    /// caller is expected to print them afterwards, and once taken they are the
+    /// caller's only copy. The policy is latest-only — a successful reload
+    /// clears them — so what comes back describes the configuration as it is
+    /// now, not a history of edits already fixed.
+    pub fn take_reload_diagnostics(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.reload_diagnostics)
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<Option<PreparedCommand>> {

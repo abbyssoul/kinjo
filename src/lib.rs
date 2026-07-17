@@ -166,20 +166,15 @@ fn run_invocation(
             Err(diagnostics) => ReloadOutcome::Rejected(diagnostics),
         }));
     #[cfg(unix)]
-    sighup::install(app.reload_requested.clone());
+    sighup::install(app.reload_trigger());
 
-    if !config_warnings.is_empty() {
-        app.status = format!(
-            "skipped {} command config file(s); details printed on exit",
-            config_warnings.len()
-        );
-    }
+    app.note_skipped_configs(config_warnings.len());
     let exec_action = ratatui::run(|terminal| app.run(terminal))?;
 
     // Take the diagnostics of the last rejected reload out before the app goes:
     // they are the only record of it, and the status line that announced it is
     // already gone with the terminal.
-    let reload_diagnostics = std::mem::take(&mut app.reload_diagnostics);
+    let reload_diagnostics = app.take_reload_diagnostics();
 
     // The app owns the discovery session; dropping it cancels and joins the
     // browse worker before a potential exec hand-off replaces the process.

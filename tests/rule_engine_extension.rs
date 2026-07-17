@@ -214,8 +214,14 @@ fn the_reload_path_accepts_a_foreign_engine() {
 }
 
 /// The whole composition path from ADR 0001: an extender builds an `App` around
-/// their own engine, attaches a reload loader that yields their engine too, and
-/// holds a runnable app — all through public API.
+/// their own engine, attaches both capabilities, wires a reload trigger, and
+/// collects what outlives the terminal — all through public API.
+///
+/// This is `kinjo::run` rewritten from outside the crate, and it is the test
+/// that keeps `App`'s public surface honest. Every operation an external
+/// composition root needs is exercised here, so if encapsulation ever privatises
+/// one away, this stops compiling rather than silently making the extension
+/// point unreachable.
 ///
 /// Needs a `DiscoverySession`, and the only session an external caller can
 /// start without touching the network is the sample backend, hence the feature
@@ -245,9 +251,27 @@ fn a_foreign_engine_composes_into_a_runnable_app() {
         .expect("the sample backend honours the default domain");
     let session = discovery::start(&options);
 
-    // Constructing is the assertion: `App::new` takes `impl RuleEngine`, so this
-    // compiles only while a foreign engine is substitutable. Running it would
-    // need a real terminal, which is what `scripts/drive-tui.sh` is for.
-    let _app = App::new(cli, fixture(), KeyBindings::default(), session)
+    // `App::new` takes `impl RuleEngine`, so this composes only while a foreign
+    // engine is substitutable.
+    let mut app = App::new(cli, fixture(), KeyBindings::default(), session)
+        .with_discovery_factory(Box::new(move || discovery::start(&options)))
         .with_config_loader(Box::new(|_cli| ReloadOutcome::Loaded(Box::new(fixture()))));
+
+    // An extender owns their own signal handling; the app only hands out the
+    // flag it polls.
+    let trigger = app.reload_trigger();
+    assert!(
+        !trigger.load(std::sync::atomic::Ordering::Relaxed),
+        "nothing has asked for a reload yet"
+    );
+
+    // Startup warnings are reported as a count; the app words the message.
+    app.note_skipped_configs(0);
+
+    // Nothing has been rejected, so there is nothing to print after the
+    // terminal goes.
+    assert!(app.take_reload_diagnostics().is_empty());
+
+    // Running would need a real terminal, which is what `scripts/drive-tui.sh`
+    // is for. Everything up to `app.run(terminal)` is covered here.
 }
