@@ -30,7 +30,11 @@ struct Input {
     service_type: String,
     domain: String,
     hostname: Option<String>,
-    port: Option<u16>,
+    /// Always present: property 3 renders `{port}` against this record, and a
+    /// record missing a named field is a rendering error rather than the
+    /// barrier this target is here to check. The value stays arbitrary because
+    /// it is rendered ahead of the terminator.
+    port: u16,
     txt_value: String,
     template: String,
 }
@@ -54,7 +58,7 @@ fuzz_target!(|input: Input| {
     );
     entry.hostname = input.hostname;
     entry.addresses = vec!["192.0.2.1".parse().unwrap()];
-    entry.port = input.port;
+    entry.port = Some(input.port);
     entry.txt.insert("v".to_string(), input.txt_value.clone());
 
     // 1. An arbitrary template compiles or reports an error, never panics.
