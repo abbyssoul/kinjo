@@ -1,0 +1,377 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Merged stable version without v (for example 0.3.0)"
+        required: true
+        type: string
+      publish:
+        description: "Publish after validation and protected-environment approval"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publication
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  preflight:
+    name: Validate release identity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      sha: ${{ steps.identity.outputs.sha }}
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact main candidate
+        id: identity
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release/check-version.sh main
+          scripts/release/check-version.sh stable "$VERSION"
+          scripts/release/check-version.sh manifest "$VERSION"
+          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [ "$GITHUB_SHA" != "$remote_sha" ]; then
+            echo "::error::main advanced from $GITHUB_SHA to $remote_sha; dispatch the new head"
+            exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag=v$VERSION"
+            echo "sha=$GITHUB_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+  rust-ci:
+    needs: preflight
+    uses: ./.github/workflows/ci-test.yml
+    with:
+      caller-run-id: ${{ github.run_id }}
+
+  audit:
+    needs: preflight
+    uses: ./.github/workflows/audit.yml
+    with:
+      caller-run-id: ${{ github.run_id }}
+
+  nix:
+    needs: preflight
+    uses: ./.github/workflows/nix.yml
+    with:
+      caller-run-id: ${{ github.run_id }}
+
+  workflow-lint:
+    needs: preflight
+    uses: ./.github/workflows/actionlint.yml
+    with:
+      caller-run-id: ${{ github.run_id }}
+
+  source-package:
+    name: Stage crate and SBOM
+    needs: [preflight, rust-ci, audit, nix, workflow-lint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up build environment
+        uses: ./.github/actions/setup
+
+      - name: Install pinned SBOM generator
+        uses: taiki-e/cache-cargo-install-action@417450f3c33ee20393705369577571770643d4c7 # v3
+        with:
+          tool: cargo-cyclonedx@0.5.9
+
+      - name: Package and verify the crate
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          scripts/release/check-version.sh manifest "$VERSION"
+          cargo package --locked --verbose
+          cargo publish --dry-run --locked --verbose
+          cargo cyclonedx --format json --target all --all-features
+          mv bom.json "kinjo-${VERSION}.cdx.json"
+          git archive --format=tar --prefix="kinjo-${VERSION}/" HEAD |
+            gzip -n > "kinjo-${VERSION}.tar.gz"
+          tar -tzf "kinjo-${VERSION}.tar.gz" | grep -Fx "kinjo-${VERSION}/Cargo.toml"
+          # upload-artifact roots an artifact at the least common ancestor of its
+          # paths, so the crate has to sit beside the other two or it would be
+          # stored under target/package/ and land in the wrong place on download.
+          mv "target/package/kinjo-${VERSION}.crate" .
+
+      - name: Upload staged source artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-source-${{ needs.preflight.outputs.version }}
+          path: |
+            kinjo-${{ needs.preflight.outputs.version }}.crate
+            kinjo-${{ needs.preflight.outputs.version }}.cdx.json
+            kinjo-${{ needs.preflight.outputs.version }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  debian:
+    needs: [preflight, rust-ci, audit, nix, workflow-lint]
+    uses: ./.github/workflows/release-deb.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+
+  macos:
+    needs: [preflight, rust-ci, audit, nix, workflow-lint]
+    uses: ./.github/workflows/release-macos.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+
+  stage:
+    name: Assemble and verify the candidate artifacts
+    needs: [preflight, source-package, debian, macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Download every staged artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-*-${{ needs.preflight.outputs.version }}
+          path: dist
+          merge-multiple: true
+
+      # Runs in both modes, so a dry run proves the naming contract the publisher
+      # depends on instead of failing after the release approval.
+      - name: Verify the staged artifact set
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: scripts/release/check-artifacts.sh dist "$VERSION"
+
+  dry-run-complete:
+    name: Release candidate is ready
+    if: ${{ !inputs.publish }}
+    needs: [preflight, stage]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - run: echo "v${{ needs.preflight.outputs.version }} passed the complete release candidate gate; nothing was published."
+
+  publish:
+    name: Publish approved release
+    if: ${{ inputs.publish }}
+    needs: [preflight, stage]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+
+    steps:
+      - name: Download the validated source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Download every staged artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-*-${{ needs.preflight.outputs.version }}
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums and validate staged names
+        working-directory: source
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: scripts/release/check-artifacts.sh ../dist "$VERSION"
+
+      - name: Create or verify the draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          metadata="$RUNNER_TEMP/release.json"
+          if ! gh release view "$TAG" --json isDraft,isPrerelease,name > "$metadata" 2>/dev/null; then
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::error::$TAG exists without a matching GitHub release"
+              exit 1
+            fi
+            gh release create "$TAG" --target "$SHA" --draft --generate-notes --title "$TAG"
+            gh release view "$TAG" --json isDraft,isPrerelease,name > "$metadata"
+          fi
+          state="$(jq -er .isDraft "$metadata")"
+          name="$(jq -er .name "$metadata")"
+          prerelease="$(jq -er .isPrerelease "$metadata")"
+          if [ "$name" != "$TAG" ] || [ "$prerelease" != false ]; then
+            echo "::error::$TAG has conflicting release metadata"
+            exit 1
+          fi
+          tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)"
+          if [ "$tag_sha" != "$SHA" ]; then
+            echo "::error::$TAG targets $tag_sha instead of $SHA"
+            exit 1
+          fi
+          echo "is-draft=$state" >> "$GITHUB_OUTPUT"
+
+      - name: Upload only new or byte-identical assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          mkdir -p existing-assets
+          while IFS= read -r name; do
+            test -f "dist/$name" || {
+              echo "::error::release contains unexpected asset $name"
+              exit 1
+            }
+          done < <(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for file in dist/*; do
+            name="${file##*/}"
+            if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              gh release download "$TAG" --pattern "$name" --dir existing-assets
+              cmp "$file" "existing-assets/$name" || {
+                echo "::error::published asset $name differs from the staged artifact"
+                exit 1
+              }
+            else
+              gh release upload "$TAG" "$file"
+            fi
+          done
+
+      - name: Attest build provenance
+        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Attest the CycloneDX SBOM
+        uses: actions/attest@36051bcae73b7c2a8a6945a48cbf80953c6baa35 # v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+          sbom-path: dist/kinjo-${{ needs.preflight.outputs.version }}.cdx.json
+
+      - name: Check whether crates.io already has this exact crate
+        id: crate-state
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          response="$RUNNER_TEMP/crates-version.json"
+          status="$(curl --proto '=https' --proto-redir '=https' -sSLo "$response" -w '%{http_code}' \
+            -H 'User-Agent: kinjo-release-workflow' \
+            "https://crates.io/api/v1/crates/kinjo/${VERSION}")"
+          case "$status" in
+            200)
+              published="$(jq -er '.version.checksum' "$response")"
+              staged="$(sha256sum "dist/kinjo-${VERSION}.crate" | cut -d' ' -f1)"
+              if [ "$published" != "$staged" ]; then
+                echo "::error::crates.io kinjo $VERSION has checksum $published, expected $staged"
+                exit 1
+              fi
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::crates.io returned HTTP $status"
+              cat "$response"
+              exit 1
+              ;;
+          esac
+
+      # A crates.io version is permanent, so the bytes cargo is about to upload
+      # have to be shown identical to the attested artifact before the upload,
+      # never after it.
+      - name: Reproduce the staged crate before publishing it
+        if: steps.crate-state.outputs.publish == 'true'
+        working-directory: source
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          cargo package --locked --no-verify --verbose
+          cmp "target/package/kinjo-${VERSION}.crate" "../dist/kinjo-${VERSION}.crate"
+
+      - name: Obtain a short-lived crates.io token
+        if: steps.crate-state.outputs.publish == 'true'
+        id: crates-auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+      - name: Publish crates.io
+        if: steps.crate-state.outputs.publish == 'true'
+        working-directory: source
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+        run: cargo publish --locked --no-verify --verbose
+
+      - name: Verify the immutable crates.io checksum
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          expected="$(sha256sum "dist/kinjo-${VERSION}.crate" | cut -d' ' -f1)"
+          for attempt in {1..12}; do
+            response="$RUNNER_TEMP/crates-version-${attempt}.json"
+            status="$(curl --proto '=https' --proto-redir '=https' -sSLo "$response" -w '%{http_code}' \
+              -H 'User-Agent: kinjo-release-workflow' \
+              "https://crates.io/api/v1/crates/kinjo/${VERSION}")"
+            if [ "$status" = 200 ]; then
+              actual="$(jq -er '.version.checksum' "$response")"
+              test "$actual" = "$expected" || {
+                echo "::error::crates.io checksum $actual does not match $expected"
+                exit 1
+              }
+              exit 0
+            fi
+            if [ "$status" != 404 ]; then
+              echo "::error::crates.io returned HTTP $status"
+              cat "$response"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::kinjo $VERSION did not become visible on crates.io"
+          exit 1
+
+      - name: Publish the immutable GitHub release
+        if: steps.draft.outputs.is-draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: gh release edit "$TAG" --draft=false --latest
+
+      - name: Verify the release is public
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false
+
+  homebrew:
+    name: Open validated Homebrew PR
+    if: ${{ inputs.publish }}
+    needs: [preflight, publish]
+    uses: ./.github/workflows/update-homebrew-tap.yml
+    with:
+      tag: ${{ needs.preflight.outputs.tag }}
+      sha: ${{ needs.preflight.outputs.sha }}

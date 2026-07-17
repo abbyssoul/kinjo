@@ -1,65 +1,81 @@
-name: Publish macOS binaries
-
-# Builds native tarballs for both Apple Silicon and Intel Macs, for a Homebrew
-# formula to point at. Cross-compiling x86_64-apple-darwin from the arm64
-# runner works out of the box: Apple's SDK/linker support both targets from
-# either host, so a single macOS runner builds both without extra toolchains.
+name: Build macOS release archives
 
 on:
-  release:
-    types: [created]
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
 
 permissions:
-  contents: write
-  actions: write # required for the `gh workflow run` dispatch below
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   macos:
-    runs-on: macos-latest
+    name: macOS package on ${{ matrix.arch }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            os: macos-15
+            target: aarch64-apple-darwin
+            file-arch: arm64
+          - arch: x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            file-arch: x86_64
 
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 #v2.9.1
-
-      - name: Add Rust targets
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-
-      - name: Build and package both targets
-        run: |
-          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
-          for target in aarch64-apple-darwin x86_64-apple-darwin; do
-            cargo build --release --locked --verbose --target "$target"
-            name="kinjo-${version}-${target}"
-            mkdir -p "$name/commands"
-            cp "target/${target}/release/kinjo" "$name/"
-            cp README.md LICENSE "$name/"
-            cp actions/*.toml "$name/commands/"
-            tar -czf "${name}.tar.gz" "$name"
-          done
-
-      - name: Upload packages to release
+      - name: Check candidate identity
         env:
-          GH_TOKEN: ${{ github.token }}
-        # github.event.release is only set for the `release` trigger; fall back
-        # to the checked-out ref when dispatched manually (see prepare-release.yml).
-        run: gh release upload "${{ github.event.release.tag_name || github.ref_name }}" kinjo-*.tar.gz --clobber
+          VERSION: ${{ inputs.version }}
+        run: scripts/release/check-version.sh manifest "$VERSION"
 
-      - name: Update the Homebrew tap
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Build, run, and package the native target
         env:
-          GH_TOKEN: ${{ github.token }}
-        # The tap workflow cannot listen for this run's completion itself:
-        # this workflow is dispatched with GITHUB_TOKEN, whose activity emits
-        # no workflow-triggering events, so dispatch the update explicitly now
-        # that the tarballs the formula hashes are uploaded. A run from a
-        # branch rather than a release tag has nothing to sync.
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
         run: |
-          tag="${{ github.event.release.tag_name || github.ref_name }}"
-          case "$tag" in
-            v*) gh workflow run update-homebrew-tap.yml --ref main -f tag="$tag" ;;
-            *)  echo "Not a release tag ($tag); skipping the tap update." ;;
-          esac
+          cargo build --release --locked --verbose --target "$TARGET"
+          binary="target/${TARGET}/release/kinjo"
+          "$binary" --version | grep -F "$VERSION"
+          file "$binary" | grep -F "${{ matrix.file-arch }}"
+
+          name="kinjo-${VERSION}-${TARGET}"
+          mkdir -p "$name/commands"
+          cp "$binary" "$name/"
+          cp README.md LICENSE "$name/"
+          cp actions/*.toml "$name/commands/"
+          timestamp="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M.%S HEAD)"
+          find "$name" -exec touch -h -t "$timestamp" {} +
+          COPYFILE_DISABLE=1 tar -cf "${name}.tar" "$name"
+          gzip -n "${name}.tar"
+          tar -tzf "${name}.tar.gz" > archive-contents.txt
+          grep -Fx "${name}/kinjo" archive-contents.txt
+          grep -Fx "${name}/README.md" archive-contents.txt
+          grep -Fx "${name}/LICENSE" archive-contents.txt
+          grep -Eq "^${name}/commands/[^/]+\.toml$" archive-contents.txt
+          mkdir smoke
+          tar -xzf "${name}.tar.gz" -C smoke
+          test -x "smoke/${name}/kinjo"
+          "smoke/${name}/kinjo" --version | grep -F "$VERSION"
+
+      - name: Upload staged macOS archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-macos-${{ matrix.arch }}-${{ inputs.version }}
+          path: kinjo-${{ inputs.version }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7

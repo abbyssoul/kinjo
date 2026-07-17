@@ -3,9 +3,8 @@ name: Lint workflows
 # Static checks for the workflow files themselves. The release workflows only
 # ever execute during a release, so nothing else in CI exercises them: a typo or
 # an unquoted variable there surfaces while a release is being cut. actionlint
-# validates workflow syntax and `${{ }}` expressions, and runs shellcheck over
-# the `run:` blocks (~160 lines of shell, mostly in prepare-release.yml and
-# update-homebrew-tap.yml).
+# validates workflow syntax and `${{ }}` expressions, and runs ShellCheck over
+# every embedded `run:` block, including the release and Homebrew state logic.
 #
 # Note actionlint types `github.event` as an untyped object, so it cannot catch
 # typos in paths like `github.event.pull_request.head.repo.full_name`.
@@ -13,30 +12,50 @@ name: Lint workflows
 on:
   push:
     branches: [ "main" ]
-    paths: [ ".github/workflows/**", ".github/actions/**" ]
+    paths: [ ".github/workflows/**", ".github/actions/**", "scripts/**" ]
   pull_request:
     branches: [ "main" ]
-    paths: [ ".github/workflows/**", ".github/actions/**" ]
+    paths: [ ".github/workflows/**", ".github/actions/**", "scripts/**" ]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      caller-run-id:
+        description: >
+          Run ID of the calling workflow. `github.event_name` cannot be used to
+          detect a called run: inside a called workflow the github context is the
+          caller's, so it is never 'workflow_call'.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: actionlint-${{ inputs.caller-run-id || github.ref }}
+  cancel-in-progress: ${{ !inputs.caller-run-id }}
 
 jobs:
   actionlint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       # actionlint locates the project root by looking for `.git`, so the
       # checkout has to be in place before the linter runs.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Check and test repository shell helpers
+        run: |
+          shellcheck -x scripts/*.sh scripts/release/*.sh
+          scripts/release/test-version.sh
+          scripts/release/test-homebrew-formula.sh
+          scripts/release/test-artifacts.sh
 
       # Upstream's own image, pinned by digest (v1.7.12); it bundles the
       # shellcheck binary that actionlint shells out to.
       - name: Run actionlint
-        uses: docker://rhysd/actionlint@sha256:9d36088643581e728c969f35141f88139fec77280b2be23c1f66f8e40e1025e7
+        uses: docker://rhysd/actionlint@sha256:9d36088643581e728c969f35141f88139fec77280b2be23c1f66f8e40e1025e7 # v1.7.12
         with:
           args: -color

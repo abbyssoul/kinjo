@@ -17,7 +17,8 @@ concurrency:
 jobs:
   analyze:
     name: Analyze Code
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       actions: read
       contents: read
@@ -25,16 +26,17 @@ jobs:
 
     steps:
     - name: Checkout Repository
-      uses: actions/checkout@v7
-
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      with:
+        persist-credentials: false
     - name: Initialize CodeQL
-      uses: github/codeql-action/init@v4
+      uses: github/codeql-action/init@eec0bff2f6c15bf3f1e8a0152f94d17664a06a06 # v4
       with:
         languages: rust
         # Options: 'none' (interpreted, or some compiled), 'autobuild', 'manual'
         build-mode: 'none'
 
     - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v4
+      uses: github/codeql-action/analyze@eec0bff2f6c15bf3f1e8a0152f94d17664a06a06 # v4
       with:
         category: "/language:rust"

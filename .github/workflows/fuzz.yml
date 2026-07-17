@@ -12,7 +12,9 @@ on:
     inputs:
       seconds:
         description: "Seconds to run each fuzz target"
-        default: "300"
+        required: true
+        default: 300
+        type: number
 
 permissions:
   contents: read
@@ -26,12 +28,19 @@ env:
 
 jobs:
   fuzz:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-07-01
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Install nightly toolchain
-        uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: nightly-2026-07-01
 
       - name: Set up build environment
         uses: ./.github/actions/setup
@@ -39,15 +48,15 @@ jobs:
           cache-workspaces: fuzz
 
       - name: Install cargo-fuzz
-        uses: taiki-e/cache-cargo-install-action@417450f3c33ee20393705369577571770643d4c7
+        uses: taiki-e/cache-cargo-install-action@417450f3c33ee20393705369577571770643d4c7 # v3
         with:
-          tool: cargo-fuzz
+          tool: cargo-fuzz@0.13.2
 
       # Restore the newest corpus from earlier runs and save this run's
       # additions under a fresh key, so coverage accumulates across runs
       # instead of restarting from the seed inputs every time.
       - name: Restore accumulated corpus
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: fuzz/corpus
           key: fuzz-corpus-${{ github.run_id }}
@@ -55,10 +64,19 @@ jobs:
 
       - name: Pick duration
         id: dur
+        env:
+          REQUESTED_SECONDS: ${{ inputs.seconds }}
         run: |
           case "${{ github.event_name }}" in
             schedule)         echo "seconds=600" >> "$GITHUB_OUTPUT" ;;
-            workflow_dispatch) echo "seconds=${{ github.event.inputs.seconds }}" >> "$GITHUB_OUTPUT" ;;
+            workflow_dispatch)
+              if [[ ! "$REQUESTED_SECONDS" =~ ^[0-9]+$ ]] ||
+                 (( REQUESTED_SECONDS < 1 || REQUESTED_SECONDS > 900 )); then
+                echo "::error::seconds must be an integer from 1 to 900"
+                exit 1
+              fi
+              echo "seconds=$REQUESTED_SECONDS" >> "$GITHUB_OUTPUT"
+              ;;
             *)                echo "seconds=60"  >> "$GITHUB_OUTPUT" ;;
           esac
 
@@ -67,7 +85,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts/

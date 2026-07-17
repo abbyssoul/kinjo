@@ -32,27 +32,35 @@ jobs:
       github.actor != 'dependabot[bot]' &&
       (github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0  # full history improves blame and new-code detection
+          persist-credentials: false
 
       - name: Set up build environment
         uses: ./.github/actions/setup
+        with:
+          install-avahi: true
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145
+        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.8.7
 
       - name: Generate test coverage
         run: |
-          rustup component add llvm-tools
-          cargo llvm-cov --locked --lcov --output-path lcov.info
+          rustup component add llvm-tools-preview
+          cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
 
       - name: Analyze with SonarCloud
-        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e #v8.2.0
+        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e # v8.2.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >-
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=300
