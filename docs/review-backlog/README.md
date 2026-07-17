@@ -47,7 +47,7 @@ Status values:
 | 012 | P0 | done | [Safe terminal rendering](tasks/012-safe-terminal-rendering.md) | — | 010, 011, 013, 014, 020 |
 | 013 | P1 | done | [Keybindings and search consistency](tasks/013-keybindings-and-search-consistency.md) | — | 011, 012, 014 |
 | 014 | P2 | done | [Selection, filter, and layout state](tasks/014-selection-filter-and-layout-state.md) | 010 | 008, 011, 012, 013, 015, 021 |
-| 015 | P2 | ready | [App encapsulation](tasks/015-app-encapsulation.md) | 001–014, 016–021 | all prior tasks; run last |
+| 015 | P2 | done | [App encapsulation](tasks/015-app-encapsulation.md) | 001–014, 016–021 | all prior tasks; run last |
 | 016 | P0 | done | [Remove implicit fake fallback](tasks/016-remove-implicit-fake-fallback.md) | — | 002 |
 | 017 | P2 | done | [Fake backend heterogeneous SSH row](tasks/017-fake-backend-heterogeneous-ssh-row.md) | 006 | — |
 | 018 | P2 | done | [TUI smoke test in CI](tasks/018-tui-smoke-test-in-ci.md) | 017, 019 | 015 |
@@ -166,11 +166,20 @@ carries are in
 The backlog now reflects that:
 
 - **015** keeps the App encapsulation work, which never depended on the seam
-  question, and is the larger half. It is unchanged in substance, and is now the
-  only task left.
+  question, and is the larger half. It is **done**.
 - **022** is new and **done**: the retained seam had to be *implementable* by
   someone who is not `Matcher`, which the forwarding trait was not. Deletion
   would have discarded that work; keeping the seam created it.
+
+**The backlog is complete.** Task 015 shipped App's state behind six operations
+and merged the `visible_groups`/`group_matches` parallel pair into `BrowseRow`,
+but deliberately did *not* do its render-view projection or its `BrowseModel`
+extraction: with state private and rows atomic, both would have relisted the
+same fields behind more machinery, which 015's own constraints warned against.
+[ADR 0002](../adr/0002-render-reads-the-app-directly.md) records that with owner
+sign-off. The test it applied is worth carrying forward: `BrowseRow` earned its
+place by deleting real hedges against a desync that could happen; the other two
+removed no way of being wrong.
 
 Implementing 022 turned up an error in ADR 0001 and its source. The ADR argued
 that `RuleEngine` mirrored a `Discovery` trait seam, echoing `README.md`'s claim

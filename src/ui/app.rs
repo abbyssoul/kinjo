@@ -313,6 +313,22 @@ impl App {
         self.reload_requested.clone()
     }
 
+    /// Take `records` as though discovery had produced them, and settle into
+    /// the state that follows.
+    ///
+    /// Test-only, and shared with [`super::render`]'s tests because they need an
+    /// app that is *showing* something. It goes through the same recompute the
+    /// event loop uses, so a test arranged this way sees the projection the
+    /// running app would build — filtering, grouping, matching and selection
+    /// included — rather than one the test assembled itself and could get wrong.
+    #[cfg(test)]
+    pub(crate) fn showing(&mut self, records: &[Entry]) {
+        for record in records {
+            self.records.insert(record.id(), record.clone());
+        }
+        self.recompute_visible();
+    }
+
     /// Report that `count` command config files were skipped as invalid while
     /// loading, so the user is told at startup rather than left wondering why a
     /// rule they wrote does nothing.
@@ -1620,10 +1636,7 @@ mode = "execute"
             KeyBindings::default(),
             DiscoverySession::inert(),
         );
-        for record in records {
-            app.records.insert(record.id(), record);
-        }
-        app.recompute_visible();
+        app.showing(&records);
         app
     }
 

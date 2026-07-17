@@ -212,3 +212,6 @@ code. Recorded so far:
 
 - [ADR 0001](../adr/0001-rule-engine-is-a-supported-extension-point.md): keep
   `plumber::RuleEngine` as a supported extension point (2026-07-17).
+- [ADR 0002](../adr/0002-render-reads-the-app-directly.md): render keeps `&App`;
+  the app/render boundary is field visibility, not a projected view
+  (2026-07-17).

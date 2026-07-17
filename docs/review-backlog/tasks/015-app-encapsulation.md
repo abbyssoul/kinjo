@@ -4,12 +4,12 @@ Shared context: [`CONTEXT.md`](../CONTEXT.md).
 
 | Field | Value |
 |---|---|
-| Status | `ready` |
+| Status | `done` |
 | Priority | `P2` |
 | Workstream | Architecture |
 | Depends on | 001–014, 016–021 |
 | Likely conflicts | all prior tasks; run last |
-| Owner | Unclaimed |
+| Owner | Claude (branch `task-015-app-encapsulation`) |
 
 ## Scope Change (2026-07-17)
 
@@ -116,16 +116,20 @@ authority.
 
 ## Acceptance Criteria / Definition of Done
 
-- [ ] App's implementation state is private and mutated through meaningful
+- [x] App's implementation state is private and mutated through meaningful
       operations; each surviving public item documents why it is public.
-- [ ] Browse-model invariants have one owner and are tested through its interface.
-- [ ] Render consumes immutable view/layout data, not the entire mutable App state.
-- [ ] Parallel representation consistency is construction-atomic or eliminated.
-- [ ] The ADR 0001 extension path still compiles: an `App` can be constructed and
+- [x] Browse-model invariants have one owner and are tested through its interface.
+      `BrowseRow` owns the group/matches invariant. The wider `BrowseModel`
+      extraction was **not** done — see ADR 0002 and Deviations below.
+- [~] Render consumes immutable view/layout data, not the entire mutable App
+      state. Immutable: yes, since task 014 (`&App`). A projected view: **no**,
+      by decision — see [ADR 0002](../../adr/0002-render-reads-the-app-directly.md).
+- [x] Parallel representation consistency is construction-atomic or eliminated.
+- [x] The ADR 0001 extension path still compiles: an `App` can be constructed and
       run from outside `src/lib.rs` without touching private state.
-- [ ] README/crate docs describe the actual App interface.
-- [ ] No behavior regression in tasks 001–014 and 016–021.
-- [ ] Full validation and relevant fuzz smoke targets pass.
+- [x] README/crate docs describe the actual App interface.
+- [x] No behavior regression in tasks 001–014 and 016–021.
+- [x] Full validation and relevant fuzz smoke targets pass.
 
 ## Required Tests
 
@@ -158,8 +162,76 @@ scripts/drive-tui.sh run 'Tab Tab Down Down Down Enter'
 
 ## Completion Record
 
-- **Implemented:**
-- **Tests added/updated:**
-- **Documentation updated:**
+- **Implemented:** in two commits.
+  - `f71d2c8` — App's state is private behind six operations. The inventory
+    found the real public surface was three fields, all in `src/lib.rs`, so
+    three operations replaced them: `reload_trigger()` (hands out the flag it
+    polls; a signal handler is the caller's to own), `note_skipped_configs(n)`
+    (takes a count, not a message — the status line is the app's to word, and
+    zero says nothing), and `take_reload_diagnostics()` (takes rather than
+    borrows; these outlive the terminal and the caller gets the only copy). With
+    `new`, the two `with_*` builders and `run`, that is the whole public
+    interface: six operations, no fields. Everything else is `pub(crate)` for
+    `ui::render` or private.
+  - `eb88766` — `visible_groups` + `group_matches` became one `rows:
+    Vec<BrowseRow>`. Their index correspondence was a claim only a comment made:
+    render hedged with `group_matches.get(i).map(Vec::len).unwrap_or(0)`, so a
+    desynced row would have rendered "no actions" rather than failing;
+    `invoke_selected` did two lookups at one index; `resolve_anchor` went
+    `.position()` then `.get()` purely to cross vectors; and render's tests set
+    `group_matches = vec![Vec::new()]` beside a `visible_groups` of unrelated
+    length, and compiled. All of that is gone.
+- **Tests added/updated:** no behavioural test changed — the app's tests share
+  its module and reach its internals as before, which is the private internal
+  seam `CONTEXT.md` permits. `tests/rule_engine_extension.rs` grew
+  `a_foreign_engine_composes_into_a_runnable_app` into a full external
+  composition root, so the ADR 0001 path is compile-checked against
+  encapsulation. Added `App::showing()` (`#[cfg(test)] pub(crate)`, following
+  `DiscoverySession::inert()`'s precedent) so `ui::app` and `ui::render` tests
+  arrange state through the real recompute instead of assembling projections by
+  hand.
+- **Documentation updated:** [ADR 0002](../../adr/0002-render-reads-the-app-directly.md)
+  (new), `README.md` (App's interface), `CONTEXT.md` ADR index, `App`'s own
+  interface docs.
 - **Validation evidence:**
+
+  ```text
+  cargo fmt -- --check                                        pass
+  cargo clippy --locked --all-targets --all-features -- -D warnings
+                                                              pass
+  cargo test --locked --all-targets            410 lib + 6 integration
+  cargo test --locked --all-targets --all-features
+                                               436 lib + 7 integration
+  ```
+
+  Counts unchanged from baseline throughout: this is a refactor and nothing it
+  touched was supposed to move. Drove the TUI at 100×30 on `--backend fake` with
+  a two-rule config dir (the sample backend ships no commands, so the command
+  view and the action lists are dead without one): per-row match counts are each
+  row's own — `_ipp._tcp` shows `·`, `_https._tcp` shows `★1` via the
+  `contains "http"` rule — the details pane's `actions (1)` renders from the
+  selected row, and the group-by-command tab and its service picker still work.
+- **Deviations:** two structural requirements were deliberately not implemented,
+  both recorded in [ADR 0002](../../adr/0002-render-reads-the-app-directly.md)
+  with owner sign-off.
+  - *Render view projection.* Task 014 had already made render immutable
+    (`&App`), and privatisation made 7 fields invisible to it. Of the 21 left,
+    20 are read by production render. A view struct would relist those 20 behind
+    a copy step and a second type to keep in sync — the same interface, more
+    machinery — which this task's own constraints warn against ("avoid a
+    monolithic replacement with an equally broad interface"). Field visibility
+    is already a compiler-checked statement of what render depends on.
+  - *`BrowseModel` extraction.* With state private and rows atomic, moving
+    `records`/`filter`/`rows`/`selected` behind a new type is code motion
+    without new leverage.
+
+  The contrast with `BrowseRow`, which *was* built, is the reasoning: that
+  abstraction deleted concrete hedges against a desync that could really happen.
+  These two remove no way of being wrong.
 - **Follow-ups:**
+  - `records` is `pub(crate)` although production render never reads it, purely
+    so render's tests can arrange the state render displays. Recorded in ADR
+    0002 as accepted overshoot rather than left unstated.
+  - If `App` grows state render must not see, or its browse invariants start
+    being reconstructed in more than one place, ADR 0002 names that as the
+    evidence to revisit either decision.

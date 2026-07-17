@@ -324,7 +324,13 @@ reused independently:
 3. **UI** (`src/ui/`) — ties discovery and the rules engine together for a person
    at the terminal: CLI parsing, config and keymap loading, the application
    state machine, and rendering. It depends on the other two; they do not depend
-   on it.
+   on it. `App` is the event loop and the state it decides from; its interface is
+   six operations — build it, attach a discovery factory and a config loader,
+   hand out its reload trigger, run it, and take any reload diagnostics that
+   outlived the terminal. Its state is not public. Rendering is a pure function
+   of it (`&App` in, a frame out), and the app/render boundary is field
+   visibility rather than a projected view — see
+   [ADR 0002](docs/adr/0002-render-reads-the-app-directly.md).
 
 The dependency flow is one-directional — `discovery ← plumber ← ui` — wired
 together by `run` in `src/lib.rs`, which the `kinjo` binary is a thin wrapper

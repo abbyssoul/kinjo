@@ -2228,24 +2228,21 @@ mod tests {
     }
 
     /// An app showing `records` under `mode`, as a render pass would see it.
+    ///
+    /// Arranged through the app's own recompute rather than by assigning rows
+    /// here, so what these tests render is what the running app would build.
+    /// `test_app`'s engine has no rules, so every row comes back unmatched.
     fn browsing(mode: GroupingMode, records: &[Entry]) -> App {
         let mut app = test_app("local");
         app.filter.grouping = mode;
-        for record in records {
-            app.records.insert(record.id(), record.clone());
-        }
-        app.filter.observe_types(records);
-        app.rows = rows_without_matches(&browse_groups(
-            records,
-            mode.browse_mode().expect("a browse mode"),
-        ));
+        app.showing(records);
         app
     }
 
-    /// Browse rows for tests that are about how a group *renders*, not about
-    /// which rules match it. Building the rows here rather than assigning two
-    /// vectors is what keeps a row's matches its own: there is no length to get
-    /// wrong.
+    /// Browse rows for a test that needs a row the *filter would not show*, and
+    /// so cannot arrange itself through a recompute. Building the row rather
+    /// than assigning two vectors is what keeps its matches its own: there is no
+    /// length to get wrong.
     fn rows_without_matches(groups: &[EntryGroup]) -> Vec<BrowseRow> {
         groups
             .iter()
