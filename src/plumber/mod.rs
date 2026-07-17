@@ -535,7 +535,7 @@ pub use exec::{PreparedCommand, Requirement};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{remove, temp_dir};
+    use crate::test_support::{absolute, remove, temp_dir};
     use std::{
         ffi::OsString,
         fs,
@@ -2318,11 +2318,11 @@ mode = "execute"
 
     #[test]
     fn config_dirs_from_orders_system_user_then_extras() {
-        let extra = PathBuf::from("/tmp/extra");
+        let extra = absolute("/tmp/extra");
         let dirs = config_dirs_from(
             None,
-            Some(OsString::from("/xdg")),
-            Some(OsString::from("/home/user")),
+            Some(absolute("/xdg").into_os_string()),
+            Some(absolute("/home/user").into_os_string()),
             std::slice::from_ref(&extra),
         );
 
@@ -2330,7 +2330,7 @@ mode = "execute"
             dirs,
             vec![
                 PathBuf::from(SYSTEM_CONFIG_DIR),
-                PathBuf::from("/xdg/kinjo/commands"),
+                absolute("/xdg/kinjo/commands"),
                 extra,
             ]
         );
@@ -2338,13 +2338,18 @@ mode = "execute"
 
     #[test]
     fn config_dirs_from_uses_home_when_xdg_is_absent() {
-        let dirs = config_dirs_from(None, None, Some(OsString::from("/home/user")), &[]);
+        let dirs = config_dirs_from(
+            None,
+            None,
+            Some(absolute("/home/user").into_os_string()),
+            &[],
+        );
 
         assert_eq!(
             dirs,
             vec![
                 PathBuf::from(SYSTEM_CONFIG_DIR),
-                PathBuf::from("/home/user/.config/kinjo/commands"),
+                absolute("/home/user/.config/kinjo/commands"),
             ]
         );
     }
@@ -2361,14 +2366,14 @@ mode = "execute"
         let dirs = config_dirs_from(
             None,
             Some(OsString::from("relative")),
-            Some(OsString::from("/home/user")),
+            Some(absolute("/home/user").into_os_string()),
             &[],
         );
         assert_eq!(
             dirs,
             vec![
                 PathBuf::from(SYSTEM_CONFIG_DIR),
-                PathBuf::from("/home/user/.config/kinjo/commands"),
+                absolute("/home/user/.config/kinjo/commands"),
             ]
         );
 
@@ -2384,8 +2389,8 @@ mode = "execute"
     #[test]
     fn config_dirs_from_puts_install_dirs_below_system_and_user() {
         let dirs = config_dirs_from(
-            Some(PathBuf::from("/opt/homebrew/bin/kinjo")),
-            Some(OsString::from("/xdg")),
+            Some(absolute("/opt/homebrew/bin/kinjo")),
+            Some(absolute("/xdg").into_os_string()),
             None,
             &[],
         );
@@ -2393,10 +2398,10 @@ mode = "execute"
         assert_eq!(
             dirs,
             vec![
-                PathBuf::from("/opt/homebrew/bin/commands"),
-                PathBuf::from("/opt/homebrew/share/kinjo/commands"),
+                absolute("/opt/homebrew/bin/commands"),
+                absolute("/opt/homebrew/share/kinjo/commands"),
                 PathBuf::from(SYSTEM_CONFIG_DIR),
-                PathBuf::from("/xdg/kinjo/commands"),
+                absolute("/xdg/kinjo/commands"),
             ]
         );
     }

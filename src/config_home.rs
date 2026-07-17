@@ -25,27 +25,31 @@ fn valid_absolute(value: Option<OsString>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::absolute;
 
     #[test]
     fn xdg_wins_and_home_is_the_fallback() {
         assert_eq!(
             kinjo_config_dir(
-                Some(OsString::from("/xdg")),
-                Some(OsString::from("/home/user"))
+                Some(absolute("/xdg").into_os_string()),
+                Some(absolute("/home/user").into_os_string())
             ),
-            Some(PathBuf::from("/xdg/kinjo"))
+            Some(absolute("/xdg/kinjo"))
         );
         assert_eq!(
-            kinjo_config_dir(None, Some(OsString::from("/home/user"))),
-            Some(PathBuf::from("/home/user/.config/kinjo"))
+            kinjo_config_dir(None, Some(absolute("/home/user").into_os_string())),
+            Some(absolute("/home/user/.config/kinjo"))
         );
     }
 
     #[test]
     fn empty_and_relative_values_are_ignored() {
         assert_eq!(
-            kinjo_config_dir(Some(OsString::new()), Some(OsString::from("/home/user"))),
-            Some(PathBuf::from("/home/user/.config/kinjo"))
+            kinjo_config_dir(
+                Some(OsString::new()),
+                Some(absolute("/home/user").into_os_string())
+            ),
+            Some(absolute("/home/user/.config/kinjo"))
         );
         assert_eq!(
             kinjo_config_dir(

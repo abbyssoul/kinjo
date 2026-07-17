@@ -36,6 +36,19 @@ pub fn temp_file(tag: &str, contents: &str) -> PathBuf {
     path
 }
 
+/// Turn a POSIX-style path literal into one the host agrees is absolute.
+///
+/// Windows only counts a path as absolute once it names a volume, so a bare
+/// `/xdg` is relative there. Tests that pin how absolute config homes are
+/// handled would silently exercise the rejection branch instead.
+pub fn absolute(path: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(format!("C:{path}"))
+    } else {
+        PathBuf::from(path)
+    }
+}
+
 /// Best-effort cleanup of a path created by [`temp_dir`] or [`temp_file`].
 /// Tolerates either a file or a directory so callers need not track which.
 pub fn remove(path: &std::path::Path) {

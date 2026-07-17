@@ -479,7 +479,7 @@ fn config_paths(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{remove, temp_file};
+    use crate::test_support::{absolute, remove, temp_file};
     use std::ffi::OsString;
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1148,20 +1148,20 @@ toggle = ["enter"]
     #[test]
     fn config_paths_prefer_xdg_config_home_over_home() {
         let paths = config_paths(
-            Some(OsString::from("/xdg")),
-            Some(OsString::from("/home/user")),
+            Some(absolute("/xdg").into_os_string()),
+            Some(absolute("/home/user").into_os_string()),
         );
 
-        assert_eq!(paths, vec![PathBuf::from("/xdg/kinjo/keybindings.toml")]);
+        assert_eq!(paths, vec![absolute("/xdg/kinjo/keybindings.toml")]);
     }
 
     #[test]
     fn config_paths_fall_back_to_dot_config_under_home() {
-        let paths = config_paths(None, Some(OsString::from("/home/user")));
+        let paths = config_paths(None, Some(absolute("/home/user").into_os_string()));
 
         assert_eq!(
             paths,
-            vec![PathBuf::from("/home/user/.config/kinjo/keybindings.toml")]
+            vec![absolute("/home/user/.config/kinjo/keybindings.toml")]
         );
     }
 
@@ -1173,8 +1173,11 @@ toggle = ["enter"]
     #[test]
     fn config_paths_ignore_empty_and_relative_environment_values() {
         assert_eq!(
-            config_paths(Some(OsString::new()), Some(OsString::from("/home/user"))),
-            vec![PathBuf::from("/home/user/.config/kinjo/keybindings.toml")]
+            config_paths(
+                Some(OsString::new()),
+                Some(absolute("/home/user").into_os_string())
+            ),
+            vec![absolute("/home/user/.config/kinjo/keybindings.toml")]
         );
         assert!(
             config_paths(
