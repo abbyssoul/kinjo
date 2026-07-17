@@ -296,7 +296,7 @@ fn session_lines(app: &App) -> Vec<Line<'static>> {
 
 // ── service list ─────────────────────────────────────────────────────────
 fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let total = app.visible_groups.len();
+    let total = app.rows.len();
 
     let empty = if app.filter.is_active() {
         vec![
@@ -342,9 +342,9 @@ fn render_services(frame: &mut Frame<'_>, app: &App, area: Rect) {
         },
         |index| {
             service_row(
-                &app.visible_groups[index],
+                &app.rows[index].group,
                 index == app.selected,
-                app.group_matches.get(index).map(Vec::len).unwrap_or(0),
+                app.rows[index].matches.len(),
             )
         },
     );
@@ -486,7 +486,8 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
 /// The details of the selected browse row, or `None` when nothing is selected.
 /// Pure: a function of the app's rows and matches, with no geometry in it.
 fn detail_rows(app: &App) -> Option<Vec<Row<'static>>> {
-    let group = app.visible_groups.get(app.selected)?;
+    let row = app.rows.get(app.selected)?;
+    let group = &row.group;
 
     // header — name spans the value column, dot sits in the label column
     let mut rows: Vec<Row> = vec![Row::new(vec![
@@ -513,13 +514,7 @@ fn detail_rows(app: &App) -> Option<Vec<Row<'static>>> {
     }
 
     rows.push(blank_row());
-    push_action_rows(
-        &mut rows,
-        app.group_matches
-            .get(app.selected)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]),
-    );
+    push_action_rows(&mut rows, &row.matches);
 
     Some(rows)
 }
@@ -1733,7 +1728,7 @@ mod tests {
         plumber::{ActionMode, CommandAction, CommandConfig, Matcher},
         test_support::{remove, temp_file},
         ui::{
-            app::App,
+            app::{App, BrowseRow},
             cli::{Cli, CliCommand},
             filter::fuzzy_match,
             keymap::KeyBindings,
@@ -2178,8 +2173,8 @@ mod tests {
         app.mode = AppMode::Search;
         app.filter.text_query = "query\t\u{7f}".to_string();
         app.filter.observe_types(std::slice::from_ref(&entry));
-        app.visible_groups = browse_groups(&[entry.clone()], BrowseMode::LogicalService);
-        app.group_matches = vec![Vec::new()];
+        app.rows =
+            rows_without_matches(&browse_groups(&[entry.clone()], BrowseMode::LogicalService));
         app.records.insert(entry.id(), entry.clone());
 
         let buffer = render_buffer(&mut app, 180, 36);
@@ -2240,9 +2235,25 @@ mod tests {
             app.records.insert(record.id(), record.clone());
         }
         app.filter.observe_types(records);
-        app.visible_groups = browse_groups(records, mode.browse_mode().expect("a browse mode"));
-        app.group_matches = vec![Vec::new(); app.visible_groups.len()];
+        app.rows = rows_without_matches(&browse_groups(
+            records,
+            mode.browse_mode().expect("a browse mode"),
+        ));
         app
+    }
+
+    /// Browse rows for tests that are about how a group *renders*, not about
+    /// which rules match it. Building the rows here rather than assigning two
+    /// vectors is what keeps a row's matches its own: there is no length to get
+    /// wrong.
+    fn rows_without_matches(groups: &[EntryGroup]) -> Vec<BrowseRow> {
+        groups
+            .iter()
+            .map(|group| BrowseRow {
+                group: group.clone(),
+                matches: Vec::new(),
+            })
+            .collect()
     }
 
     #[test]
@@ -2322,7 +2333,7 @@ mod tests {
         let wireless = wireless.with_occurrence(Some(OccurrenceId(NonZeroU32::new(2).unwrap())));
 
         let mut app = browsing(GroupingMode::LogicalService, &[wired, wireless]);
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
 
         let rendered = buffer_text(&render_buffer(&mut app, 180, 36));
 

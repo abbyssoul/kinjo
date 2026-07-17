@@ -70,6 +70,25 @@ pub struct CommandGroup {
     pub services: Vec<EntryGroup>,
 }
 
+/// One row of a browse projection: a group of discovered entries, and the rules
+/// that match it.
+///
+/// The two travel together because they are decided together — the matches are
+/// what the engine said about *this* group, from the same records, in the same
+/// recompute — and neither is much use alone. They used to be two vectors kept
+/// parallel by index, which is a correspondence a comment can assert and the
+/// compiler cannot: rendering hedged with `group_matches.get(i)` against a
+/// desync it could not rule out, and a test could set one without the other and
+/// still compile. Making the row the unit removes the question.
+#[derive(Debug, Clone)]
+pub(crate) struct BrowseRow {
+    pub(crate) group: EntryGroup,
+    /// The rules matching `group`, computed once per recompute so rendering and
+    /// invocation share one result instead of re-running the engine (regexes
+    /// included) every frame.
+    pub(crate) matches: Vec<MatchResult>,
+}
+
 /// What an open picker was opened from, as an identity rather than as the data
 /// it listed.
 ///
@@ -157,7 +176,10 @@ pub struct App {
     pub(crate) session: DiscoverySession,
     pub(crate) records: BTreeMap<EntryId, Entry>,
     pub(crate) filter: FilterState,
-    pub(crate) visible_groups: Vec<EntryGroup>,
+    /// The rows of the active browse projection, each carrying its own matches.
+    /// Empty in the command grouping mode, which projects rules instead and
+    /// builds [`Self::command_groups`].
+    pub(crate) rows: Vec<BrowseRow>,
     pub(crate) selected: usize,
     pub(crate) mode: AppMode,
     pub(crate) type_filter_index: usize,
@@ -193,10 +215,6 @@ pub struct App {
     reload_diagnostics: Vec<String>,
     /// Starts a replacement discovery session; refresh is unavailable when unset.
     discovery_factory: Option<DiscoveryFactory>,
-    /// Per-group action matches, parallel to `visible_groups`. Computed once
-    /// per recompute so rendering and invocation share one result instead of
-    /// re-running the matcher (regexes included) every frame.
-    pub(crate) group_matches: Vec<Vec<MatchResult>>,
     /// How many rows each top-panel tab lists, in [`GroupingMode::TABS`] order.
     /// Recomputed with the visible rows from the same filtered records, so a
     /// tab's count always matches the list it would show.
@@ -242,7 +260,7 @@ impl App {
             session,
             records: BTreeMap::new(),
             filter: FilterState::default(),
-            visible_groups: Vec::new(),
+            rows: Vec::new(),
             selected: 0,
             mode: AppMode::Browse,
             type_filter_index: 0,
@@ -257,7 +275,6 @@ impl App {
             config_loader: None,
             reload_diagnostics: Vec::new(),
             discovery_factory: None,
-            group_matches: Vec::new(),
             tab_counts: [0; GroupingMode::TABS.len()],
             ticks: 0,
             command_groups: Vec::new(),
@@ -481,25 +498,26 @@ impl App {
 
         self.command_groups = Vec::new();
         let previous = self
-            .visible_groups
+            .rows
             .get(self.selected)
-            .map(|group| group.id().clone());
-        self.visible_groups = browse_groups(&filtered, browse);
-        self.group_matches = self
-            .visible_groups
-            .iter()
-            .map(|group| self.matcher.matches_group(group))
+            .map(|row| row.group.id().clone());
+        // Each row is matched as it is built, so a row cannot exist without the
+        // matches that belong to it.
+        self.rows = browse_groups(&filtered, browse)
+            .into_iter()
+            .map(|group| BrowseRow {
+                matches: self.matcher.matches_group(&group),
+                group,
+            })
             .collect();
         // Structured row identity, not the list position: the cursor stays on
         // the row the user chose even when rows appear, vanish, or re-sort.
-        match find_selection(&self.visible_groups, previous.clone(), |group| {
-            group.id().clone()
-        }) {
+        match find_selection(&self.rows, previous.clone(), |row| row.group.id().clone()) {
             Some(index) => self.selected = index,
             None => self.clamp_selection(),
         }
         self.refocus_details(previous, |app| {
-            app.visible_groups.get(app.selected).map(|g| g.id().clone())
+            app.rows.get(app.selected).map(|row| row.group.id().clone())
         });
         self.reconcile_action_pickers();
     }
@@ -533,11 +551,10 @@ impl App {
     fn resolve_anchor(&self, anchor: &PickerAnchor) -> Vec<MatchResult> {
         match anchor {
             PickerAnchor::Row(id) => self
-                .visible_groups
+                .rows
                 .iter()
-                .position(|group| group.id() == id)
-                .and_then(|index| self.group_matches.get(index))
-                .cloned()
+                .find(|row| row.group.id() == id)
+                .map(|row| row.matches.clone())
                 .unwrap_or_default(),
             PickerAnchor::Service { command, service } => self
                 .command_groups
@@ -559,10 +576,10 @@ impl App {
     fn anchor_label(&self, anchor: &PickerAnchor) -> String {
         match anchor {
             PickerAnchor::Row(id) => self
-                .visible_groups
+                .rows
                 .iter()
-                .find(|group| group.id() == id)
-                .map(|group| group.label().to_string())
+                .find(|row| row.group.id() == id)
+                .map(|row| row.group.label().to_string())
                 .unwrap_or_else(|| "the selected service".to_string()),
             PickerAnchor::Service { service, .. } => self
                 .command_groups
@@ -710,8 +727,7 @@ impl App {
         }
 
         self.command_groups = command_groups;
-        self.visible_groups = Vec::new();
-        self.group_matches = Vec::new();
+        self.rows = Vec::new();
         match find_selection(&self.command_groups, previous.clone(), |group| {
             group.command.name.clone()
         }) {
@@ -752,7 +768,7 @@ impl App {
         if self.filter.grouping == GroupingMode::Command {
             self.command_groups.len()
         } else {
-            self.visible_groups.len()
+            self.rows.len()
         }
     }
 
@@ -1072,24 +1088,20 @@ impl App {
         if self.filter.grouping == GroupingMode::Command {
             return self.invoke_command();
         }
-        let Some(group) = self.visible_groups.get(self.selected) else {
+        let Some(row) = self.rows.get(self.selected) else {
             self.status = "no service selected".to_string();
             return Ok(None);
         };
-        let matches = self
-            .group_matches
-            .get(self.selected)
-            .cloned()
-            .unwrap_or_default();
+        let matches = row.matches.clone();
         match matches.len() {
             0 => {
-                self.status = format!("no configured actions match `{}`", group.label());
+                self.status = format!("no configured actions match `{}`", row.group.label());
                 Ok(None)
             }
             _ => {
                 // Anchor to the row itself, not to its position: whatever the
                 // picker goes on to show is rebuilt from this.
-                self.picker_anchor = Some(PickerAnchor::Row(group.id().clone()));
+                self.picker_anchor = Some(PickerAnchor::Row(row.group.id().clone()));
                 if matches.len() == 1 {
                     return self.choose_action(matches.into_iter().next().unwrap());
                 }
@@ -1344,11 +1356,11 @@ impl App {
             self.status = unavailable("it lists commands, not discovered services");
             return;
         }
-        let Some(group) = self.visible_groups.get(self.selected) else {
+        let Some(row) = self.rows.get(self.selected) else {
             self.status = "no row selected".to_string();
             return;
         };
-        match group.facts().host() {
+        match row.group.facts().host() {
             RowHost::Resolved(host) => {
                 let host = host.to_string();
                 self.status = format!("filtering by host `{host}`");
@@ -1461,10 +1473,10 @@ mod tests {
         app.drain_discovery();
 
         assert_eq!(app.records.len(), 1);
-        assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].instances().len(), 1);
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].group.instances().len(), 1);
         assert_eq!(
-            app.visible_groups[0].facts().host(),
+            app.rows[0].group.facts().host(),
             RowHost::Resolved("workstation.local")
         );
     }
@@ -1548,9 +1560,9 @@ mode = "execute"
 
         // One logical service that carries both of its addresses.
         assert_eq!(app.records.len(), 1);
-        assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].instances().len(), 1);
-        assert_eq!(app.visible_groups[0].instances()[0].addresses.len(), 2);
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].group.instances().len(), 1);
+        assert_eq!(app.rows[0].group.instances()[0].addresses.len(), 2);
     }
 
     // ── interaction harness ────────────────────────────────────────────────
@@ -1785,7 +1797,7 @@ mode = "execute"
             Matcher::default(),
             vec![ssh("alpha", "10.0.0.1"), ssh("beta", "10.0.0.2")],
         );
-        assert_eq!(app.visible_groups.len(), 2);
+        assert_eq!(app.rows.len(), 2);
         app.details_scroll = 4;
 
         send(&mut app, KeyCode::Down);
@@ -1814,8 +1826,8 @@ mode = "execute"
 
         assert_eq!(app.mode, AppMode::Search);
         assert_eq!(app.filter.text_query, "z");
-        assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].label(), "zulu");
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].group.label(), "zulu");
     }
 
     #[test]
@@ -1870,11 +1882,11 @@ mode = "execute"
         );
 
         send(&mut app, KeyCode::Char('z'));
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
 
         send(&mut app, KeyCode::Delete);
         assert_eq!(app.filter.text_query, "");
-        assert_eq!(app.visible_groups.len(), 2, "both rows are visible again");
+        assert_eq!(app.rows.len(), 2, "both rows are visible again");
     }
 
     /// Escape and Enter leave editing but the query is the active filter: it
@@ -1896,11 +1908,7 @@ mode = "execute"
                 app.filter.text_query, "z",
                 "{close:?} must keep the active query"
             );
-            assert_eq!(
-                app.visible_groups.len(),
-                1,
-                "{close:?} keeps the list filtered"
-            );
+            assert_eq!(app.rows.len(), 1, "{close:?} keeps the list filtered");
         }
     }
 
@@ -1913,7 +1921,7 @@ mode = "execute"
             vec![ssh("alpha", "10.0.0.1"), ssh("zulu", "10.0.0.2")],
         );
         send(&mut app, KeyCode::Char('z'));
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
 
         app.handle_key(
             KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
@@ -1923,7 +1931,7 @@ mode = "execute"
 
         assert_eq!(app.filter.text_query, "");
         assert_eq!(app.mode, AppMode::Search, "clearing stays in search");
-        assert_eq!(app.visible_groups.len(), 2);
+        assert_eq!(app.rows.len(), 2);
     }
 
     /// A rebound clear must work and the default `ctrl-u` must stop working,
@@ -2204,7 +2212,7 @@ same_host = []
             Matcher::default(),
             vec![ssh("alpha", "10.0.0.1"), http("web")],
         );
-        assert_eq!(app.visible_groups.len(), 2);
+        assert_eq!(app.rows.len(), 2);
 
         send(&mut app, KeyCode::Char('t'));
         assert_eq!(app.mode, AppMode::TypeFilter);
@@ -2212,11 +2220,12 @@ same_host = []
         send(&mut app, KeyCode::Char(' '));
 
         assert!(
-            app.visible_groups
+            app.rows
                 .iter()
-                .all(|g| g.facts().service_type() == RowServiceType::Invariant("_ssh._tcp"))
+                .all(|row| row.group.facts().service_type()
+                    == RowServiceType::Invariant("_ssh._tcp"))
         );
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
     }
 
     #[test]
@@ -2346,9 +2355,9 @@ mode = "execute"
             matcher_from(&[PING_ADDR]),
             vec![ssh_multi("alpha", &["10.0.0.1", "10.0.0.2"])],
         );
-        assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].instances().len(), 1);
-        assert_eq!(app.visible_groups[0].instances()[0].addresses.len(), 2);
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].group.instances().len(), 1);
+        assert_eq!(app.rows[0].group.instances()[0].addresses.len(), 2);
 
         assert!(send(&mut app, KeyCode::Enter).is_none());
         assert_eq!(app.mode, AppMode::InstancePicker);
@@ -2420,7 +2429,7 @@ mode = "execute"
             let rows = if mode == GroupingMode::Command {
                 app.command_groups.len()
             } else {
-                app.visible_groups.len()
+                app.rows.len()
             };
             assert_eq!(tab_count(&app, mode), rows, "{mode:?} count vs its rows");
         }
@@ -2439,8 +2448,8 @@ mode = "execute"
         app.filter.grouping = GroupingMode::Host;
         app.recompute_visible();
 
-        assert_eq!(app.visible_groups.len(), 1);
-        let host = &app.visible_groups[0];
+        assert_eq!(app.rows.len(), 1);
+        let host = &app.rows[0].group;
         assert_eq!(host.label(), "nas.local");
         // The row states the host; the differing types stay on the children.
         assert_eq!(host.facts().host(), RowHost::Resolved("nas.local"));
@@ -2468,8 +2477,8 @@ mode = "execute"
         app.filter.grouping = GroupingMode::ServiceType;
         app.recompute_visible();
 
-        assert_eq!(app.visible_groups.len(), 1);
-        let by_type = &app.visible_groups[0];
+        assert_eq!(app.rows.len(), 1);
+        let by_type = &app.rows[0].group;
         assert_eq!(by_type.label(), "_ssh._tcp");
         // No host is type-wide, so the row names none.
         assert_eq!(by_type.facts().host(), RowHost::Varies);
@@ -2572,11 +2581,11 @@ mode = "execute"
 
         // Two rows reading alike: the impostor's resolved host, and the row of
         // registrations that have resolved none.
-        assert_eq!(app.visible_groups.len(), 2);
+        assert_eq!(app.rows.len(), 2);
         assert!(
-            app.visible_groups
+            app.rows
                 .iter()
-                .all(|group| group.label() == UNRESOLVED_HOST_LABEL)
+                .all(|row| row.group.label() == UNRESOLVED_HOST_LABEL)
         );
 
         // The impostor is a real host, so it can be filtered by.
@@ -2585,7 +2594,7 @@ mode = "execute"
             app.filter.host_filter.as_deref(),
             Some(UNRESOLVED_HOST_LABEL)
         );
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
         send(&mut app, KeyCode::Char('s'));
 
         // The unresolved row is not a host and has nothing to filter by.
@@ -2610,7 +2619,7 @@ mode = "execute"
         );
         // Two rows labelled `shell`; the cursor sits on the second.
         send(&mut app, KeyCode::Down);
-        let chosen = app.visible_groups[app.selected].id().clone();
+        let chosen = app.rows[app.selected].group.id().clone();
 
         // A new row sorts in ahead of the selection.
         let earlier = service_on("alpha", "_ssh._tcp", "alpha.local", 22);
@@ -2618,7 +2627,7 @@ mode = "execute"
         app.recompute_visible();
 
         assert_eq!(app.selected, 2, "the cursor followed its row");
-        assert_eq!(*app.visible_groups[app.selected].id(), chosen);
+        assert_eq!(*app.rows[app.selected].group.id(), chosen);
     }
 
     #[test]
@@ -2630,11 +2639,11 @@ mode = "execute"
         // Groups sort by label, so the cursor starts on `alpha`.
         send(&mut app, KeyCode::Char('s'));
         assert_eq!(app.filter.host_filter.as_deref(), Some("alpha.local"));
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
 
         send(&mut app, KeyCode::Char('s'));
         assert!(app.filter.host_filter.is_none());
-        assert_eq!(app.visible_groups.len(), 2);
+        assert_eq!(app.rows.len(), 2);
     }
 
     /// Two occurrences of one registration — the same service announced on two
@@ -2668,8 +2677,8 @@ mode = "execute"
         assert!(addresses.contains(&"10.0.0.2".parse().unwrap()));
 
         // They still read as one logical service.
-        assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].instances().len(), 2);
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].group.instances().len(), 2);
     }
 
     #[test]
@@ -2697,7 +2706,7 @@ mode = "execute"
 
         // The logical service survives with the live occurrence's address.
         assert_eq!(app.records.len(), 1);
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
         let survivor = app.records.values().next().expect("surviving occurrence");
         assert_eq!(
             survivor.addresses,
@@ -2738,8 +2747,8 @@ mode = "execute"
         app.drain_discovery();
 
         assert_eq!(app.records.len(), 1);
-        assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].label(), "beta");
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].group.label(), "beta");
     }
 
     #[test]
@@ -2858,13 +2867,13 @@ mode = "execute"
             vec![ssh("alpha", "10.0.0.1"), ssh("beta", "10.0.0.2")],
         )
         .with_discovery_factory(factory);
-        assert_eq!(app.visible_groups.len(), 2);
+        assert_eq!(app.rows.len(), 2);
 
         send(&mut app, KeyCode::Char('r'));
 
         // The list is empty and a new session runs.
         assert!(app.records.is_empty());
-        assert!(app.visible_groups.is_empty());
+        assert!(app.rows.is_empty());
         assert!(app.status.contains("refresh"));
         assert_eq!(spawned.lock().unwrap().len(), 1);
 
@@ -2873,8 +2882,8 @@ mode = "execute"
             .send(DiscoveryEvent::Upsert(ssh("gamma", "10.0.0.3")))
             .unwrap();
         app.drain_discovery();
-        assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].label(), "gamma");
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].group.label(), "gamma");
     }
 
     #[test]
@@ -2938,13 +2947,13 @@ mode = "execute"
     #[test]
     fn a_real_disconnect_clears_records_and_reports_a_persistent_failure() {
         let (mut app, tx) = app_with_session(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
 
         drop(tx);
         app.drain_discovery();
 
         assert!(app.records.is_empty(), "unverifiable records must not stay");
-        assert!(app.visible_groups.is_empty());
+        assert!(app.rows.is_empty());
         assert!(matches!(app.session.state(), SessionState::Failed(_)));
         assert!(
             !app.session.state().is_listening(),
@@ -3307,10 +3316,10 @@ mode = "execute"
         app.filter.grouping = GroupingMode::ServiceType;
         app.recompute_visible();
 
-        assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].label(), "_ssh._tcp");
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].group.label(), "_ssh._tcp");
         assert_eq!(
-            app.visible_groups[0].resolved_host_count(),
+            app.rows[0].group.resolved_host_count(),
             2,
             "the sample set must put SSH on two hosts"
         );
@@ -3356,8 +3365,8 @@ mode = "execute"
             .send(DiscoveryEvent::Upsert(ssh("gamma", "10.0.0.3")))
             .unwrap();
         app.drain_discovery();
-        assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[0].label(), "gamma");
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[0].group.label(), "gamma");
     }
 
     /// The other ending: a finished sample stream is not a failure, but it is
@@ -3385,7 +3394,7 @@ mode = "execute"
             .send(DiscoveryEvent::Upsert(ssh("gamma", "10.0.0.3")))
             .unwrap();
         app.drain_discovery();
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
     }
 
     /// The session owns its receiver, so a replaced session's events cannot
@@ -3419,9 +3428,9 @@ mode = "execute"
             .unwrap();
         app.drain_discovery();
 
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
         assert_eq!(
-            app.visible_groups[0].label(),
+            app.rows[0].group.label(),
             "fresh",
             "only the current session's events may populate the list"
         );
@@ -3434,7 +3443,7 @@ mode = "execute"
         let (factory, spawned) = channel_factory();
         let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")])
             .with_discovery_factory(factory);
-        assert_eq!(app.visible_groups.len(), 1);
+        assert_eq!(app.rows.len(), 1);
 
         send(&mut app, KeyCode::Char('r'));
         // The replacement session's producer dies immediately.
@@ -3442,7 +3451,7 @@ mode = "execute"
         app.drain_discovery();
 
         assert!(app.records.is_empty());
-        assert!(app.visible_groups.is_empty());
+        assert!(app.rows.is_empty());
         assert!(matches!(app.session.state(), SessionState::Failed(_)));
     }
 
@@ -3464,14 +3473,14 @@ mode = "execute"
         let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")])
             .with_config_loader(loads(&[SSH]));
         assert_eq!(app.matcher.command_count(), 0);
-        assert_eq!(app.group_matches[0].len(), 0);
+        assert_eq!(app.rows[0].matches.len(), 0);
 
         app.reload_requested.store(true, Ordering::Relaxed);
         app.poll_reload();
 
         assert_eq!(app.matcher.command_count(), 1);
         assert_eq!(
-            app.group_matches[0].len(),
+            app.rows[0].matches.len(),
             1,
             "matches are recomputed against the reloaded rules"
         );
@@ -3514,7 +3523,7 @@ mode = "execute"
 
         assert_eq!(app.matcher.command_count(), 1, "old rules stay in force");
         assert_eq!(
-            app.group_matches[0].len(),
+            app.rows[0].matches.len(),
             1,
             "and still match the discovered services"
         );
@@ -3538,7 +3547,7 @@ mode = "execute"
             2,
             "a rule set is installed whole or not at all"
         );
-        assert_eq!(app.group_matches[0].len(), 2);
+        assert_eq!(app.rows[0].matches.len(), 2);
         assert!(
             app.status
                 .contains("keeping the 2 command(s) already loaded")
@@ -3810,14 +3819,14 @@ mode = "execute"
         app.update_layout(MOUSE_SCREEN);
         app.selected = 1;
         app.details_scroll = 2;
-        assert_eq!(app.visible_groups[app.selected].label(), "beta");
+        assert_eq!(app.rows[app.selected].group.label(), "beta");
 
         app.records.remove(&ssh("beta", "10.0.0.2").id());
         app.recompute_visible();
 
         // Deterministic: the row that took beta's place, not beta's old index
         // pointing at whatever slid into it.
-        assert_eq!(app.visible_groups[app.selected].label(), "gamma");
+        assert_eq!(app.rows[app.selected].group.label(), "gamma");
         assert_eq!(app.details_scroll, 0);
     }
 
@@ -3831,17 +3840,17 @@ mode = "execute"
         );
         app.update_layout(MOUSE_SCREEN);
         app.selected = app
-            .visible_groups
+            .rows
             .iter()
-            .position(|group| group.label() == "beta")
+            .position(|row| row.group.label() == "beta")
             .expect("beta is listed");
         app.details_scroll = 2;
 
         app.filter.toggle_service_type("_http._tcp");
         app.recompute_visible();
 
-        assert_eq!(app.visible_groups.len(), 1);
-        assert_eq!(app.visible_groups[app.selected].label(), "alpha");
+        assert_eq!(app.rows.len(), 1);
+        assert_eq!(app.rows[app.selected].group.label(), "alpha");
         assert_eq!(app.details_scroll, 0);
     }
 
@@ -3861,7 +3870,7 @@ mode = "execute"
         app.records.insert(updated.id(), updated);
         app.recompute_visible();
 
-        assert_eq!(app.visible_groups[app.selected].label(), "alpha");
+        assert_eq!(app.rows[app.selected].group.label(), "alpha");
         assert_eq!(app.details_scroll, 2, "the reader stayed where they were");
     }
 
@@ -3909,7 +3918,7 @@ mode = "execute"
         app.records.clear();
         app.recompute_visible();
 
-        assert!(app.visible_groups.is_empty());
+        assert!(app.rows.is_empty());
         assert_eq!(app.selected, 0);
         assert_eq!(app.details_scroll, 0);
     }
