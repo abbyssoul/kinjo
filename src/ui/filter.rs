@@ -52,9 +52,9 @@ impl FilterState {
     /// Wholesale rather than additive: a type with no records left is no longer
     /// discovered, and must leave the list and the count in the same recompute
     /// that its last record left the list.
-    pub fn observe_types(&mut self, records: &[Entry]) {
+    pub fn observe_types<'a>(&mut self, records: impl IntoIterator<Item = &'a Entry>) {
         self.discovered_types = records
-            .iter()
+            .into_iter()
             .map(|record| record.service_type.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -117,20 +117,90 @@ impl FilterState {
             || self.enabled_count() < self.discovered_types.len()
     }
 
-    pub fn apply(&self, records: &[Entry]) -> Vec<Entry> {
+    pub fn apply<'a>(&self, records: impl IntoIterator<Item = &'a Entry>) -> Vec<Entry> {
+        let query = FuzzyQuery::new(self.text_query.trim());
         records
-            .iter()
+            .into_iter()
             .filter(|record| self.is_enabled(&record.service_type))
             .filter(|record| match &self.host_filter {
                 Some(host) => record.hostname.as_deref() == Some(host.as_str()),
                 None => true,
             })
-            .filter(|record| {
-                self.text_query.trim().is_empty()
-                    || fuzzy_match(&record.searchable_text(), self.text_query.trim())
-            })
+            .filter(|record| query.matches_entry(record))
             .cloned()
             .collect()
+    }
+}
+
+/// A lower-cased query compiled once per filter application. It consumes the
+/// entry's searchable fields in exactly the same order (and with the same
+/// separating spaces) as [`Entry::searchable_text`], stopping as soon as the
+/// subsequence is satisfied instead of allocating one concatenated String per
+/// entry.
+struct FuzzyQuery {
+    characters: Vec<char>,
+}
+
+impl FuzzyQuery {
+    fn new(query: &str) -> Self {
+        Self {
+            characters: query.chars().flat_map(char::to_lowercase).collect(),
+        }
+    }
+
+    fn matches_entry(&self, record: &Entry) -> bool {
+        if self.characters.is_empty() {
+            return true;
+        }
+
+        let mut matched = 0;
+        let mut feed = |value: &str| {
+            for character in value.chars().flat_map(char::to_lowercase) {
+                if self.characters.get(matched) == Some(&character) {
+                    matched += 1;
+                    if matched == self.characters.len() {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+
+        let display_name = record.display_name();
+        for value in [
+            record.name.as_str(),
+            " ",
+            display_name.as_str(),
+            " ",
+            record.service_type.as_str(),
+            " ",
+            record.domain.as_str(),
+        ] {
+            if feed(value) {
+                return true;
+            }
+        }
+        if let Some(hostname) = &record.hostname
+            && (feed(" ") || feed(hostname))
+        {
+            return true;
+        }
+        for address in &record.addresses {
+            if feed(" ") || feed(&address.to_string()) {
+                return true;
+            }
+        }
+        if let Some(port) = record.port
+            && (feed(" ") || feed(&port.to_string()))
+        {
+            return true;
+        }
+        for (key, value) in &record.txt {
+            if feed(" ") || feed(key) || feed(" ") || feed(value) {
+                return true;
+            }
+        }
+        false
     }
 }
 

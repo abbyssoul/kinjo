@@ -16,6 +16,75 @@ claiming any task: the domain language, invariants, trust model, and completion
 gate defined there all still apply. Tasks in this round are numbered from 101
 so they can never be confused with round-1 tasks.
 
+## Follow-up Validation Notes (2026-07-17)
+
+A second independent pass validated this backlog at `4640aab`, after the
+round-2 report itself was committed. The report is a good foundation, but it
+should **not be implemented unchanged**. Each task now ends with a
+"Follow-up validation note" that records the evidence and scope corrections
+for the implementing agent. Those notes take precedence where they conflict
+with the original task text; the original text is retained so the next reviewer
+can see how the conclusion changed.
+
+The validation baseline remained green:
+
+```text
+cargo fmt -- --check                                      pass
+cargo clippy --locked --all-targets --all-features -- -D warnings
+                                                            pass
+cargo test --locked --all-targets                           416 passed
+cargo test --locked --all-targets --all-features            436 lib + 7 integration
+```
+
+### Newly identified findings
+
+1. **P1 — discovery resource use is unbounded before `App::records`.** The
+   worker-to-UI event channel is unbounded (`src/discovery/worker.rs:96`),
+   `drain_discovery` drains until empty (`src/ui/app.rs:420-460`), the mDNS
+   liveness map is unbounded, and each probe cycle clones every key and starts
+   every resolver through `join_all`. Task 107's proposed final-map cap cannot
+   protect those resources or prevent a sustained producer from starving input
+   and drawing. Task 107 must be expanded or split and treated as P1; task 108
+   should be designed with it.
+2. **P1 — DNS-SD TXT handling needs its own task and owner decision.**
+   `txt_map` (`src/discovery/mdns.rs:364-377`) compares keys case-sensitively,
+   makes exact duplicates last-wins through collection into a map, and converts
+   values with `String::from_utf8_lossy`. DNS-SD keys are case-insensitive,
+   first duplicate wins, and values are opaque bytes
+   ([RFC 6763 sections 6.4-6.5](https://datatracker.ietf.org/doc/html/rfc6763#section-6.4)).
+   This conflicts with `CONTEXT.md`'s promise to preserve raw discovered values.
+   Before implementation, create a task that normalises valid keys at the
+   adapter seam and decides whether the product is deliberately text-only or
+   carries raw bytes through matching/interpolation.
+3. **P2 — the public execution surface can panic.** `PreparedCommand::argv` is
+   public, but `plumber::exec::exec` indexes `argv[0]`; a library caller can
+   construct an empty command. Fold validation or construction-atomicity into
+   task 109.
+4. **P3 — terminal escaping still permits bidi visual spoofing.** ANSI/control
+   injection is covered, but bidi formatting characters such as U+202E remain
+   displayable and can visually reorder discovered labels. Record this as an
+   accepted residual risk or extend task 110/terminal escaping deliberately.
+
+### Corrections to prioritisation and ordering
+
+- Task 101's option-injection risk is real, but its recommended documentation
+  path does not make shipped rules safe by default. It cannot be both P0 and
+  "done" through documentation alone; the owner must choose implementation or
+  accepted risk. The trust model must also address interpolation into `argv[0]`.
+- Tasks 102 and 103 are the strongest performance findings, but "largest
+  first" has not been measured. Add a representative benchmark before ranking
+  or declaring an optimisation successful.
+- Task 106 describes a real XDG conformance bug, not merely duplication: empty
+  `XDG_CONFIG_HOME` is unset and relative values are invalid under the
+  [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir/).
+- Task 107 should no longer depend on task 102 as a whole. Network ingress
+  bounds are safety work and should land before optional projection
+  optimisation; final record-cap work may still coordinate with 102.
+- Recommended order: resolve 101 and the TXT-data decision; implement bounded
+  discovery ingress/probing (107 with 108); harden the public execution surface
+  (109); benchmark and then implement 102/103; finish 106 and the lower-risk
+  maintainability/polish tasks.
+
 ## Review Summary
 
 ### Overall verdict
@@ -152,16 +221,19 @@ Status values: `ready`, `blocked`, `in-progress`, `done`.
 
 | ID | Priority | Status | Task | Depends on | Likely conflicts |
 |---|---|---|---|---|---|
-| 101 | P0 | ready | [Leading-dash option injection from discovered values](tasks/101-option-injection-from-discovered-values.md) | — (needs owner decision) | 102 |
-| 102 | P1 | ready | [Recompute pipeline: remove the clone cascade](tasks/102-recompute-clone-cascade.md) | — | 103, 105, 107 |
-| 103 | P1 | ready | [Render pipeline: build details once, skip dead frames](tasks/103-render-once-per-tick.md) | 102 | 102, 104, 110 |
-| 104 | P2 | ready | [Render duplication: tree rows and description precedence](tasks/104-render-duplication.md) | — | 103 |
-| 105 | P2 | ready | [Consolidate App's modal/picker state](tasks/105-picker-state-consolidation.md) | 102 | 102, 103, 110 |
-| 106 | P2 | ready | [One XDG config-path derivation](tasks/106-shared-xdg-derivation.md) | — | — |
-| 107 | P2 | ready | [Bound hostile record growth](tasks/107-bound-record-growth.md) | 102 | 102 |
-| 108 | P2 | ready | [Probe cycles must not starve browse events](tasks/108-probe-starvation.md) | — | — |
-| 109 | P2 | ready | [Library re-entrancy of `run()`](tasks/109-library-reentrancy.md) | — | — |
-| 110 | P2 | ready | [Input handling polish: modifiers, bursts, label escaping](tasks/110-input-polish.md) | — | 103, 105 |
+| 101 | P0 | done | [Leading-dash option injection from discovered values](tasks/101-option-injection-from-discovered-values.md) | — (decision: ADR 0003) | 102 |
+| 102 | P1 | done | [Recompute pipeline: remove the clone cascade](tasks/102-recompute-clone-cascade.md) | — | 103, 105, 107 |
+| 103 | P1 | done | [Render pipeline: build details once, skip dead frames](tasks/103-render-once-per-tick.md) | 102 | 102, 104, 110 |
+| 104 | P2 | done | [Render duplication: tree rows and description precedence](tasks/104-render-duplication.md) | — | 103 |
+| 105 | P2 | done | [Consolidate App's modal/picker state](tasks/105-picker-state-consolidation.md) | 102 | 102, 103, 110 |
+| 106 | P2 | done | [One XDG config-path derivation](tasks/106-shared-xdg-derivation.md) | — | — |
+| 107 | P1 | done | [Bound hostile record growth](tasks/107-bound-record-growth.md) | — (decision: ADR 0005) | 102 |
+| 108 | P1 | done | [Probe cycles must not starve browse events](tasks/108-probe-starvation.md) | 107 | 107 |
+| 109 | P2 | done | [Library re-entrancy of `run()`](tasks/109-library-reentrancy.md) | — | — |
+| 110 | P2 | done | [Input handling polish: modifiers, bursts, label escaping](tasks/110-input-polish.md) | — | 103, 105 |
+| 111 | P1 | done | [Portable DNS-SD TXT semantics](tasks/111-portable-dns-sd-txt.md) | — (decision: ADR 0004) | 102 |
+| 112 | P1 | done | [Support TXT keys longer than nine bytes](tasks/112-long-txt-keys.md) | 111 | 111, 102 |
+| 113 | P2 | done | [Retire the dead `prepare` failure path](tasks/113-retire-dead-prepare-failure-path.md) | 101 | — |
 
 Priority meanings (unchanged from round 1):
 
@@ -169,22 +241,55 @@ Priority meanings (unchanged from round 1):
 - **P1**: validation, UX correctness, or a refactor needed by later work.
 - **P2**: maintainability/deepening after behavior has regression coverage.
 
+## Completion (2026-07-17)
+
+All twelve tasks are done. ADRs 0003-0005 record the enduring safety/data-flow
+decisions; task 112 visibly amends ADR 0004's mistaken nine-byte TXT-key clause.
+
+The representative recompute workload (2,000 entries, 24 rules, all views and
+active search) fell from 776.871 ms to 234.750 ms for 12 projections: 64.739 to
+19.562 ms per projection, a 69.8% reduction. Dirty rendering, one per-frame
+details projection, bounded input/event draining, and construction-atomic modal
+state reduce the work outside that measured pipeline as well.
+
+Fake-backend smoke checks covered lists, tab counts, details, command view, and
+instance picker behavior. A live mDNS smoke run discovered and rendered the
+local network successfully. The completion gate and the command-preparation
+fuzz target build passed; exact final counts are recorded under the gate below.
+
 ## Workstreams and Ordering
 
-```text
-Safety:        101 (independent; blocked on an owner decision recorded in the task)
+This is the order the now-complete implementation followed after the owner
+decisions were recorded:
 
-Performance:   102 → 103        (both reshape app.rs/render.rs; serialize)
-               102 → 107        (a growth bound is easiest atop the reshaped pipeline)
-               108              (mdns.rs only; independent)
+```text
+Safety (decided; do first):
+               101   ADR 0003 — option-safe templates, literal argv[0]
+               107 + 108   ADR 0005 — bounded ingress + probe concurrency.
+                     One piece of work in src/discovery/; design together.
+               111 → 112   ADR 0004 — portable TXT semantics, then lift the
+                     9-byte key ceiling. 112 amends ADR 0004; it is split out
+                     only because 111 was already in flight when the finding
+                     landed. Same module — serialize, do not parallelize.
+               109   public-surface hardening (empty-argv panic) — independent
+
+Performance (measure first, per task 102's follow-up note):
+               102 → 103        (both reshape app.rs/render.rs; serialize)
 
 Maintainability: 105 (after 102 — same file, and 102 may dissolve some fields)
                  104 (render.rs; coordinate with 103)
-                 106 (independent)
+                 106 (independent; XDG conformance, not just duplication)
 
-Polish:        109 (lib.rs only; independent)
-               110 (app.rs/render.rs; coordinate with 103 and 105)
+Polish:        110 (app.rs/render.rs; coordinate with 103 and 105)
 ```
+
+Two dependency edges from the original plan are **removed**: 107 no longer
+depends on 102 (ingress bounds are safety work and must not wait on optional
+projection optimisation), and 108 is no longer independent (ADR 0005 makes it
+the probe half of 107's defence).
+
+The bidi/U+202E finding was closed in task 110: the terminal presentation Module
+now escapes bidi formatting characters visibly, alongside C0/C1 controls.
 
 ## Validation Baseline
 
@@ -209,6 +314,20 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets
 cargo test --locked --all-targets --all-features
 ```
+
+Final result on 2026-07-17:
+
+```text
+cargo fmt -- --check                                      pass
+cargo clippy --locked --all-targets --all-features -- -D warnings
+                                                            pass
+cargo test --locked --all-targets                           436 + 6 integration
+cargo test --locked --all-targets --all-features            462 + 7 integration
+cargo check --manifest-path fuzz/Cargo.toml --bin prepare_command
+                                                            pass
+```
+
+The one ignored unit test is the manual release benchmark recorded in task 102.
 
 Tasks changing parsing, entry identity, grouping, or interpolation must
 consider the fuzz targets in `fuzz/fuzz_targets/` (see `CONTRIBUTING.md`).

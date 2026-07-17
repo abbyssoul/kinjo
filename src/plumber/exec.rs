@@ -17,20 +17,21 @@ use super::ActionMode;
 /// compare equal run the identical program with the identical arguments in the
 /// identical way, so a user has nothing to choose between them. That is what
 /// makes them collapsible, and what makes anything else worth asking about.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PreparedCommand {
     pub argv: Vec<String>,
     pub mode: ActionMode,
 }
 
 pub(super) fn fork(command: &PreparedCommand) -> Result<()> {
-    let mut child = Command::new(&command.argv[0])
-        .args(&command.argv[1..])
+    let (program, args) = command_parts(command)?;
+    let mut child = Command::new(program)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|err| spawn_error(&command.argv[0], err))?;
+        .map_err(|err| spawn_error(program, err))?;
     // Reap the child once it exits so it does not linger as a zombie for the
     // lifetime of the TUI. The thread parks in `wait` and goes away with the
     // child; if the TUI exits first, orphans are re-parented and reaped by init.
@@ -41,30 +42,39 @@ pub(super) fn fork(command: &PreparedCommand) -> Result<()> {
 }
 
 pub fn exec(command: PreparedCommand) -> Result<()> {
+    let (program, args) = command_parts(&command)?;
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
 
         // `exec` only returns when the hand-off fails; on success the current
         // process image is replaced and control never comes back.
-        let err = Command::new(&command.argv[0])
-            .args(&command.argv[1..])
-            .exec();
-        Err(spawn_error(&command.argv[0], err))
+        let err = Command::new(program).args(args).exec();
+        Err(spawn_error(program, err))
     }
 
     #[cfg(not(unix))]
     {
-        let status = Command::new(&command.argv[0])
-            .args(&command.argv[1..])
+        let status = Command::new(program)
+            .args(args)
             .status()
-            .map_err(|err| spawn_error(&command.argv[0], err))?;
+            .map_err(|err| spawn_error(program, err))?;
         if status.success() {
             Ok(())
         } else {
             Err(eyre!("process exited with status {status}"))
         }
     }
+}
+
+fn command_parts(command: &PreparedCommand) -> Result<(&str, &[String])> {
+    let Some((program, args)) = command.argv.split_first() else {
+        return Err(eyre!("prepared command has an empty argument vector"));
+    };
+    if program.is_empty() {
+        return Err(eyre!("prepared command has an empty program name"));
+    }
+    Ok((program, args))
 }
 
 /// Turn a spawn/exec failure into a user-facing message, special-casing the
@@ -334,6 +344,31 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("command `kinjo-no-such-binary-xyz` not found")
+        );
+    }
+
+    #[test]
+    fn public_execution_rejects_an_empty_prepared_command_without_panicking() {
+        let empty = PreparedCommand {
+            argv: Vec::new(),
+            mode: ActionMode::Execute,
+        };
+        assert!(
+            exec(empty)
+                .unwrap_err()
+                .to_string()
+                .contains("empty argument vector")
+        );
+
+        let empty_program = PreparedCommand {
+            argv: vec![String::new()],
+            mode: ActionMode::Fork,
+        };
+        assert!(
+            fork(&empty_program)
+                .unwrap_err()
+                .to_string()
+                .contains("empty program name")
         );
     }
 }

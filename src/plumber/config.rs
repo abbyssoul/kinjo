@@ -110,15 +110,8 @@ pub(crate) fn config_dirs_from(
 ) -> Vec<PathBuf> {
     let mut dirs = install_dirs_from(exe.as_deref());
     dirs.push(PathBuf::from(SYSTEM_CONFIG_DIR));
-    if let Some(home) = xdg_config_home {
-        dirs.push(PathBuf::from(home).join("kinjo").join("commands"));
-    } else if let Some(home) = home {
-        dirs.push(
-            PathBuf::from(home)
-                .join(".config")
-                .join("kinjo")
-                .join("commands"),
-        );
+    if let Some(config_dir) = crate::config_home::kinjo_config_dir(xdg_config_home, home) {
+        dirs.push(config_dir.join("commands"));
     }
     dirs.extend(extra.iter().cloned());
     dirs
@@ -246,6 +239,8 @@ struct RawAction {
     description: Option<String>,
     command: String,
     mode: String,
+    #[serde(default)]
+    allow_option_like_values: bool,
 }
 
 /// Compile the on-disk form of a command file into a validated rule.
@@ -283,12 +278,22 @@ fn parse_command_config(source: &str) -> Result<CommandConfig> {
         ));
     }
 
+    let action = if raw.action.allow_option_like_values {
+        CommandAction::compile_allowing_option_like_values(
+            raw.action.description,
+            raw.action.command,
+            mode,
+        )?
+    } else {
+        CommandAction::compile(raw.action.description, raw.action.command, mode)?
+    };
+
     Ok(CommandConfig {
         name: raw.metadata.name,
         description: raw.metadata.description,
         requirements,
         predicates,
-        action: CommandAction::compile(raw.action.description, raw.action.command, mode)?,
+        action,
     })
 }
 

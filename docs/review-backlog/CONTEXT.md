@@ -34,6 +34,9 @@ must not depend on UI.
 
 - **Entry**: one discovered DNS-SD record with registration fields and any
   resolved host, addresses, port, and TXT data.
+- **TXT field**: one portable text key/value from a DNS-SD TXT record. Keys are
+  canonical lowercase DNS-SD keys and values are exact UTF-8 text; binary TXT
+  values are outside the current product model (ADR 0004).
 - **Registration**: the DNS-SD `(name, service type, domain)` identity advertised
   by a device.
 - **Occurrence**: one observable instance of a registration from a discovery
@@ -54,6 +57,9 @@ must not depend on UI.
 - **Picker**: a modal selection of an action, service, or concrete occurrence.
 - **Discovery session**: the owned lifetime of a running discovery adapter,
   including its event receiver and cancellation/join behavior.
+- **Discovery inbox**: the bounded, non-blocking delivery Module between an
+  adapter and its discovery session. Overflow fails the session closed rather
+  than dropping state transitions silently (ADR 0005).
 
 ## Architecture Language
 
@@ -90,13 +96,20 @@ implementation task; bring new evidence to a superseding ADR instead.
 - Service names, hostnames, TXT keys/values, addresses, ports, and discovery
   status details originate outside the process. Treat discovered text as
   untrusted.
-- Preserve raw discovered values for matching and command interpolation, but
-  render a terminal-safe representation that cannot emit control sequences.
+- Preserve discovered text exactly for matching and command interpolation, but
+  render a terminal-safe representation that cannot emit control sequences and
+  cannot reorder itself or the trusted UI text beside it (ADR 0006). A rendered
+  value must not be able to claim to be a different value: the user consents to
+  a command on the strength of what is on screen. DNS-SD TXT is deliberately
+  portable text rather than arbitrary bytes; see ADR 0004.
 - Command files and keybinding files are user-controlled local configuration.
   They are trusted to request programs, but malformed or impossible rules must
   fail validation before they can be selected.
 - Interpolation occurs after tokenization. A discovered value may replace text
   inside one token; it must never add, remove, or split arguments.
+- Trusted local configuration names the executable literally. A discovered
+  value cannot occupy `argv[0]`, and a text-field-led argument before `--`
+  requires the explicit `allow_option_like_values` opt-out (ADR 0003).
 - Real discovery failure must never create actionable sample devices. Sample
   records are permitted only when the user explicitly selects fake discovery.
 
@@ -116,6 +129,9 @@ shows one is untenable.
   cannot honor domain selection. It must not silently browse another domain.
 - Failed startup, stopped workers, and disconnected event channels are explicit
   discovery states. They do not fall back to sample entries.
+- Discovery memory, retained occurrences, per-frame drain work, and probe
+  concurrency are bounded. Exceeding a bound visibly fails closed rather than
+  leaving stale actionable records (ADR 0005).
 - Explicit fake mode continues to stream sample records and remains suitable for
   development and smoke tests.
 
@@ -149,7 +165,10 @@ shows one is untenable.
 ## Compatibility and Scope Constraints
 
 - Preserve the documented command-file format unless a task explicitly rejects
-  input that was malformed, unsupported, or semantically impossible.
+  input that was malformed, unsupported, semantically impossible, or grants
+  unsafe authority that an accepted ADR deliberately removes. ADR 0003 is such
+  a safety rejection: older field-led option arguments require `--`, a literal
+  prefix, or an explicit opt-out.
 - Keep both default and `zeroconf` feature builds working on supported platforms.
 - Do not add a new seam solely for testing. Prefer testing through the module's
   real interface; private internal seams are acceptable when behavior genuinely
@@ -214,4 +233,17 @@ code. Recorded so far:
   `plumber::RuleEngine` as a supported extension point (2026-07-17).
 - [ADR 0002](../adr/0002-render-reads-the-app-directly.md): render keeps `&App`;
   the app/render boundary is field visibility, not a projected view
+  (2026-07-17).
+- [ADR 0003](../adr/0003-command-templates-are-option-safe-by-default.md):
+  command templates reject dynamic programs and option-like discovered values
+  by default (2026-07-17).
+- [ADR 0004](../adr/0004-dns-sd-txt-is-portable-text.md): DNS-SD TXT uses a
+  canonical, exact UTF-8 product model rather than lossy or platform-specific
+  bytes (2026-07-17).
+- [ADR 0005](../adr/0005-discovery-overload-fails-closed.md): discovery bounds
+  its inbox, retained state, frame work, and probes; overload visibly fails
+  closed (2026-07-17).
+- [ADR 0006](../adr/0006-rendered-text-cannot-reorder-itself.md): rendered text
+  escapes bidi formatting, so a value cannot claim to be a different value or
+  reorder the UI beside it; reverses round 1's "bidi is printable"
   (2026-07-17).

@@ -1,7 +1,7 @@
 # Task 103 — Render pipeline: build details once, skip dead frames
 
 - **Priority**: P1 (performance)
-- **Status**: ready
+- **Status**: done
 - **Depends on**: 102 (same files; land after the recompute reshape)
 - **Likely conflicts**: 102, 104, 110
 
@@ -107,3 +107,37 @@ updating — but at 1Hz, not 8Hz, and only while something is on screen to age.
   `✓`) and `--backend mdns-sd` (live browse animates) and confirm no visual
   regression.
 - Completion gate green.
+
+## Follow-up validation note (2026-07-17)
+
+**Finding confirmed; building the same full row vector once is only the first
+step.** `render_detail_rows` slices for the visible window only after all detail
+rows have been allocated. Prefer one per-cycle details model that provides the
+total length for layout and materialises only the visible window for drawing.
+That gives the details logic one deep interface and keeps length/draw agreement
+construction-atomic without retaining a full off-screen `Vec<Row>`.
+
+Host and service-type details also calculate a child count and then rebuild the
+children; coordinate this with task 102's aggregate projection rather than
+optimising the same traversal twice.
+
+The age redraw condition in the original task is too broad. A 1 Hz redraw is
+needed only when visible logical-service occurrence rows display `last_seen`.
+Host, service-type, and command details do not render occurrence ages merely
+because records exist. Spinner and search-caret animation requirements remain
+correct.
+
+## Completion Record (2026-07-17)
+
+- Added one per-frame `DetailsContent` projection; layout reads its height and
+  rendering consumes those exact rows, so the event loop no longer builds the
+  detail table twice.
+- Added dirty redraw scheduling. Listening animates at 240 ms, search at 480
+  ms, and only visible logical-service occurrence details redraw for the 1 s
+  age tick. Ended idle host/type/command views do no periodic render work.
+- Full off-screen detail rows are still materialised once on a dirty frame. A
+  lazy visible-window model was not added because it would require a second
+  traversal or a substantially deeper row-descriptor Implementation; this task
+  removed the measured duplicate construction without adding that complexity.
+- Fake discovery settled to `✓`; live mDNS rendered and animated correctly.
+  Completion gate passed.

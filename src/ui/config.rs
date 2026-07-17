@@ -281,7 +281,7 @@ mode = "fork"
     #[test]
     fn startup_load_keeps_valid_commands_and_warns_about_invalid_ones() {
         let dir = temp_dir("startup-lenient");
-        write_command(&dir, "ssh.toml", "ssh", "ssh {hostname}");
+        write_command(&dir, "ssh.toml", "ssh", "ssh -- {hostname}");
         write_invalid_command(&dir, "broken.toml");
 
         let (matcher, warnings) = load_matcher(&test_cli(CliCommand::Run, vec![dir.clone()]))
@@ -302,7 +302,7 @@ mode = "fork"
     #[test]
     fn reload_refuses_an_overlay_with_any_invalid_file() {
         let dir = temp_dir("reload-mixed");
-        write_command(&dir, "ssh.toml", "ssh", "ssh {hostname}");
+        write_command(&dir, "ssh.toml", "ssh", "ssh -- {hostname}");
         write_invalid_command(&dir, "broken.toml");
 
         let diagnostics =
@@ -359,7 +359,7 @@ mode = "fork"
     #[test]
     fn reload_ignores_directories_that_do_not_exist() {
         let dir = temp_dir("reload-present");
-        write_command(&dir, "ssh.toml", "ssh", "ssh {hostname}");
+        write_command(&dir, "ssh.toml", "ssh", "ssh -- {hostname}");
 
         let matcher =
             reload_matcher_from(&[PathBuf::from("/tmp/kinjo-no-such-dir-xyz"), dir.clone()])

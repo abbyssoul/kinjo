@@ -213,6 +213,12 @@ Supported fields:
 - `port`
 - `txt.<key>`
 
+DNS-SD TXT keys are case-insensitive and are shown in canonical lowercase.
+Kinjo accepts valid DNS-SD keys (1-255 printable ASCII characters excluding `=`)
+and exact UTF-8 values. Binary TXT values are ignored rather than decoded with
+replacement characters, so they cannot accidentally satisfy a text predicate
+or become a process argument.
+
 A service may advertise several addresses. Every `[match.address]` predicate is
 applied to the *same* single address, so a command matches only if one concrete
 address satisfies all of them at once, and it can then only run against such an
@@ -236,12 +242,12 @@ requirements = ["xdg-open"]
 [match.service_type]
 equals = "_ipp._tcp"
 
-[match.txt.adminurl]
-contains = "http"
+[match.txt.adminpath]
+contains = "/"
 
 [action]
 description = "Open printer admin"
-command = "xdg-open {txt.adminurl}"
+command = "xdg-open http://{hostname}:{port}{txt.adminpath}"
 mode = "fork"
 ```
 
@@ -250,7 +256,7 @@ mode = "fork"
 The same service fields can be used as placeholders in `action.command`:
 
 ```toml
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 ```
 
 Common placeholders:
@@ -328,7 +334,7 @@ The full grammar:
 - A dangling backslash at the end, or an unclosed quote, is an error.
 
 ```toml
-command = "ssh '{hostname}'"
+command = "ssh -- '{hostname}'"
 ```
 
 ### Placeholders
@@ -352,6 +358,28 @@ those exact characters. This is why quoting a placeholder is a readability
 choice rather than a safety one: `{hostname}` and `'{hostname}'` are equally
 safe.
 
+Argument boundaries are not the whole option story: many programs interpret a
+single argument beginning with `-` as an option. Kinjo therefore rejects a
+text-field-led argument until the trusted template contains a literal `--`
+before it. Address and port placeholders are typed and cannot begin with `-`.
+For example, write `ssh -- {hostname}`, not `ssh {hostname}`.
+
+Programs without an options terminator, and templates that intentionally use a
+placeholder as an option value, may opt out explicitly:
+
+```toml
+[action]
+command = "program {txt.value}"
+mode = "fork"
+allow_option_like_values = true
+```
+
+This trusts the local rule author to understand that program's argument
+grammar. Kinjo never inserts `--` automatically because doing so would change
+the meaning of programs with a different grammar. A placeholder is never
+allowed in the program token (`argv[0]`): trusted local configuration must name
+the executable literally.
+
 ## Examples
 
 SSH into discovered SSH services:
@@ -367,7 +395,7 @@ equals = "_ssh._tcp"
 
 [action]
 description = "SSH into the selected service"
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 ```
 

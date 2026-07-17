@@ -8,6 +8,7 @@ use std::{
 
 use tokio_util::sync::CancellationToken;
 
+use super::inbox::{self, EventSender};
 use super::{DiscoveryEvent, DiscoveryOptions, ServiceTypeFilter};
 
 /// Which tokio runtime a backend's browse loop needs.
@@ -45,6 +46,9 @@ pub(super) enum BrowseOutcome {
     Startup(String),
     /// The loop was browsing and its event source ended on its own.
     Stopped,
+    /// Kinjo stopped the adapter because continuing would exceed a bounded
+    /// resource and make its discovered state unverifiable.
+    Overloaded(String),
     /// A finite stream finished normally. Only the explicit fake adapter ends
     /// this way; its samples remain valid.
     #[cfg(feature = "fake")]
@@ -83,18 +87,13 @@ impl DiscoveryWorker {
         browse: F,
     ) -> (Self, mpsc::Receiver<DiscoveryEvent>)
     where
-        F: FnOnce(
-                String,
-                Option<ServiceTypeFilter>,
-                mpsc::Sender<DiscoveryEvent>,
-                CancellationToken,
-            ) -> Fut
+        F: FnOnce(String, Option<ServiceTypeFilter>, EventSender, CancellationToken) -> Fut
             + Send
             + 'static,
         Fut: Future<Output = BrowseOutcome>,
     {
-        let (tx, rx) = mpsc::channel();
         let shutdown = CancellationToken::new();
+        let (tx, rx, inbox) = inbox::channel(&shutdown);
         let domain = options.domain().to_string();
         let service_type_filter = options.service_type().cloned();
         let token = shutdown.clone();
@@ -115,6 +114,10 @@ impl DiscoveryWorker {
                 )),
             };
 
+            let ended = inbox
+                .overload_reason()
+                .map(BrowseOutcome::Overloaded)
+                .unwrap_or(ended);
             *slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(ended);
             drop(keepalive);
         });
@@ -213,6 +216,36 @@ mod tests {
         while rx.recv().is_ok() {}
 
         assert_eq!(worker.outcome(), Some(BrowseOutcome::Stopped));
+    }
+
+    #[test]
+    fn overflowing_the_inbox_stops_the_worker_with_an_actionable_outcome() {
+        let (worker, rx) = DiscoveryWorker::spawn(
+            &options(),
+            RuntimeFlavor::CurrentThread,
+            |_domain, _service_type_filter, tx, _shutdown| async move {
+                for index in 0..=inbox::EVENT_CAPACITY {
+                    if tx
+                        .send(DiscoveryEvent::Status(format!("event-{index}")))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                BrowseOutcome::Stopped
+            },
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while worker.outcome().is_none() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let Some(BrowseOutcome::Overloaded(cause)) = worker.outcome() else {
+            panic!("expected an overloaded outcome");
+        };
+        assert_eq!(rx.iter().count(), inbox::EVENT_CAPACITY);
+        assert!(cause.contains("pending events"), "{cause}");
+        assert!(cause.contains("refresh to retry"), "{cause}");
     }
 
     /// The browse loop receives the validated domain and service-type filter,

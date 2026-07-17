@@ -1,8 +1,10 @@
 use std::{
+    borrow::Cow,
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     net::IpAddr,
     num::NonZeroU32,
+    sync::Arc,
     time::Instant,
 };
 
@@ -330,21 +332,54 @@ impl Entry {
         self.addresses.first().copied()
     }
 
-    pub fn field(&self, field: &str) -> Option<String> {
+    /// Look up a command/matcher field without copying text already owned by
+    /// this entry. Typed fields still format into an owned value.
+    pub(crate) fn field_value(&self, field: &str) -> Option<Cow<'_, str>> {
         match field {
-            "name" => Some(self.name.clone()),
-            "type" | "service_type" => Some(self.service_type.clone()),
-            "domain" => Some(self.domain.clone()),
-            "hostname" => self.hostname.clone(),
-            "address" => self.primary_address().map(|value| value.to_string()),
-            "port" => self.port.map(|value| value.to_string()),
+            "name" => Some(Cow::Borrowed(&self.name)),
+            "type" | "service_type" => Some(Cow::Borrowed(&self.service_type)),
+            "domain" => Some(Cow::Borrowed(&self.domain)),
+            "hostname" => self.hostname.as_deref().map(Cow::Borrowed),
+            "address" => self
+                .primary_address()
+                .map(|value| Cow::Owned(value.to_string())),
+            "port" => self.port.map(|value| Cow::Owned(value.to_string())),
             // `strip_prefix`, not `trim_start_matches`: the latter strips the
             // prefix repeatedly, so `txt.txt.path` would look up `path`
             // instead of the TXT key literally named `txt.path`.
-            field => field
-                .strip_prefix("txt.")
-                .and_then(|key| self.txt.get(key).cloned()),
+            field => field.strip_prefix("txt.").and_then(|key| {
+                self.txt
+                    .get(key)
+                    .or_else(|| {
+                        self.txt.iter().find_map(|(candidate, value)| {
+                            candidate.eq_ignore_ascii_case(key).then_some(value)
+                        })
+                    })
+                    .map(|value| Cow::Borrowed(value.as_str()))
+            }),
         }
+    }
+
+    /// Whether this entry carries `field`, without formatting or cloning its
+    /// value. Rule eligibility asks this much more often than it renders.
+    pub(crate) fn has_field(&self, field: &str) -> bool {
+        match field {
+            "name" | "type" | "service_type" | "domain" => true,
+            "hostname" => self.hostname.is_some(),
+            "address" => self.primary_address().is_some(),
+            "port" => self.port.is_some(),
+            field => field.strip_prefix("txt.").is_some_and(|key| {
+                self.txt.contains_key(key)
+                    || self
+                        .txt
+                        .keys()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(key))
+            }),
+        }
+    }
+
+    pub fn field(&self, field: &str) -> Option<String> {
+        self.field_value(field).map(Cow::into_owned)
     }
 
     pub fn searchable_text(&self) -> String {
@@ -552,7 +587,7 @@ pub struct EntryGroup {
     id: EntryGroupId,
     label: String,
     facts: GroupFacts,
-    instances: Vec<Entry>,
+    instances: Arc<[Entry]>,
 }
 
 impl EntryGroup {
@@ -611,7 +646,7 @@ impl EntryGroup {
     /// The logical services this row aggregates, in list order.
     pub fn child_services(&self) -> Vec<ChildService> {
         let mut buckets: BTreeMap<EntryGroupId, (LogicalService, usize)> = BTreeMap::new();
-        for record in &self.instances {
+        for record in self.instances.iter() {
             let (id, facts) = logical_service_of(record);
             let child = buckets.entry(id).or_insert_with(|| (facts, 0));
             child.1 += 1;
@@ -641,7 +676,7 @@ impl EntryGroup {
     /// collects unrelated services, whose TXT keys mean nothing side by side.
     pub fn txt(&self) -> BTreeMap<String, TxtValue> {
         let mut merged: BTreeMap<String, TxtValue> = BTreeMap::new();
-        for record in &self.instances {
+        for record in self.instances.iter() {
             for (key, value) in &record.txt {
                 match merged.get(key) {
                     None => {
@@ -683,6 +718,58 @@ pub fn browse_groups(records: &[Entry], mode: BrowseMode) -> Vec<EntryGroup> {
             .push(record.clone());
     }
 
+    groups_from_buckets(buckets)
+}
+
+/// The active browse rows plus all three browse-tab counts, computed while
+/// visiting each filtered entry once.
+pub(crate) struct BrowseProjection {
+    pub(crate) groups: Vec<EntryGroup>,
+    pub(crate) counts: [usize; 3],
+}
+
+pub(crate) fn browse_projection(records: &[Entry], active: BrowseMode) -> BrowseProjection {
+    const MODES: [BrowseMode; 3] = [
+        BrowseMode::LogicalService,
+        BrowseMode::Host,
+        BrowseMode::ServiceType,
+    ];
+
+    let active_index = browse_mode_index(active);
+    let mut identities: [HashSet<EntryGroupId>; 3] = std::array::from_fn(|_| HashSet::new());
+    let mut buckets: BTreeMap<EntryGroupId, (GroupFacts, Vec<Entry>)> = BTreeMap::new();
+
+    for record in records {
+        for (index, mode) in MODES.into_iter().enumerate() {
+            let (id, facts) = row_of(record, mode);
+            if index == active_index {
+                buckets
+                    .entry(id.clone())
+                    .or_insert_with(|| (facts, Vec::new()))
+                    .1
+                    .push(record.clone());
+            }
+            identities[index].insert(id);
+        }
+    }
+
+    BrowseProjection {
+        groups: groups_from_buckets(buckets),
+        counts: identities.map(|ids| ids.len()),
+    }
+}
+
+fn browse_mode_index(mode: BrowseMode) -> usize {
+    match mode {
+        BrowseMode::LogicalService => 0,
+        BrowseMode::Host => 1,
+        BrowseMode::ServiceType => 2,
+    }
+}
+
+fn groups_from_buckets(
+    buckets: BTreeMap<EntryGroupId, (GroupFacts, Vec<Entry>)>,
+) -> Vec<EntryGroup> {
     let mut groups: Vec<EntryGroup> = buckets
         .into_iter()
         .map(|(id, (facts, mut instances))| {
@@ -691,7 +778,7 @@ pub fn browse_groups(records: &[Entry], mode: BrowseMode) -> Vec<EntryGroup> {
                 label: facts.label(),
                 id,
                 facts,
-                instances,
+                instances: instances.into(),
             }
         })
         .collect();
@@ -1139,6 +1226,7 @@ mod tests {
         assert_eq!(record.field("txt.path").as_deref(), Some("plain"));
         // A TXT key literally named `txt.path` is reachable as `txt.txt.path`.
         assert_eq!(record.field("txt.txt.path").as_deref(), Some("nested"));
+        assert_eq!(record.field("txt.PATH").as_deref(), Some("plain"));
     }
 
     #[test]

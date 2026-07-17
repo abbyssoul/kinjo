@@ -1,7 +1,8 @@
-use std::{sync::mpsc, time::Duration};
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use super::inbox::EventSender;
 use super::session::DiscoverySession;
 use super::worker::{BrowseOutcome, DiscoveryWorker, RuntimeFlavor};
 use super::{DiscoveryEvent, DiscoveryOptions, Entry, ServiceTypeFilter};
@@ -32,7 +33,7 @@ pub(super) fn start(options: &DiscoveryOptions) -> DiscoverySession {
 async fn sample_loop(
     domain: String,
     service_type_filter: Option<ServiceTypeFilter>,
-    tx: mpsc::Sender<DiscoveryEvent>,
+    tx: EventSender,
     shutdown: CancellationToken,
 ) -> BrowseOutcome {
     if tx
@@ -106,6 +107,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::discovery::inbox;
 
     #[test]
     fn fake_records_carry_the_requested_domain_and_an_unresolved_entry() {
@@ -142,13 +144,14 @@ mod tests {
 
     #[tokio::test]
     async fn the_sample_loop_streams_status_then_filtered_records_and_completes() {
-        let (tx, rx) = mpsc::channel();
+        let shutdown = CancellationToken::new();
+        let (tx, rx) = inbox::test_channel(&shutdown);
 
         let outcome = sample_loop(
             "local".to_string(),
             Some(ServiceTypeFilter::parse("_ssh._tcp").unwrap()),
             tx,
-            CancellationToken::new(),
+            shutdown,
         )
         .await;
 
@@ -179,8 +182,8 @@ mod tests {
     /// block for the rest of the samples.
     #[tokio::test]
     async fn the_sample_loop_stops_when_cancelled_mid_stream() {
-        let (tx, rx) = mpsc::channel();
         let shutdown = CancellationToken::new();
+        let (tx, rx) = inbox::test_channel(&shutdown);
         // Cancelled up front: the loop must bail out at its first pause.
         shutdown.cancel();
 
@@ -201,10 +204,11 @@ mod tests {
     /// channel nobody reads.
     #[tokio::test]
     async fn the_sample_loop_stops_when_the_receiver_is_gone() {
-        let (tx, rx) = mpsc::channel();
+        let shutdown = CancellationToken::new();
+        let (tx, rx) = inbox::test_channel(&shutdown);
         drop(rx);
 
-        let outcome = sample_loop("local".to_string(), None, tx, CancellationToken::new()).await;
+        let outcome = sample_loop("local".to_string(), None, tx, shutdown).await;
 
         assert_eq!(outcome, BrowseOutcome::Stopped);
     }

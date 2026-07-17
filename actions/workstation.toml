@@ -8,5 +8,5 @@ equals = "_workstation._tcp"
 
 [action]
 description = "SSH into the selected workstation"
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"

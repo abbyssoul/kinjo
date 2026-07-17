@@ -20,7 +20,8 @@ use ratatui::{
 use crate::{
     discovery::{
         BrowseMode, DiscoveryEvent, DiscoverySession, Entry, EntryGroup, EntryGroupId, EntryId,
-        GroupingMode, RowHost, SessionPoll, SessionState, browse_groups, browse_row_count,
+        GroupingMode, MAX_DISCOVERED_OCCURRENCES, RowHost, SessionPoll, SessionState,
+        browse_projection,
     },
     plumber::{ActionOutcome, CommandConfig, MatchResult, PreparedCommand, RuleEngine},
 };
@@ -33,6 +34,12 @@ use super::{
     render,
     viewport::Window,
 };
+
+/// Preserve time for input and drawing even when discovery remains ready.
+const MAX_DISCOVERY_EVENTS_PER_TICK: usize = 256;
+/// Apply a queued input burst to one state snapshot without allowing a
+/// continuously-ready terminal to postpone drawing forever.
+const MAX_INPUT_EVENTS_PER_TICK: usize = 64;
 
 /// What a reload attempt came back with. There is no third case: a reload
 /// either produces a rule set complete enough to replace the running one, or it
@@ -138,6 +145,44 @@ impl AppMode {
     }
 }
 
+/// The open interaction and exactly the data meaningful to it. Picker anchors,
+/// matches, chosen actions, and indices cannot now exist independently or in a
+/// picker mode that does not use them.
+#[derive(Debug, Clone)]
+enum ModalState {
+    Browse,
+    Search,
+    TypeFilter,
+    ActionPicker {
+        anchor: PickerAnchor,
+        matches: Vec<MatchResult>,
+        index: usize,
+    },
+    InstancePicker {
+        anchor: PickerAnchor,
+        action: MatchResult,
+        index: usize,
+    },
+    ServicePicker {
+        index: usize,
+    },
+    Help,
+}
+
+impl ModalState {
+    fn mode(&self) -> AppMode {
+        match self {
+            Self::Browse => AppMode::Browse,
+            Self::Search => AppMode::Search,
+            Self::TypeFilter => AppMode::TypeFilter,
+            Self::ActionPicker { .. } => AppMode::ActionPicker,
+            Self::InstancePicker { .. } => AppMode::InstancePicker,
+            Self::ServicePicker { .. } => AppMode::ServicePicker,
+            Self::Help => AppMode::Help,
+        }
+    }
+}
+
 /// The running application: the event loop, the state it decides from, and the
 /// terminal it draws to.
 ///
@@ -175,25 +220,18 @@ pub struct App {
     /// dropping or replacing it stops the producer.
     pub(crate) session: DiscoverySession,
     pub(crate) records: BTreeMap<EntryId, Entry>,
+    /// Whether new occurrences are being rejected at the configured resource
+    /// ceiling. Kept separately so a later transient status event cannot hide
+    /// that the visible list is capped.
+    record_limit_reached: bool,
     pub(crate) filter: FilterState,
     /// The rows of the active browse projection, each carrying its own matches.
     /// Empty in the command grouping mode, which projects rules instead and
     /// builds [`Self::command_groups`].
     pub(crate) rows: Vec<BrowseRow>,
     pub(crate) selected: usize,
-    pub(crate) mode: AppMode,
+    modal: ModalState,
     pub(crate) type_filter_index: usize,
-    /// What an open picker is a view of. Set when a picker opens, cleared when
-    /// it closes, and the handle every rebuild below resolves against.
-    picker_anchor: Option<PickerAnchor>,
-    /// The actions an open picker lists. Rebuilt from `picker_anchor` on every
-    /// recompute, never carried across one, so it cannot outlive its records.
-    pub(crate) action_matches: Vec<MatchResult>,
-    pub(crate) action_index: usize,
-    /// The action an open instance picker is choosing a target for. Rebuilt
-    /// alongside `action_matches`.
-    pub(crate) pending_action: Option<MatchResult>,
-    pub(crate) instance_index: usize,
     pub(crate) status: String,
     /// Set by the quit keybindings; the event loop exits when it is true.
     should_quit: bool,
@@ -222,8 +260,6 @@ pub struct App {
     pub(crate) ticks: u64,
     /// Rows of the "group by command" view; populated only in that grouping mode.
     pub(crate) command_groups: Vec<CommandGroup>,
-    /// Cursor within the service picker opened from a command row.
-    pub(crate) service_picker_index: usize,
     /// Top line shown in the help overlay (0 = unscrolled). Help is generated
     /// from the active bindings, so it can be taller than the popup; this is how
     /// far down it the reader has moved. Clamped against the content when it
@@ -259,16 +295,12 @@ impl App {
             keybindings,
             session,
             records: BTreeMap::new(),
+            record_limit_reached: false,
             filter: FilterState::default(),
             rows: Vec::new(),
             selected: 0,
-            mode: AppMode::Browse,
+            modal: ModalState::Browse,
             type_filter_index: 0,
-            picker_anchor: None,
-            action_matches: Vec::new(),
-            action_index: 0,
-            pending_action: None,
-            instance_index: 0,
             status,
             should_quit: false,
             reload_requested: Arc::new(AtomicBool::new(false)),
@@ -278,13 +310,85 @@ impl App {
             tab_counts: [0; GroupingMode::TABS.len()],
             ticks: 0,
             command_groups: Vec::new(),
-            service_picker_index: 0,
             help_scroll: 0,
             details_scroll: 0,
             // Nothing has been drawn yet, and a layout claiming otherwise would
             // let a click land on a row that does not exist. The event loop
             // replaces this before the first frame.
             layout: LayoutSnapshot::default(),
+        }
+    }
+
+    pub(crate) fn mode(&self) -> AppMode {
+        self.modal.mode()
+    }
+
+    /// Enter a non-picker mode. Picker modes require their data and therefore
+    /// have dedicated constructors below rather than a discriminant-only set.
+    #[cfg(test)]
+    pub(crate) fn set_mode(&mut self, mode: AppMode) {
+        self.modal = match mode {
+            AppMode::Browse => ModalState::Browse,
+            AppMode::Search => ModalState::Search,
+            AppMode::TypeFilter => ModalState::TypeFilter,
+            AppMode::Help => ModalState::Help,
+            AppMode::ActionPicker | AppMode::InstancePicker | AppMode::ServicePicker => {
+                panic!("picker modes require construction-atomic state")
+            }
+        };
+    }
+
+    pub(crate) fn action_picker(&self) -> Option<(&[MatchResult], usize)> {
+        match &self.modal {
+            ModalState::ActionPicker { matches, index, .. } => Some((matches, *index)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn instance_picker(&self) -> Option<(&MatchResult, usize)> {
+        match &self.modal {
+            ModalState::InstancePicker { action, index, .. } => Some((action, *index)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn service_picker_index(&self) -> Option<usize> {
+        match &self.modal {
+            ModalState::ServicePicker { index } => Some(*index),
+            _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_action_picker_for_test(&mut self, matches: Vec<MatchResult>, index: usize) {
+        self.modal = ModalState::ActionPicker {
+            anchor: PickerAnchor::Row(EntryGroupId::ServiceType("test".to_string())),
+            matches,
+            index,
+        };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_instance_picker_for_test(&mut self, action: MatchResult, index: usize) {
+        self.modal = ModalState::InstancePicker {
+            anchor: PickerAnchor::Row(EntryGroupId::ServiceType("test".to_string())),
+            action,
+            index,
+        };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_service_picker_for_test(&mut self, index: usize) {
+        self.modal = ModalState::ServicePicker { index };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_picker_index_for_test(&mut self, new_index: usize) {
+        match &mut self.modal {
+            ModalState::ActionPicker { index, .. }
+            | ModalState::InstancePicker { index, .. }
+            | ModalState::ServicePicker { index } => *index = new_index,
+            _ => panic!("no picker is open"),
         }
     }
 
@@ -358,37 +462,63 @@ impl App {
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<Option<PreparedCommand>> {
         let _mouse_capture = MouseCaptureGuard::enable();
         self.recompute_visible();
+        let mut dirty = true;
+        let mut last_animation = std::time::Instant::now();
 
         loop {
-            self.ticks = self.ticks.wrapping_add(1);
-            self.poll_reload();
-            self.drain_discovery();
+            dirty |= self.poll_reload();
+            dirty |= self.drain_discovery();
 
-            // Settle the terminal size before measuring against it, so a resize
-            // is a new layout for this frame rather than the previous frame's
-            // one applied to a screen that has already changed shape.
-            terminal.autoresize()?;
-            self.update_layout(terminal.get_frame().area());
-            terminal.draw(|frame| render::render(frame, self))?;
+            if let Some((period, tick_step)) = self.animation_period()
+                && last_animation.elapsed() >= period
+            {
+                self.ticks = self.ticks.wrapping_add(tick_step);
+                last_animation = std::time::Instant::now();
+                dirty = true;
+            }
+
+            if dirty {
+                // Build details once. Its height and the rows drawn below are
+                // two reads of this same per-frame projection.
+                let details = render::DetailsContent::for_app(self);
+                terminal.autoresize()?;
+                self.update_layout_with_details_height(
+                    terminal.get_frame().area(),
+                    details.height(),
+                );
+                terminal.draw(|frame| render::render_with_details(frame, self, details))?;
+                dirty = false;
+            }
 
             if event::poll(Duration::from_millis(120))? {
-                match event::read()? {
-                    Event::Key(key) => {
-                        if key.kind == KeyEventKind::Release {
-                            continue;
+                for _ in 0..MAX_INPUT_EVENTS_PER_TICK {
+                    match event::read()? {
+                        Event::Key(key) => {
+                            if key.kind == KeyEventKind::Release {
+                                // Release events do not change the frame.
+                            } else {
+                                // Input is bounded by the geometry of the frame the
+                                // user saw. A burst updates that state repeatedly,
+                                // then pays for one replacement frame.
+                                if let Some(command) = self.handle_key(key, self.layout.area())? {
+                                    return Ok(Some(command));
+                                }
+                                dirty = true;
+                                if self.should_quit {
+                                    return Ok(None);
+                                }
+                            }
                         }
-                        // The screen the frame just drawn used: a key that moves
-                        // a modal window is bounded by the geometry the user is
-                        // looking at, from the same snapshot render drew from.
-                        if let Some(command) = self.handle_key(key, self.layout.area())? {
-                            return Ok(Some(command));
+                        Event::Mouse(mouse) => {
+                            self.handle_mouse(mouse);
+                            dirty = true;
                         }
-                        if self.should_quit {
-                            return Ok(None);
-                        }
+                        Event::Resize(_, _) => dirty = true,
+                        _ => {}
                     }
-                    Event::Mouse(mouse) => self.handle_mouse(mouse),
-                    _ => {}
+                    if !event::poll(Duration::ZERO)? {
+                        break;
+                    }
                 }
             }
         }
@@ -402,24 +532,52 @@ impl App {
     /// and the rectangles a click is tested against are all the same snapshot.
     /// A resize or a shorter selection therefore cannot strand the reader below
     /// the end of the content: the next snapshot pulls the scroll back up.
+    #[cfg(test)]
     pub(crate) fn update_layout(&mut self, area: Rect) {
+        let details_height = render::details_content_height(self);
+        self.update_layout_with_details_height(area, details_height);
+    }
+
+    fn update_layout_with_details_height(&mut self, area: Rect, details_height: usize) {
         self.layout = LayoutSnapshot::compute(
             area,
             Content {
                 list_total: self.active_count(),
-                details_total: render::details_content_height(self),
+                details_total: details_height,
             },
         );
         self.details_scroll = self.details_scroll.min(self.layout.details_max_scroll());
+    }
+
+    /// The next genuinely changing frame when no state/input event arrives.
+    /// Spinner and caret phases align on 240/480ms steps; occurrence ages need
+    /// only their displayed second to advance.
+    fn animation_period(&self) -> Option<(Duration, u64)> {
+        if self.session.state().is_listening() {
+            Some((Duration::from_millis(240), 2))
+        } else if self.mode() == AppMode::Search {
+            Some((Duration::from_millis(480), 4))
+        } else if self.visible_details_show_occurrence_ages() {
+            Some((Duration::from_secs(1), 8))
+        } else {
+            None
+        }
+    }
+
+    fn visible_details_show_occurrence_ages(&self) -> bool {
+        self.filter.grouping == GroupingMode::LogicalService
+            && self.rows.get(self.selected).is_some()
+            && self.layout.details_viewport() > 0
     }
 
     /// Take everything the session has produced since the last tick, and notice
     /// if it has ended. Crate-visible for the same reason as
     /// [`App::update_layout`]: a test that wants a frame the event loop could
     /// actually have drawn has to drive the loop's steps, not simulate them.
-    pub(crate) fn drain_discovery(&mut self) {
+    pub(crate) fn drain_discovery(&mut self) -> bool {
         let mut changed = false;
-        loop {
+        let mut visible_changed = false;
+        for _ in 0..MAX_DISCOVERY_EVENTS_PER_TICK {
             let event = match self.session.poll() {
                 SessionPoll::Event(event) => event,
                 SessionPoll::Idle => break,
@@ -427,17 +585,28 @@ impl App {
                 // ending rather than re-applying it on every tick.
                 SessionPoll::Ended(state) => {
                     changed |= self.apply_session_end(&state);
+                    visible_changed = true;
                     break;
                 }
             };
+            visible_changed = true;
             match event {
                 DiscoveryEvent::Upsert(record) => {
                     let id = record.id();
+                    let pending = EntryId::pending(record.registration());
+                    let replaces_pending = !id.is_pending() && self.records.contains_key(&pending);
+                    let grows = !self.records.contains_key(&id) && !replaces_pending;
+                    if grows && self.records.len() >= MAX_DISCOVERED_OCCURRENCES {
+                        self.record_limit_reached = true;
+                        self.status = format!(
+                            "discovery capped at {MAX_DISCOVERED_OCCURRENCES} occurrences; new occurrences are being ignored"
+                        );
+                        continue;
+                    }
                     // A real occurrence supersedes the registration's
                     // unresolved placeholder, if one is still listed.
                     if !id.is_pending() {
-                        self.records
-                            .remove(&EntryId::pending(record.registration()));
+                        self.records.remove(&pending);
                     }
                     self.records.insert(id, record);
                     changed = true;
@@ -446,20 +615,32 @@ impl App {
                     // Exactly the named occurrence: siblings of the same
                     // registration on other interfaces stay live.
                     changed |= self.records.remove(&id).is_some();
+                    self.reopen_record_capacity();
                 }
                 DiscoveryEvent::RemoveRegistration(registration) => {
                     let before = self.records.len();
                     self.records
                         .retain(|id, _| *id.registration() != registration);
                     changed |= self.records.len() != before;
+                    self.reopen_record_capacity();
                 }
                 DiscoveryEvent::Status(status) => {
-                    self.status = status;
+                    if !self.record_limit_reached {
+                        self.status = status;
+                    }
                 }
             }
         }
         if changed {
             self.recompute_visible();
+        }
+        visible_changed
+    }
+
+    fn reopen_record_capacity(&mut self) {
+        if self.record_limit_reached && self.records.len() < MAX_DISCOVERED_OCCURRENCES {
+            self.record_limit_reached = false;
+            self.status = "discovery capacity is available again".to_string();
         }
     }
 
@@ -492,6 +673,7 @@ impl App {
                 self.close_pickers();
                 let had_records = !self.records.is_empty();
                 self.records.clear();
+                self.record_limit_reached = false;
                 // Set last: the cause must be what the user is left looking at.
                 self.status = failure.message();
                 had_records
@@ -500,17 +682,32 @@ impl App {
     }
 
     fn recompute_visible(&mut self) {
-        let records = self.records.values().cloned().collect::<Vec<_>>();
-        self.filter.observe_types(&records);
-        let filtered = self.filter.apply(&records);
-        self.tab_counts = self.count_tabs(&filtered);
+        let records = self.records.values().collect::<Vec<_>>();
+        self.filter.observe_types(records.iter().copied());
+        let filtered = self.filter.apply(records.iter().copied());
+
+        // Command rows contain logical services, so that projection is useful
+        // even when no browse tab is active. The projection also counts every
+        // browse tab during the same walk over `filtered`.
+        let active_browse = self
+            .filter
+            .grouping
+            .browse_mode()
+            .unwrap_or(BrowseMode::LogicalService);
+        let projection = browse_projection(&filtered, active_browse);
+        self.tab_counts = [
+            projection.counts[0],
+            projection.counts[1],
+            projection.counts[2],
+            self.matcher.command_count(),
+        ];
 
         // The command tab groups configured rules rather than projecting the
         // discovered entries, so it has its own row builder.
-        let Some(browse) = self.filter.grouping.browse_mode() else {
-            self.recompute_command_groups(&filtered);
+        if self.filter.grouping.browse_mode().is_none() {
+            self.recompute_command_groups(projection.groups);
             return;
-        };
+        }
 
         self.command_groups = Vec::new();
         let previous = self
@@ -519,7 +716,8 @@ impl App {
             .map(|row| row.group.id().clone());
         // Each row is matched as it is built, so a row cannot exist without the
         // matches that belong to it.
-        self.rows = browse_groups(&filtered, browse)
+        self.rows = projection
+            .groups
             .into_iter()
             .map(|group| BrowseRow {
                 matches: self.matcher.matches_group(&group),
@@ -615,98 +813,85 @@ impl App {
     /// currently says, and the key handler — which runs against the same state
     /// the frame was drawn from — cannot confirm anything else.
     fn reconcile_action_pickers(&mut self) {
-        let Some(anchor) = self.picker_anchor.clone() else {
-            return;
-        };
-
-        // The identities under the cursors, read from the caches before they are
-        // replaced. Positions mean nothing across a rebuild; these do.
-        let chosen_action = self
-            .action_matches
-            .get(self.action_index)
-            .map(|result| result.command.name.clone());
-        let pending_command = self
-            .pending_action
-            .as_ref()
-            .map(|result| result.command.name.clone());
-        // A target's identity is the command it would run — task 006's own
-        // dedup key. An occurrence id would not do: address-expanded candidates
-        // all share one, so the cursor would snap back to the first address.
-        // This also makes "the argv changed under the cursor" indistinguishable
-        // from "the target is gone", which is what it should mean here.
-        let chosen_target = self.pending_action.as_ref().and_then(|result| {
-            result
-                .targets
-                .get(self.instance_index)
-                .map(|target| result.command.action.prepare(target).ok())
-        });
-
-        let matches = self.resolve_anchor(&anchor);
-        if matches.is_empty() {
-            let label = self.anchor_label(&anchor);
-            self.abandon_picker(format!("`{label}` is no longer available"));
-            return;
-        }
-        self.action_matches = matches;
-
-        if self.mode == AppMode::ActionPicker {
-            // An action the user was not on disappearing is not their problem;
-            // the one they were on disappearing is.
-            match chosen_action.and_then(|name| self.position_of_action(&name)) {
-                Some(index) => self.action_index = index,
-                None => self.abandon_picker("the selected action no longer matches".to_string()),
+        let previous = std::mem::replace(&mut self.modal, ModalState::Browse);
+        match previous {
+            ModalState::ActionPicker {
+                anchor,
+                matches: old_matches,
+                index: old_index,
+            } => {
+                let chosen = old_matches
+                    .get(old_index)
+                    .map(|result| result.command.name.as_str());
+                let matches = self.resolve_anchor(&anchor);
+                if matches.is_empty() {
+                    let label = self.anchor_label(&anchor);
+                    self.abandon_picker(format!("`{label}` is no longer available"));
+                    return;
+                }
+                let Some(index) = chosen.and_then(|name| {
+                    matches
+                        .iter()
+                        .position(|result| result.command.name == name)
+                }) else {
+                    self.abandon_picker("the selected action no longer matches".to_string());
+                    return;
+                };
+                self.modal = ModalState::ActionPicker {
+                    anchor,
+                    matches,
+                    index,
+                };
             }
-            return;
-        }
-
-        // Instance picker: the rule must still match, and the occurrence the
-        // cursor is on must still be one of its targets.
-        let Some(name) = pending_command else {
-            self.abandon_picker("the selected action no longer matches".to_string());
-            return;
-        };
-        let Some(live) = self
-            .action_matches
-            .iter()
-            .find(|result| result.command.name == name)
-            .cloned()
-        else {
-            self.abandon_picker(format!("`{name}` no longer matches"));
-            return;
-        };
-        let position = chosen_target.and_then(|chosen| {
-            live.targets
-                .iter()
-                .position(|target| live.command.action.prepare(target).ok() == chosen)
-        });
-        match position {
-            Some(index) => {
-                self.pending_action = Some(live);
-                self.instance_index = index;
+            ModalState::InstancePicker {
+                anchor,
+                action,
+                index,
+            } => {
+                let name = action.command.name.clone();
+                // A target's identity is the command it would run — task 006's
+                // dedup key. Address-expanded candidates share an occurrence
+                // id, while the prepared argv keeps them distinct.
+                let chosen_target = action
+                    .targets
+                    .get(index)
+                    .map(|target| action.command.action.prepare(target).ok());
+                let matches = self.resolve_anchor(&anchor);
+                if matches.is_empty() {
+                    let label = self.anchor_label(&anchor);
+                    self.abandon_picker(format!("`{label}` is no longer available"));
+                    return;
+                }
+                let Some(live) = matches
+                    .into_iter()
+                    .find(|result| result.command.name == name)
+                else {
+                    self.abandon_picker(format!("`{name}` no longer matches"));
+                    return;
+                };
+                let position = chosen_target.flatten().and_then(|chosen| {
+                    live.targets.iter().position(|target| {
+                        live.command.action.prepare(target).ok() == Some(chosen.clone())
+                    })
+                });
+                match position {
+                    Some(index) => {
+                        self.modal = ModalState::InstancePicker {
+                            anchor,
+                            action: live,
+                            index,
+                        };
+                    }
+                    None => self.abandon_picker("the selected target is gone".to_string()),
+                }
             }
-            None => self.abandon_picker("the selected target is gone".to_string()),
+            other => self.modal = other,
         }
-    }
-
-    fn position_of_action(&self, name: &str) -> Option<usize> {
-        self.action_matches
-            .iter()
-            .position(|result| result.command.name == name)
-    }
-
-    /// How many rows each tab would list, in [`GroupingMode::TABS`] order: the
-    /// browse tabs count the rows of their projection of `filtered`, and the
-    /// command tab counts the configured rules it lists.
-    fn count_tabs(&self, filtered: &[Entry]) -> [usize; GroupingMode::TABS.len()] {
-        GroupingMode::TABS.map(|mode| match mode.browse_mode() {
-            Some(browse) => browse_row_count(filtered, browse),
-            None => self.matcher.command_count(),
-        })
     }
 
     /// Build the command-grouped rows: each configured command paired with the
     /// distinct logical services that match at least one of its instances.
-    fn recompute_command_groups(&mut self, filtered: &[Entry]) {
+    fn recompute_command_groups(&mut self, service_groups: Vec<EntryGroup>) {
         let previous = self
             .command_groups
             .get(self.selected)
@@ -716,10 +901,12 @@ impl App {
         let chosen_service = self
             .command_groups
             .get(self.selected)
-            .and_then(|group| group.services.get(self.service_picker_index))
+            .and_then(|group| {
+                self.service_picker_index()
+                    .and_then(|index| group.services.get(index))
+            })
             .map(|service| service.id().clone());
 
-        let service_groups = browse_groups(filtered, BrowseMode::LogicalService);
         let mut command_groups: Vec<CommandGroup> = self
             .matcher
             .commands()
@@ -735,8 +922,8 @@ impl App {
             .map(|(i, group)| (group.command.name.clone(), i))
             .collect();
         for service_group in &service_groups {
-            for result in self.matcher.matches_group(service_group) {
-                if let Some(&i) = index.get(&result.command.name) {
+            for command_name in self.matcher.matching_command_names(service_group) {
+                if let Some(&i) = index.get(&command_name) {
                     command_groups[i].services.push(service_group.clone());
                 }
             }
@@ -766,7 +953,7 @@ impl App {
     /// without this a removed service hands its position — and the user's
     /// pending Enter — to whichever service slid into it.
     fn reconcile_service_picker(&mut self, chosen: Option<EntryGroupId>) {
-        if self.mode != AppMode::ServicePicker {
+        if self.mode() != AppMode::ServicePicker {
             return;
         }
         let Some(services) = self.command_groups.get(self.selected).map(|g| &g.services) else {
@@ -774,7 +961,7 @@ impl App {
             return;
         };
         match chosen.and_then(|id| services.iter().position(|service| *service.id() == id)) {
-            Some(index) => self.service_picker_index = index,
+            Some(index) => self.modal = ModalState::ServicePicker { index },
             None => self.abandon_picker("the selected service is gone".to_string()),
         }
     }
@@ -800,10 +987,7 @@ impl App {
     /// Close any open modal/picker and drop its transient state. Clearing the
     /// already-empty action state on plain closes (search/help) is harmless.
     fn return_to_browse(&mut self) {
-        self.mode = AppMode::Browse;
-        self.picker_anchor = None;
-        self.action_matches.clear();
-        self.pending_action = None;
+        self.modal = ModalState::Browse;
     }
 
     /// Close an open picker because what it was showing is gone, saying so.
@@ -825,13 +1009,14 @@ impl App {
     /// it. It is passed in rather than written back by the renderer: the app
     /// state a key changes stays something only key handling changes.
     fn handle_key(&mut self, key: KeyEvent, area: Rect) -> Result<Option<PreparedCommand>> {
-        let action = self.keybindings.resolve(self.mode.key_mode(), key);
+        let mode = self.mode();
+        let action = self.keybindings.resolve(mode.key_mode(), key);
         if action == Some(Action::Quit) {
             self.should_quit = true;
             return Ok(None);
         }
 
-        match self.mode {
+        match mode {
             AppMode::Browse => self.handle_browse_key(action, key),
             AppMode::Search => {
                 self.handle_search_key(action, key);
@@ -883,10 +1068,10 @@ impl App {
             Some(Action::MoveDown) => self.move_selection(1),
             Some(Action::MoveUp) => self.move_selection(-1),
             Some(Action::Invoke) => return self.invoke_selected(),
-            Some(Action::OpenSearch) => self.mode = AppMode::Search,
+            Some(Action::OpenSearch) => self.modal = ModalState::Search,
             Some(Action::OpenTypeFilter) => {
                 self.type_filter_index = 0;
-                self.mode = AppMode::TypeFilter;
+                self.modal = ModalState::TypeFilter;
             }
             Some(Action::TabNext) => self.cycle_tab(1),
             Some(Action::TabPrev) => self.cycle_tab(-1),
@@ -897,14 +1082,14 @@ impl App {
             // Help opens where it is read from: the top.
             Some(Action::OpenHelp) => {
                 self.help_scroll = 0;
-                self.mode = AppMode::Help;
+                self.modal = ModalState::Help;
             }
             // Typing a character with nothing bound to it starts a search with
             // it, so the query never loses the keystroke that opened it.
             None => {
                 if let Some(ch) = typed_char(key) {
                     self.filter.text_query.push(ch);
-                    self.mode = AppMode::Search;
+                    self.modal = ModalState::Search;
                     self.recompute_visible();
                 }
             }
@@ -996,18 +1181,36 @@ impl App {
         &mut self,
         action: Option<Action>,
     ) -> Result<Option<PreparedCommand>> {
-        let len = self.action_matches.len();
+        let (len, current) = self
+            .action_picker()
+            .map(|(matches, index)| (matches.len(), index))
+            .unwrap_or_default();
         match action {
             Some(Action::PickerClose) => self.return_to_browse(),
             Some(Action::PickerDown) => {
-                self.action_index = move_index(self.action_index, len, 1);
+                if let ModalState::ActionPicker { index, .. } = &mut self.modal {
+                    *index = move_index(current, len, 1);
+                }
             }
             Some(Action::PickerUp) => {
-                self.action_index = move_index(self.action_index, len, -1);
+                if let ModalState::ActionPicker { index, .. } = &mut self.modal {
+                    *index = move_index(current, len, -1);
+                }
             }
             Some(Action::PickerSelect) => {
-                if let Some(chosen) = self.action_matches.get(self.action_index).cloned() {
-                    return self.choose_action(chosen);
+                let chosen = match &self.modal {
+                    ModalState::ActionPicker {
+                        anchor,
+                        matches,
+                        index,
+                    } => matches
+                        .get(*index)
+                        .cloned()
+                        .map(|action| (action, anchor.clone())),
+                    _ => None,
+                };
+                if let Some((chosen, anchor)) = chosen {
+                    return self.choose_action(chosen, anchor);
                 }
             }
             _ => {}
@@ -1019,25 +1222,34 @@ impl App {
         &mut self,
         action: Option<Action>,
     ) -> Result<Option<PreparedCommand>> {
-        let count = self
-            .pending_action
-            .as_ref()
-            .map(|action| action.targets.len())
-            .unwrap_or(0);
+        let (count, current) = self
+            .instance_picker()
+            .map(|(action, index)| (action.targets.len(), index))
+            .unwrap_or_default();
         match action {
             Some(Action::PickerClose) => self.return_to_browse(),
             Some(Action::PickerDown) => {
-                self.instance_index = move_index(self.instance_index, count, 1);
+                if let ModalState::InstancePicker { index, .. } = &mut self.modal {
+                    *index = move_index(current, count, 1);
+                }
             }
             Some(Action::PickerUp) => {
-                self.instance_index = move_index(self.instance_index, count, -1);
+                if let ModalState::InstancePicker { index, .. } = &mut self.modal {
+                    *index = move_index(current, count, -1);
+                }
             }
             Some(Action::PickerSelect) => {
-                let Some(pending) = self.pending_action.clone() else {
+                let pending = match &self.modal {
+                    ModalState::InstancePicker { action, index, .. } => {
+                        Some((action.clone(), *index))
+                    }
+                    _ => None,
+                };
+                let Some((pending, index)) = pending else {
                     self.return_to_browse();
                     return Ok(None);
                 };
-                let Some(record) = pending.targets.get(self.instance_index) else {
+                let Some(record) = pending.targets.get(index) else {
                     self.return_to_browse();
                     return Ok(None);
                 };
@@ -1072,7 +1284,7 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         // Modal pickers and help stay keyboard-driven; the mouse only drives
         // the browse layer (which remains visible while searching).
-        if !matches!(self.mode, AppMode::Browse | AppMode::Search) {
+        if !matches!(self.mode(), AppMode::Browse | AppMode::Search) {
             return;
         }
         let position = Position::new(mouse.column, mouse.row);
@@ -1117,13 +1329,15 @@ impl App {
             _ => {
                 // Anchor to the row itself, not to its position: whatever the
                 // picker goes on to show is rebuilt from this.
-                self.picker_anchor = Some(PickerAnchor::Row(row.group.id().clone()));
+                let anchor = PickerAnchor::Row(row.group.id().clone());
                 if matches.len() == 1 {
-                    return self.choose_action(matches.into_iter().next().unwrap());
+                    return self.choose_action(matches.into_iter().next().unwrap(), anchor);
                 }
-                self.action_matches = matches;
-                self.action_index = 0;
-                self.mode = AppMode::ActionPicker;
+                self.modal = ModalState::ActionPicker {
+                    anchor,
+                    matches,
+                    index: 0,
+                };
                 Ok(None)
             }
         }
@@ -1145,8 +1359,7 @@ impl App {
                 self.run_command_on(&command, &service)
             }
             _ => {
-                self.service_picker_index = 0;
-                self.mode = AppMode::ServicePicker;
+                self.modal = ModalState::ServicePicker { index: 0 };
                 Ok(None)
             }
         }
@@ -1171,11 +1384,11 @@ impl App {
         };
         // The command view lists rules, not browse rows, so an instance picker
         // opened from here anchors to the service the user picked.
-        self.picker_anchor = Some(PickerAnchor::Service {
+        let anchor = PickerAnchor::Service {
             command: command.name.clone(),
             service: service.id().clone(),
-        });
-        self.choose_action(result)
+        };
+        self.choose_action(result, anchor)
     }
 
     fn handle_service_picker_key(
@@ -1190,17 +1403,25 @@ impl App {
         match action {
             Some(Action::PickerClose) => self.return_to_browse(),
             Some(Action::PickerDown) => {
-                self.service_picker_index = move_index(self.service_picker_index, count, 1);
+                if let ModalState::ServicePicker { index } = &mut self.modal {
+                    *index = move_index(*index, count, 1);
+                }
             }
             Some(Action::PickerUp) => {
-                self.service_picker_index = move_index(self.service_picker_index, count, -1);
+                if let ModalState::ServicePicker { index } = &mut self.modal {
+                    *index = move_index(*index, count, -1);
+                }
             }
             Some(Action::PickerSelect) => {
                 let Some(group) = self.command_groups.get(self.selected) else {
                     self.return_to_browse();
                     return Ok(None);
                 };
-                let Some(service) = group.services.get(self.service_picker_index).cloned() else {
+                let Some(service) = self
+                    .service_picker_index()
+                    .and_then(|index| group.services.get(index))
+                    .cloned()
+                else {
                     self.return_to_browse();
                     return Ok(None);
                 };
@@ -1212,15 +1433,21 @@ impl App {
         Ok(None)
     }
 
-    fn choose_action(&mut self, action: MatchResult) -> Result<Option<PreparedCommand>> {
+    fn choose_action(
+        &mut self,
+        action: MatchResult,
+        anchor: PickerAnchor,
+    ) -> Result<Option<PreparedCommand>> {
         // The rule decides whether there is a choice to make: it knows what its
         // candidates would actually run. Anything left to pick between here
         // genuinely differs, and one target means the alternatives were the
         // same command, not that the difference was deemed unimportant.
         if action.needs_selection() {
-            self.pending_action = Some(action);
-            self.instance_index = 0;
-            self.mode = AppMode::InstancePicker;
+            self.modal = ModalState::InstancePicker {
+                anchor,
+                action,
+                index: 0,
+            };
             return Ok(None);
         }
 
@@ -1256,9 +1483,12 @@ impl App {
     }
 
     /// Perform the config reload when one was requested (SIGHUP).
-    fn poll_reload(&mut self) {
+    fn poll_reload(&mut self) -> bool {
         if self.reload_requested.swap(false, Ordering::Relaxed) {
             self.reload_config();
+            true
+        } else {
+            false
         }
     }
 
@@ -1322,6 +1552,7 @@ impl App {
         // never arrive on the new list — old and new cannot mix.
         self.session = replacement;
         self.records.clear();
+        self.record_limit_reached = false;
         self.close_pickers();
         self.selected = 0;
         self.details_scroll = 0;
@@ -1334,7 +1565,7 @@ impl App {
     /// they do not cache matcher or record data.
     fn close_pickers(&mut self) {
         if matches!(
-            self.mode,
+            self.mode(),
             AppMode::ActionPicker | AppMode::InstancePicker | AppMode::ServicePicker
         ) {
             self.return_to_browse();
@@ -1426,9 +1657,7 @@ fn move_index(index: usize, len: usize, delta: isize) -> usize {
 /// silently type its letter. SHIFT is not excluded — it is already folded into
 /// the character itself.
 fn typed_char(key: KeyEvent) -> Option<char> {
-    let modified = key
-        .modifiers
-        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+    let modified = !(key.modifiers - KeyModifiers::SHIFT).is_empty();
     match key.code {
         KeyCode::Char(ch) if !modified && !ch.is_control() => Some(ch),
         _ => None,
@@ -1448,7 +1677,7 @@ fn find_selection<T, K: PartialEq>(
 
 #[cfg(test)]
 mod tests {
-    use std::{net::IpAddr, num::NonZeroU32, sync::mpsc};
+    use std::{net::IpAddr, num::NonZeroU32, sync::mpsc, time::Instant};
 
     use super::*;
     use crate::ui::keymap::KeyBindings;
@@ -1513,7 +1742,7 @@ name = "ssh"
 equals = "_ssh._tcp"
 
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#,
             )
@@ -1592,7 +1821,7 @@ name = "ssh"
 [match.service_type]
 equals = "_ssh._tcp"
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#;
 
@@ -1625,6 +1854,69 @@ mode = "execute"
             builder.add_str(&format!("test-{index}"), source).unwrap();
         }
         builder.build()
+    }
+
+    /// Repeatable projection workload for task 102. Run alone in release mode:
+    ///
+    /// `cargo test --release benchmark_recompute_workload -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual performance workload"]
+    fn benchmark_recompute_workload() {
+        let mut builder = MatcherBuilder::new();
+        for index in 0..24 {
+            let service_type = ["_ssh._tcp", "_http._tcp", "_ipp._tcp", "_smb._tcp"][index % 4];
+            builder
+                .add_str(
+                    &format!("rule-{index}"),
+                    &format!(
+                        r#"
+[metadata]
+name = "rule-{index}"
+
+[match.service_type]
+equals = "{service_type}"
+
+[action]
+command = "tool http://{{hostname}}/{{name}}"
+mode = "execute"
+"#
+                    ),
+                )
+                .unwrap();
+        }
+        let records: Vec<Entry> = (0..2_000)
+            .map(|index| {
+                let service_type = ["_ssh._tcp", "_http._tcp", "_ipp._tcp", "_smb._tcp"][index % 4];
+                let mut entry = Entry::new(format!("service-{index}"), service_type, "local");
+                entry.hostname = Some(format!("host-{}.local", index % 500));
+                entry.addresses = vec![format!("192.0.2.{}", index % 250 + 1).parse().unwrap()];
+                entry.port = Some(1_000 + (index % 50) as u16);
+                entry
+                    .txt
+                    .insert("path".to_string(), format!("/item/{index}"));
+                entry
+            })
+            .collect();
+        let mut app = app_with(builder.build(), records);
+
+        let started = Instant::now();
+        for iteration in 0..12 {
+            app.filter.grouping = GroupingMode::TABS[iteration % GroupingMode::TABS.len()];
+            app.filter.text_query = if iteration % 3 == 0 {
+                "host 12".to_string()
+            } else {
+                String::new()
+            };
+            app.recompute_visible();
+            std::hint::black_box(app.active_count());
+        }
+        let elapsed = started.elapsed();
+
+        eprintln!(
+            "recompute workload: 12 projections, 2000 entries, 24 rules: {:.3} ms total ({:.3} ms/projection)",
+            elapsed.as_secs_f64() * 1_000.0,
+            elapsed.as_secs_f64() * 1_000.0 / 12.0
+        );
     }
 
     fn app_with(matcher: Matcher, records: Vec<Entry>) -> App {
@@ -1765,7 +2057,7 @@ mode = "execute"
     #[test]
     fn mouse_is_ignored_in_modal_modes() {
         let mut app = mouse_app(8);
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
 
         app.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 5, 4));
         app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 6));
@@ -1837,7 +2129,7 @@ mode = "execute"
 
         send(&mut app, KeyCode::Char('z'));
 
-        assert_eq!(app.mode, AppMode::Search);
+        assert_eq!(app.mode(), AppMode::Search);
         assert_eq!(app.filter.text_query, "z");
         assert_eq!(app.rows.len(), 1);
         assert_eq!(app.rows[0].group.label(), "zulu");
@@ -1861,7 +2153,7 @@ mode = "execute"
         assert_eq!(app.filter.text_query, "", "ctrl-u clears the query");
 
         send(&mut app, KeyCode::Enter);
-        assert_eq!(app.mode, AppMode::Browse, "enter closes search");
+        assert_eq!(app.mode(), AppMode::Browse, "enter closes search");
     }
 
     /// Search is append-only, so Delete has nothing after a cursor to remove;
@@ -1883,7 +2175,7 @@ mode = "execute"
         // Deleting past the start is a no-op rather than an error.
         send(&mut app, KeyCode::Delete);
         assert_eq!(app.filter.text_query, "");
-        assert_eq!(app.mode, AppMode::Search, "editing stays open");
+        assert_eq!(app.mode(), AppMode::Search, "editing stays open");
     }
 
     /// Deleting re-filters the list; a stale row set would misreport the query.
@@ -1912,11 +2204,11 @@ mode = "execute"
                 vec![ssh("alpha", "10.0.0.1"), ssh("zulu", "10.0.0.2")],
             );
             send(&mut app, KeyCode::Char('z'));
-            assert_eq!(app.mode, AppMode::Search);
+            assert_eq!(app.mode(), AppMode::Search);
 
             send(&mut app, close);
 
-            assert_eq!(app.mode, AppMode::Browse, "{close:?} leaves search");
+            assert_eq!(app.mode(), AppMode::Browse, "{close:?} leaves search");
             assert_eq!(
                 app.filter.text_query, "z",
                 "{close:?} must keep the active query"
@@ -1943,7 +2235,7 @@ mode = "execute"
         .unwrap();
 
         assert_eq!(app.filter.text_query, "");
-        assert_eq!(app.mode, AppMode::Search, "clearing stays in search");
+        assert_eq!(app.mode(), AppMode::Search, "clearing stays in search");
         assert_eq!(app.rows.len(), 2);
     }
 
@@ -1991,7 +2283,7 @@ clear = ["ctrl-k"]
 
     fn help_app() -> App {
         let mut app = app_with(Matcher::default(), vec![ssh("zulu", "10.0.0.2")]);
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
         app
     }
 
@@ -2003,10 +2295,10 @@ clear = ["ctrl-k"]
     fn help_opens_at_the_top_and_scrolls_down_a_row_at_a_time() {
         let mut app = help_app();
         app.help_scroll = 7;
-        app.mode = AppMode::Browse;
+        app.set_mode(AppMode::Browse);
 
         send(&mut app, KeyCode::Char('?'));
-        assert_eq!(app.mode, AppMode::Help);
+        assert_eq!(app.mode(), AppMode::Help);
         assert_eq!(app.help_scroll, 0, "help must open where it is read from");
 
         app.handle_key(key(KeyCode::Down), SHORT_SCREEN).unwrap();
@@ -2144,6 +2436,38 @@ up = []
         assert_eq!(app.filter.text_query, "z");
     }
 
+    #[test]
+    fn super_and_meta_chords_do_not_type_into_the_search_query() {
+        let mut app = app_with(Matcher::default(), vec![ssh("zulu", "10.0.0.2")]);
+        send(&mut app, KeyCode::Char('z'));
+
+        for modifier in [KeyModifiers::SUPER, KeyModifiers::META] {
+            app.handle_key(KeyEvent::new(KeyCode::Char('w'), modifier), SCREEN)
+                .unwrap();
+        }
+
+        assert_eq!(app.filter.text_query, "z");
+    }
+
+    #[test]
+    fn an_input_burst_moves_the_selection_before_the_next_frame() {
+        let mut app = app_with(
+            Matcher::default(),
+            vec![
+                ssh("alpha", "10.0.0.1"),
+                ssh("beta", "10.0.0.2"),
+                ssh("gamma", "10.0.0.3"),
+                ssh("zulu", "10.0.0.4"),
+            ],
+        );
+
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Down), SCREEN).unwrap();
+        }
+
+        assert_eq!(app.selected, 3);
+    }
+
     /// Shift is folded into the character, so capitals must still type.
     #[test]
     fn shifted_characters_type_into_the_search_query() {
@@ -2155,7 +2479,7 @@ up = []
         )
         .unwrap();
 
-        assert_eq!(app.mode, AppMode::Search);
+        assert_eq!(app.mode(), AppMode::Search);
         assert_eq!(app.filter.text_query, "Z");
     }
 
@@ -2186,12 +2510,12 @@ help = ["f1"]
 
         // `j` is no longer navigation, so it falls through to typing a search.
         send(&mut app, KeyCode::Char('j'));
-        assert_eq!(app.mode, AppMode::Search);
+        assert_eq!(app.mode(), AppMode::Search);
         assert_eq!(app.filter.text_query, "j");
         send(&mut app, KeyCode::Esc);
 
         send(&mut app, KeyCode::F(1));
-        assert_eq!(app.mode, AppMode::Help, "the rebound help key opens help");
+        assert_eq!(app.mode(), AppMode::Help, "the rebound help key opens help");
 
         remove(&path);
     }
@@ -2214,7 +2538,7 @@ same_host = []
 
         // `s` is unbound in browse, so it types instead of filtering by host.
         assert_eq!(app.filter.host_filter, None);
-        assert_eq!(app.mode, AppMode::Search);
+        assert_eq!(app.mode(), AppMode::Search);
 
         remove(&path);
     }
@@ -2228,7 +2552,7 @@ same_host = []
         assert_eq!(app.rows.len(), 2);
 
         send(&mut app, KeyCode::Char('t'));
-        assert_eq!(app.mode, AppMode::TypeFilter);
+        assert_eq!(app.mode(), AppMode::TypeFilter);
         // Discovered types are sorted: _http._tcp is first.
         send(&mut app, KeyCode::Char(' '));
 
@@ -2252,7 +2576,7 @@ same_host = []
         assert_eq!(app.filter.grouping, GroupingMode::Host);
         send(&mut app, KeyCode::Tab);
         assert_eq!(app.filter.grouping, GroupingMode::ServiceType);
-        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(app.mode(), AppMode::Browse);
 
         // Stepping back past the first tab wraps to the last (command) tab.
         send(&mut app, KeyCode::BackTab);
@@ -2285,7 +2609,7 @@ same_host = []
 
         let command = send(&mut app, KeyCode::Enter).expect("execute action returns a command");
 
-        assert_eq!(command.argv, vec!["ssh", "alpha.local"]);
+        assert_eq!(command.argv, vec!["ssh", "--", "alpha.local"]);
     }
 
     #[test]
@@ -2293,12 +2617,12 @@ same_host = []
         let mut app = app_with(matcher_from(&[SSH, PING]), vec![ssh("alpha", "10.0.0.1")]);
 
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::ActionPicker);
-        assert_eq!(app.action_matches.len(), 2);
+        assert_eq!(app.mode(), AppMode::ActionPicker);
+        assert_eq!(app.action_picker().unwrap().0.len(), 2);
 
         // action_index 0 is `ssh` (insertion order); selecting it runs that action.
         let command = send(&mut app, KeyCode::Enter).expect("picked action runs");
-        assert_eq!(command.argv, vec!["ssh", "alpha.local"]);
+        assert_eq!(command.argv, vec!["ssh", "--", "alpha.local"]);
     }
 
     #[test]
@@ -2317,7 +2641,7 @@ same_host = []
             send(&mut app, KeyCode::Enter).is_none(),
             "fork does not exec"
         );
-        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(app.mode(), AppMode::Browse);
         assert!(app.status.contains("launched `ping`"));
     }
 
@@ -2334,7 +2658,7 @@ requirements = ["definitely-absent-xyz"]
 [match.service_type]
 equals = "_ssh._tcp"
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#;
         let mut app = app_with(
@@ -2349,7 +2673,7 @@ mode = "execute"
 
         // The row's two hosts differ, so the action is offered for selection.
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::InstancePicker);
+        assert_eq!(app.mode(), AppMode::InstancePicker);
 
         // Choosing one reports the rule's failure; nothing else runs.
         assert!(send(&mut app, KeyCode::Enter).is_none());
@@ -2373,7 +2697,7 @@ mode = "execute"
         assert_eq!(app.rows[0].group.instances()[0].addresses.len(), 2);
 
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::InstancePicker);
+        assert_eq!(app.mode(), AppMode::InstancePicker);
 
         // Candidates follow address order: index 1 is 10.0.0.2.
         send(&mut app, KeyCode::Down);
@@ -2472,7 +2796,7 @@ mode = "execute"
         // Invoking the aggregate runs the command against the concrete child
         // that matches it, not against the row.
         let command = send(&mut app, KeyCode::Enter).expect("the ssh child runs");
-        assert_eq!(command.argv, vec!["ssh", "nas.local"]);
+        assert_eq!(command.argv, vec!["ssh", "--", "nas.local"]);
     }
 
     #[test]
@@ -2483,7 +2807,7 @@ mode = "execute"
         let mut beta = service_on("beta", "_ssh._tcp", "beta.local", 2222);
         beta.addresses = vec!["10.0.0.2".parse().unwrap()];
 
-        // `ssh {hostname}` names no address or port, so nothing about the rule
+        // `ssh -- {hostname}` names no address or port, so nothing about the rule
         // looks instance-specific — which is exactly why an aggregate row used
         // to run its first child without asking.
         let mut app = app_with(matcher_from(&[SSH]), vec![alpha, beta]);
@@ -2500,10 +2824,10 @@ mode = "execute"
         // The two children would ssh to two different hosts, so the aggregate
         // offers them up rather than answering for them.
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::InstancePicker);
+        assert_eq!(app.mode(), AppMode::InstancePicker);
         send(&mut app, KeyCode::Down);
         let command = send(&mut app, KeyCode::Enter).expect("the chosen child runs");
-        assert_eq!(command.argv, vec!["ssh", "beta.local"]);
+        assert_eq!(command.argv, vec!["ssh", "--", "beta.local"]);
     }
 
     #[test]
@@ -2520,9 +2844,9 @@ mode = "execute"
 
         assert_eq!(app.command_groups[0].services.len(), 2);
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::ServicePicker);
+        assert_eq!(app.mode(), AppMode::ServicePicker);
         let command = send(&mut app, KeyCode::Enter).expect("the picked service runs");
-        assert_eq!(command.argv, vec!["ssh", "alpha.local"]);
+        assert_eq!(command.argv, vec!["ssh", "--", "alpha.local"]);
     }
 
     #[test]
@@ -2830,7 +3154,7 @@ mode = "execute"
         assert_eq!(single.command_groups[0].services.len(), 1);
 
         let command = send(&mut single, KeyCode::Enter).expect("single service runs");
-        assert_eq!(command.argv, vec!["ssh", "alpha.local"]);
+        assert_eq!(command.argv, vec!["ssh", "--", "alpha.local"]);
 
         let mut many = app_with(
             matcher_from(&[SSH]),
@@ -2841,11 +3165,11 @@ mode = "execute"
         assert_eq!(many.command_groups[0].services.len(), 2);
 
         assert!(send(&mut many, KeyCode::Enter).is_none());
-        assert_eq!(many.mode, AppMode::ServicePicker);
+        assert_eq!(many.mode(), AppMode::ServicePicker);
         // Services sort by label; index 1 is `beta`.
         send(&mut many, KeyCode::Down);
         let command = send(&mut many, KeyCode::Enter).expect("picked service runs");
-        assert_eq!(command.argv, vec!["ssh", "beta.local"]);
+        assert_eq!(command.argv, vec!["ssh", "--", "beta.local"]);
     }
 
     // ── refresh & config reload ─────────────────────────────────────────────
@@ -2988,6 +3312,70 @@ mode = "execute"
         assert!(app.status.contains("discovery stopped"));
     }
 
+    #[test]
+    fn discovery_drain_yields_after_its_per_frame_budget() {
+        let (mut app, tx) = app_with_session(Matcher::default(), Vec::new());
+        for index in 0..=MAX_DISCOVERY_EVENTS_PER_TICK {
+            tx.send(DiscoveryEvent::Upsert(Entry::new(
+                format!("service-{index}"),
+                "_http._tcp",
+                "local",
+            )))
+            .unwrap();
+        }
+
+        app.drain_discovery();
+        assert_eq!(app.records.len(), MAX_DISCOVERY_EVENTS_PER_TICK);
+
+        app.drain_discovery();
+        assert_eq!(app.records.len(), MAX_DISCOVERY_EVENTS_PER_TICK + 1);
+    }
+
+    #[test]
+    fn record_capacity_rejects_new_occurrences_but_allows_updates_and_reopens() {
+        let (mut app, tx) = app_with_session(Matcher::default(), Vec::new());
+        for index in 0..MAX_DISCOVERED_OCCURRENCES {
+            let record = Entry::new(format!("service-{index}"), "_http._tcp", "local")
+                .with_occurrence(Some(OccurrenceId(NonZeroU32::new(1).unwrap())));
+            app.records.insert(record.id(), record);
+        }
+
+        let mut updated = Entry::new("service-0", "_http._tcp", "local")
+            .with_occurrence(Some(OccurrenceId(NonZeroU32::new(1).unwrap())));
+        updated.port = Some(8080);
+        tx.send(DiscoveryEvent::Upsert(updated.clone())).unwrap();
+        tx.send(DiscoveryEvent::Upsert(Entry::new(
+            "overflow",
+            "_http._tcp",
+            "local",
+        )))
+        .unwrap();
+        app.drain_discovery();
+
+        assert_eq!(app.records.len(), MAX_DISCOVERED_OCCURRENCES);
+        assert_eq!(
+            app.records.get(&updated.id()).and_then(|entry| entry.port),
+            Some(8080)
+        );
+        assert!(app.status.contains("discovery capped"), "{}", app.status);
+
+        let removed = Entry::new("service-1", "_http._tcp", "local")
+            .with_occurrence(Some(OccurrenceId(NonZeroU32::new(1).unwrap())));
+        tx.send(DiscoveryEvent::Remove(removed.id())).unwrap();
+        app.drain_discovery();
+        assert_eq!(app.records.len(), MAX_DISCOVERED_OCCURRENCES - 1);
+        assert!(app.status.contains("available again"), "{}", app.status);
+
+        tx.send(DiscoveryEvent::Upsert(Entry::new(
+            "replacement",
+            "_http._tcp",
+            "local",
+        )))
+        .unwrap();
+        app.drain_discovery();
+        assert_eq!(app.records.len(), MAX_DISCOVERED_OCCURRENCES);
+    }
+
     /// A startup error's cause must survive: it is carried by the failure, not
     /// left on a status line for the next event to erase.
     #[test]
@@ -3019,12 +3407,12 @@ mode = "execute"
         let (mut app, tx) =
             app_with_session(matcher_from(&[SSH, PING]), vec![ssh("alpha", "10.0.0.1")]);
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::ActionPicker);
+        assert_eq!(app.mode(), AppMode::ActionPicker);
 
         drop(tx);
         app.drain_discovery();
 
-        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(app.mode(), AppMode::Browse);
         assert!(app.records.is_empty());
     }
 
@@ -3037,12 +3425,12 @@ mode = "execute"
         let alpha = ssh("alpha", "10.0.0.1");
         let (mut app, tx) = app_with_session(matcher_from(&[SSH, PING]), vec![alpha.clone()]);
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::ActionPicker);
+        assert_eq!(app.mode(), AppMode::ActionPicker);
 
         tx.send(DiscoveryEvent::Remove(alpha.id())).unwrap();
         app.drain_discovery();
 
-        assert_eq!(app.mode, AppMode::Browse, "the picker must not survive");
+        assert_eq!(app.mode(), AppMode::Browse, "the picker must not survive");
         assert!(
             send(&mut app, KeyCode::Enter).is_none(),
             "confirming must not run the retracted service"
@@ -3062,15 +3450,15 @@ mode = "execute"
 
         // Two hosts prepare two different commands, so the picker opens.
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::InstancePicker);
-        assert_eq!(app.pending_action.as_ref().unwrap().targets.len(), 2);
+        assert_eq!(app.mode(), AppMode::InstancePicker);
+        assert_eq!(app.instance_picker().unwrap().0.targets.len(), 2);
 
         // Move to beta, then have discovery retract exactly beta.
         send(&mut app, KeyCode::Down);
         tx.send(DiscoveryEvent::Remove(beta.id())).unwrap();
         app.drain_discovery();
 
-        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(app.mode(), AppMode::Browse);
         assert!(app.status.contains("gone"), "status was: {}", app.status);
     }
 
@@ -3084,7 +3472,7 @@ mode = "execute"
         let (mut app, tx) = app_with_session(matcher_from(&[PING_ADDR]), vec![original.clone()]);
 
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::InstancePicker);
+        assert_eq!(app.mode(), AppMode::InstancePicker);
         // Address order gives index 1 = 10.0.0.2.
         send(&mut app, KeyCode::Down);
 
@@ -3104,7 +3492,7 @@ mode = "execute"
         app.drain_discovery();
 
         assert_eq!(
-            app.mode,
+            app.mode(),
             AppMode::Browse,
             "the chosen address is gone, so the picker must not stand"
         );
@@ -3133,7 +3521,11 @@ mode = "execute"
         tx.send(DiscoveryEvent::Upsert(renumbered)).unwrap();
         app.drain_discovery();
 
-        assert_eq!(app.mode, AppMode::InstancePicker, "the picker must survive");
+        assert_eq!(
+            app.mode(),
+            AppMode::InstancePicker,
+            "the picker must survive"
+        );
         let command = send(&mut app, KeyCode::Enter).expect("the chosen address runs");
         assert_eq!(
             command.argv,
@@ -3153,17 +3545,19 @@ mode = "execute"
             vec![alpha.clone(), unrelated.clone()],
         );
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::ActionPicker);
+        assert_eq!(app.mode(), AppMode::ActionPicker);
         // Move onto `ping`, so the retained selection is observable.
         send(&mut app, KeyCode::Down);
-        let chosen = app.action_matches[app.action_index].command.name.clone();
+        let (matches, index) = app.action_picker().unwrap();
+        let chosen = matches[index].command.name.clone();
 
         tx.send(DiscoveryEvent::Remove(unrelated.id())).unwrap();
         app.drain_discovery();
 
-        assert_eq!(app.mode, AppMode::ActionPicker, "the picker must survive");
+        assert_eq!(app.mode(), AppMode::ActionPicker, "the picker must survive");
+        let (matches, index) = app.action_picker().unwrap();
         assert_eq!(
-            app.action_matches[app.action_index].command.name, chosen,
+            matches[index].command.name, chosen,
             "the cursor must stay on the action the user chose"
         );
     }
@@ -3187,26 +3581,31 @@ mode = "execute"
         app.recompute_visible();
 
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::ServicePicker);
+        assert_eq!(app.mode(), AppMode::ServicePicker);
         assert_eq!(app.command_groups[0].services.len(), 3);
 
         // Index 1 of [alpha, beta, gamma] is beta.
         send(&mut app, KeyCode::Down);
-        assert_eq!(app.service_picker_index, 1);
+        assert_eq!(app.service_picker_index(), Some(1));
 
         // alpha goes; beta is now index 0 and gamma inherits index 1.
         tx.send(DiscoveryEvent::Remove(alpha.id())).unwrap();
         app.drain_discovery();
 
-        assert_eq!(app.mode, AppMode::ServicePicker, "the picker must survive");
         assert_eq!(
-            app.service_picker_index, 0,
+            app.mode(),
+            AppMode::ServicePicker,
+            "the picker must survive"
+        );
+        assert_eq!(
+            app.service_picker_index(),
+            Some(0),
             "the cursor must follow beta, not stay on the index gamma now holds"
         );
         let command = send(&mut app, KeyCode::Enter).expect("the chosen service runs");
         assert_eq!(
             command.argv,
-            vec!["ssh", "beta.local"],
+            vec!["ssh", "--", "beta.local"],
             "the service the user chose must run, never the one that inherited its index"
         );
     }
@@ -3224,6 +3623,7 @@ equals = "admin"
 [action]
 command = "open {hostname}"
 mode = "execute"
+allow_option_like_values = true
 "#;
         const ANY_HTTP: &str = r#"
 [metadata]
@@ -3233,6 +3633,7 @@ equals = "_http._tcp"
 [action]
 command = "curl {hostname}"
 mode = "execute"
+allow_option_like_values = true
 "#;
         let mut record = Entry::new("nas", "_http._tcp", "local");
         record.hostname = Some("nas.local".to_string());
@@ -3242,11 +3643,9 @@ mode = "execute"
             app_with_session(matcher_from(&[TXT_RULE, ANY_HTTP]), vec![record.clone()]);
 
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::ActionPicker);
-        assert_eq!(
-            app.action_matches[app.action_index].command.name,
-            "open-admin"
-        );
+        assert_eq!(app.mode(), AppMode::ActionPicker);
+        let (matches, index) = app.action_picker().unwrap();
+        assert_eq!(matches[index].command.name, "open-admin");
 
         // The role changes; `open-admin` stops matching, `curl` still does.
         let mut demoted = record.clone();
@@ -3256,7 +3655,7 @@ mode = "execute"
         app.drain_discovery();
 
         assert_eq!(
-            app.mode,
+            app.mode(),
             AppMode::Browse,
             "the action under the cursor no longer matches, so the picker must go"
         );
@@ -3266,7 +3665,7 @@ mode = "execute"
             app.status
         );
         // And it must not have quietly slid onto `curl`.
-        assert!(app.action_matches.is_empty());
+        assert!(app.action_picker().is_none());
     }
 
     /// Explicit fake discovery: running out of samples is the normal ending of
@@ -3304,6 +3703,47 @@ mode = "execute"
         );
     }
 
+    #[test]
+    fn idle_redraws_only_for_content_that_visibly_animates() {
+        let idle = App::new(
+            test_cli(),
+            Matcher::default(),
+            KeyBindings::default(),
+            DiscoverySession::ended(SessionState::Complete),
+        );
+        assert_eq!(idle.animation_period(), None);
+
+        let live = app_with(Matcher::default(), vec![]);
+        assert_eq!(
+            live.animation_period(),
+            Some((Duration::from_millis(240), 2))
+        );
+
+        let mut aged = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
+        aged.session = DiscoverySession::ended(SessionState::Complete);
+        aged.update_layout(SCREEN);
+        assert_eq!(
+            aged.animation_period(),
+            Some((Duration::from_secs(1), 8)),
+            "logical-service details display occurrence ages"
+        );
+
+        aged.filter.grouping = GroupingMode::Host;
+        aged.recompute_visible();
+        aged.update_layout(SCREEN);
+        assert_eq!(
+            aged.animation_period(),
+            None,
+            "host details do not display occurrence ages"
+        );
+
+        aged.set_mode(AppMode::Search);
+        assert_eq!(
+            aged.animation_period(),
+            Some((Duration::from_millis(480), 4))
+        );
+    }
+
     /// Fake discovery is the smoke-test surface, so it has to be able to show
     /// the behavior the app actually has. Task 006 makes an aggregate row ask
     /// which host to act on when its children would run different commands —
@@ -3337,10 +3777,10 @@ mode = "execute"
             "the sample set must put SSH on two hosts"
         );
 
-        // `ssh {hostname}` over two hosts is two different commands.
+        // `ssh -- {hostname}` over two hosts is two different commands.
         assert!(send(&mut app, KeyCode::Enter).is_none());
         assert_eq!(
-            app.mode,
+            app.mode(),
             AppMode::InstancePicker,
             "the row must ask which host rather than run one"
         );
@@ -3348,7 +3788,7 @@ mode = "execute"
         // Occurrences sort by registration name: raspberry-pi, then workstation.
         send(&mut app, KeyCode::Down);
         let command = send(&mut app, KeyCode::Enter).expect("the chosen host runs");
-        assert_eq!(command.argv, vec!["ssh", "workstation.local"]);
+        assert_eq!(command.argv, vec!["ssh", "--", "workstation.local"]);
     }
 
     /// Refresh is the recovery action: it must work *from* a failed session.
@@ -3541,7 +3981,7 @@ mode = "execute"
             "and still match the discovered services"
         );
         let command = send(&mut app, KeyCode::Enter).expect("the working action still runs");
-        assert_eq!(command.argv, vec!["ssh", "alpha.local"]);
+        assert_eq!(command.argv, vec!["ssh", "--", "alpha.local"]);
     }
 
     /// The one the old lenient reload got wrong: a valid file next to an invalid
@@ -3665,13 +4105,13 @@ mode = "execute"
                 ReloadOutcome::Loaded(Box::new(Matcher::default()))
             }));
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::ActionPicker);
+        assert_eq!(app.mode(), AppMode::ActionPicker);
 
         app.reload_requested.store(true, Ordering::Relaxed);
         app.poll_reload();
 
-        assert_eq!(app.mode, AppMode::Browse);
-        assert!(app.action_matches.is_empty());
+        assert_eq!(app.mode(), AppMode::Browse);
+        assert!(app.action_picker().is_none());
     }
 
     /// The mirror of the test above: a picker is stale only because the rules
@@ -3682,13 +4122,13 @@ mode = "execute"
         let mut app = app_with(matcher_from(&[SSH, PING]), vec![ssh("alpha", "10.0.0.1")])
             .with_config_loader(rejects(&["/cfg/ssh.toml: unterminated quote"]));
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::ActionPicker);
+        assert_eq!(app.mode(), AppMode::ActionPicker);
 
         app.reload_requested.store(true, Ordering::Relaxed);
         app.poll_reload();
 
-        assert_eq!(app.mode, AppMode::ActionPicker);
-        assert_eq!(app.action_matches.len(), 2);
+        assert_eq!(app.mode(), AppMode::ActionPicker);
+        assert_eq!(app.action_picker().unwrap().0.len(), 2);
     }
 
     #[test]
@@ -3727,7 +4167,7 @@ mode = "execute"
         // visible but poisoned the status, quitting on the next unrelated key.
         let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
         send(&mut app, KeyCode::Char('?'));
-        assert_eq!(app.mode, AppMode::Help);
+        assert_eq!(app.mode(), AppMode::Help);
 
         app.handle_key(
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
@@ -3743,10 +4183,10 @@ mode = "execute"
         let mut app = app_with(Matcher::default(), vec![ssh("alpha", "10.0.0.1")]);
 
         send(&mut app, KeyCode::Char('?'));
-        assert_eq!(app.mode, AppMode::Help);
+        assert_eq!(app.mode(), AppMode::Help);
 
         send(&mut app, KeyCode::Esc);
-        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(app.mode(), AppMode::Browse);
     }
 
     #[test]
@@ -3986,7 +4426,7 @@ mode = "execute"
             "a missing requirement must not execute"
         );
         assert!(app.status.contains("kinjo-absent-tool-xyz"));
-        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(app.mode(), AppMode::Browse);
     }
 
     #[test]
@@ -4018,7 +4458,7 @@ mode = "execute"
             app.status
                 .contains("command `kinjo-absent-binary-xyz` not found")
         );
-        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(app.mode(), AppMode::Browse);
     }
 
     #[test]
@@ -4031,14 +4471,14 @@ mode = "execute"
         );
 
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::ActionPicker);
-        assert_eq!(app.action_matches.len(), 2);
+        assert_eq!(app.mode(), AppMode::ActionPicker);
+        assert_eq!(app.action_picker().unwrap().0.len(), 2);
 
         // action_index 1 is the missing-binary command (insertion order).
         send(&mut app, KeyCode::Down);
         assert!(send(&mut app, KeyCode::Enter).is_none());
-        assert_eq!(app.mode, AppMode::Browse);
-        assert!(app.action_matches.is_empty());
+        assert_eq!(app.mode(), AppMode::Browse);
+        assert!(app.action_picker().is_none());
         assert!(app.status.contains("cannot run `ghost`"));
     }
 }

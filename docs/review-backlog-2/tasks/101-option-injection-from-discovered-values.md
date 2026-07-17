@@ -1,9 +1,19 @@
 # Task 101 — Leading-dash option injection from discovered values
 
 - **Priority**: P0 (trust model)
-- **Status**: ready — but **blocked on an owner decision**; see "Decision needed".
+- **Status**: done
 - **Depends on**: none
 - **Likely conflicts**: 102 (both touch `plumber`)
+
+> **Reconciliation (2026-07-17).** The owner decision this task asked for has
+> been made and recorded in
+> [ADR 0003](../../adr/0003-command-templates-are-option-safe-by-default.md).
+> **The ADR supersedes the "Decision needed", "Scope", "Tests", and "Definition
+> of Done" sections below**, which are retained only as the record of how the
+> question was posed. Read the ADR first, then the
+> "Implementing ADR 0003" section at the foot of this file. The earlier text
+> recommends option 3 (author-written `--`); the owner chose something stronger
+> than any option listed — default rejection with an explicit opt-out.
 
 ## Problem
 
@@ -99,3 +109,140 @@ arbitrary program's flag grammar.
   example.
 - Regression tests as above.
 - Completion gate green.
+
+## Follow-up validation note (2026-07-17)
+
+**Finding confirmed, but this task is not ready to implement unchanged.** A
+literal `--` is already an ordinary template token, so option 3 as scoped above
+adds documentation and tests but does not change default behaviour or the
+shipped SSH rules. An owner must therefore choose one of these coherent
+outcomes:
+
+- keep P0 and require a default-safe implementation plus updates to shipped
+  rules; or
+- explicitly accept author responsibility, document it in an ADR, and lower
+  the priority because no code-level safety property was added.
+
+The illustrative hostile *hostname* may depend on what the discovery adapter
+accepts as a hostname; the general issue remains because service names and TXT
+values are network-controlled and can occupy option-sensitive argv positions.
+
+Also include interpolation into `argv[0]` in the trust-model decision.
+`CommandTemplate` deliberately permits a field fragment in the program token,
+which lets discovered data choose the executable. Either prohibit that shape
+or document it as authority intentionally granted by trusted local config.
+
+Finally, normalise the task status: the file says both `ready` and "blocked on
+an owner decision", while the index says `ready`. Use `blocked` until that
+decision is recorded.
+
+## Implementing ADR 0003 (2026-07-17)
+
+The decision is recorded; this section is what to build. It supersedes
+"Decision needed", "Scope", "Tests", and "Definition of Done" above.
+
+### What the ADR decided
+
+Templates are option-safe **by default**, enforced at load time:
+
+- `argv[0]` must be entirely literal — no field fragment may select or partly
+  construct the executable.
+- Before a literal `--`, a token whose **first character can come from an
+  untrusted text field** is rejected. `address` and `port` are exempt: they
+  render from typed values (`IpAddr`/`u16`) that cannot begin with `-`.
+- Kinjo never inserts `--`; the rule author writes it.
+- `action.allow_option_like_values = true` is the explicit, narrow opt-out. It
+  never relaxes the literal-`argv[0]` rule.
+- Shipped rules use `ssh -- {hostname}`.
+
+Note the check is **static**: "first character can come from a field" is
+decidable at compile time by asking whether the token's first `Fragment` is a
+`Field`. `user@{hostname}` stays legal (first char is `u`); a bare
+`{hostname}` before any `--` does not. Do not implement this as a runtime scan
+of rendered values — that would move a load-time guarantee onto the hot path
+and lose the "reject before it can be selected" property.
+
+### Existing tests this decision obsoletes
+
+Three tests encode the shape ADR 0003 now prohibits. They must be updated or
+removed as part of this task, not left to fail:
+
+- `template.rs::a_placeholder_program_name_compiles` — asserts
+  `{hostname} --flag` compiles. Now rejected; invert it.
+- `lib.rs::failed_placeholder_program_is_raw_for_exec_but_safe_in_final_stderr`
+  — builds a rule with `command = "{hostname} --flag"`. Needs a different
+  vehicle for its real subject (exec failure text stays raw for exec but is
+  escaped in the final report). Pick a literal program that does not exist.
+- `plumber/mod.rs::a_candidate_that_cannot_prepare_is_offered_rather_than_skipped`
+  — uses `{name} --version` so an empty name renders an empty program. That
+  rule no longer loads. See below before rewriting it.
+
+Also update `CommandTemplate::compile`'s doc comment, which currently states
+the opposite policy ("A placeholder program name is allowed: it is only
+knowable per record, and `CommandAction::prepare` checks the rendered
+result").
+
+### Watch for: `prepare` may become infallible
+
+With `argv[0]` literal and `CommandConfig::template_fields_resolve` already
+gating candidates on every non-address field resolving, there may be no
+remaining way for `CommandAction::prepare` to fail. If so, three things become
+dead:
+
+- `prepare`'s `if argv[0].is_empty()` check (`plumber/mod.rs`),
+- `distinct_targets`' `Vec<Option<PreparedCommand>>` and its `.ok()`,
+- the "a candidate that cannot prepare is kept as a target rather than
+  dropped" rule and its test.
+
+That last one is deliberate round-1 work (task 006: "a failing candidate must
+not hand its turn to another service"). **If ADR 0003 subsumes it, say so
+explicitly** — in this task's completion record and in a note on ADR 0003 —
+rather than deleting it quietly. If a genuine remaining failure mode exists,
+keep the machinery and re-point the test at that mode. Either outcome is fine;
+an unexamined deletion is not.
+
+### Compatibility
+
+This rejects input that was **valid, supported, and possible** — merely
+unsafe. `CONTEXT.md`'s compatibility constraint currently permits rejection
+only of input that was "malformed, unsupported, or semantically impossible",
+so this task must widen that wording to cover a deliberate safety rejection,
+citing ADR 0003.
+
+Consequence to handle, not just note: startup loads leniently, so an upgrading
+user's now-invalid rules are **skipped with a warning printed on exit** — their
+commands silently stop appearing. Decide and record whether that is acceptable
+or whether this rejection deserves louder treatment (it is the one case where a
+skipped file is the user's own working config breaking under an upgrade).
+`docs/release-notes.md` needs a migration entry either way.
+
+### Definition of Done (supersedes the one above)
+
+- Load-time enforcement of the four ADR 0003 rules, with actionable errors
+  naming the remedy (`--`, a literal prefix, or the opt-out).
+- `action.allow_option_like_values` parsed, validated, and documented in
+  `docs/actions.md` alongside a "leading-dash values" security note.
+- Shipped `actions/*.toml` updated; `ssh -- {hostname}` verified end to end.
+- The three obsoleted tests resolved, and the `prepare`-infallibility question
+  answered in the completion record.
+- `CONTEXT.md` compatibility wording widened; `docs/release-notes.md` migration
+  entry added.
+- `fuzz/fuzz_targets/prepare_command.rs`'s oracle extended: it now has a real
+  invariant to assert — no rendered `argv[0]` contains discovered text, and no
+  pre-`--` argument begins with `-` unless the rule opted out.
+- Completion gate green.
+
+## Completion Record (2026-07-17)
+
+- Implemented ADR 0003 in `CommandTemplate`: `argv[0]` is literal, field-led
+  pre-terminator arguments are rejected by default, typed address/port fields
+  remain safe, and `allow_option_like_values = true` is the explicit opt-out.
+- Updated shipped SSH rules, integration fixtures, action documentation,
+  compatibility language, release migration notes, and the fuzz oracle. The
+  fake-backend smoke run produced `ssh -- <hostname>` end to end.
+- `prepare` remains fallible through its public Interface because callers may
+  provide an entry missing a referenced field. Matcher candidates prove fields
+  resolve; their failure-preserving path remains defensive, as recorded in ADR
+  0003.
+- Completion gate and `cargo check --manifest-path fuzz/Cargo.toml --bin
+  prepare_command` passed.

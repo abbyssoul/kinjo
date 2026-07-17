@@ -1,7 +1,7 @@
 # Task 102 — Recompute pipeline: remove the clone cascade
 
 - **Priority**: P1 (performance)
-- **Status**: ready
+- **Status**: done
 - **Depends on**: none
 - **Likely conflicts**: 103, 105 (same file), 107 (builds on this)
 
@@ -104,3 +104,45 @@ the tests, not a speedup target.
 - Drive `scripts/drive-tui.sh` on `--backend fake` and confirm the list,
   counts, details, and pickers are unchanged.
 - Completion gate green.
+
+## Follow-up validation note (2026-07-17)
+
+**Finding confirmed; expand the measurement and hot-path inventory.** Static
+inspection supports the clone/re-bucketing diagnosis, but the report supplies
+no profile or benchmark and therefore has not established that this is the
+largest cost. Before and after the change, measure frame latency and
+allocations with hundreds/thousands of entries, tens of rules, active search,
+and command view.
+
+Additional costs to include when sizing the implementation:
+
+- `Entry::field` returns an owned `String`, so predicates, existence checks,
+  and template resolution clone values that could be borrowed internally.
+- Command view calculates full `MatchResult`s (candidate cloning, preparation,
+  and deduplication) when it only needs the matching command name, then clones
+  whole groups. Preserve the supported `RuleEngine` extension seam, but avoid
+  discarded work through an internal or backwards-compatible query.
+- `EntryGroup` aggregate getters independently rebuild logical counts, service
+  types, child services, and TXT projections; some render paths request more
+  than one of these for the same group.
+- `terminal::text` always allocates, even when the value contains no characters
+  requiring escaping. Treat this as a secondary optimisation after measurement.
+
+Prefer a construction-atomic aggregate projection that computes related facts
+once over a collection of isolated clone removals. Preserve output order and
+the public `RuleEngine` contract.
+
+## Completion Record (2026-07-17)
+
+- Added a repeatable release workload covering 2,000 entries, 24 rules, all
+  projections, command view, and active fuzzy search. Baseline: 776.871 ms for
+  12 projections (64.739 ms/projection). Final: 234.750 ms total (19.562
+  ms/projection), a 69.8% reduction.
+- One construction-atomic browse projection now produces active rows and all
+  browse-tab counts in one record walk. Removed the initial full-record clone,
+  borrowed entry fields internally, compiled fuzzy queries once, shared group
+  occurrence storage, and added a backwards-compatible rule-name query for the
+  command view.
+- `distinct_targets` now uses an order-preserving `HashSet` membership check,
+  making deduplication linear in candidate count.
+- Fake and live-backend TUI smoke checks and the completion gate passed.

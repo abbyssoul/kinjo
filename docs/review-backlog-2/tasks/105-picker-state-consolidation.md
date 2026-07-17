@@ -1,7 +1,7 @@
 # Task 105 — Consolidate App's modal/picker state
 
 - **Priority**: P2 (maintainability)
-- **Status**: ready
+- **Status**: done
 - **Depends on**: 102 (same file; let the recompute reshape settle first)
 - **Likely conflicts**: 102, 103, 110
 
@@ -107,3 +107,35 @@ Whatever the shape:
   behaviour change.
 - Drive `scripts/drive-tui.sh` through each picker and confirm no regression.
 - Completion gate green.
+
+## Follow-up validation note (2026-07-17)
+
+**The enum/construction-atomic state direction is valid, but two claims need
+correction.** `picker_anchor` is not `Some` for all three picker modes:
+`ServicePicker` opens without one and becomes anchored only after a service is
+selected. Model that valid transition rather than forcing the stated invariant.
+
+Most of `reconcile_action_pickers` protects against live discovery records
+disappearing or changing while a picker is open, not merely against parallel
+fields becoming desynchronised. A state enum will remove illegal combinations,
+but stale-data revalidation and abandon-with-reason behaviour must remain. Set
+the shortening expectation accordingly.
+
+Finally, “illegal state cannot compile” is not an ordinary unit-test assertion.
+Use construction tests around the available constructors/accessors, or a
+compile-fail test only if the type is public enough for that to add value. The
+three picker handlers should be consolidated only where the shared handler is
+shallower than the explicit branches.
+
+## Completion Record (2026-07-17)
+
+- Replaced seven parallel fields with one construction-atomic `ModalState`.
+  Action and instance variants require their anchor and live data; the service
+  picker models its valid pre-anchor transition separately.
+- Reconciliation now consumes and rebuilds one variant while preserving all
+  stale-record, chosen-identity, and abandon-with-reason behavior. Render reads
+  narrow picker accessors and remains pure over `App`.
+- Kept the three selection handlers explicit where their select actions differ;
+  their shared cursor primitive remains `move_index`, avoiding a closure-heavy
+  Interface with no additional Depth.
+- Picker smoke tests and the completion gate passed.

@@ -17,13 +17,16 @@
 mod entry;
 #[cfg(feature = "fake")]
 mod fake;
+mod inbox;
 mod mdns;
 mod options;
 mod session;
+mod txt;
 mod worker;
 #[cfg(feature = "zeroconf")]
 mod zeroconf;
 
+pub(crate) use entry::browse_projection;
 pub use entry::{
     BrowseMode, ChildService, Entry, EntryGroup, EntryGroupId, EntryId, GroupFacts, GroupingMode,
     HostAggregate, HostKey, LogicalService, OccurrenceId, Registration, RowHost, RowServiceType,
@@ -35,6 +38,10 @@ pub use options::{
     ServiceTypeFilter, TransportProtocol,
 };
 pub use session::{DiscoveryFailure, DiscoverySession, FailureKind, SessionPoll, SessionState};
+
+/// Maximum number of independently actionable occurrences Kinjo will retain or
+/// track from an untrusted discovery source.
+pub(crate) const MAX_DISCOVERED_OCCURRENCES: usize = 4_096;
 
 /// An event emitted by a discovery backend.
 #[derive(Debug, Clone)]

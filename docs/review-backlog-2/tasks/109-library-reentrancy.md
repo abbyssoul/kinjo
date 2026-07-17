@@ -1,7 +1,7 @@
 # Task 109 — Library re-entrancy of `run()`
 
 - **Priority**: P2 (library-contract bug)
-- **Status**: ready
+- **Status**: done
 - **Depends on**: none
 - **Likely conflicts**: none
 
@@ -80,3 +80,34 @@ the second is a one-line, low-risk improvement worth taking regardless.
   contract or made re-entrant, deliberately.
 - Binary behaviour unchanged; signal safety preserved.
 - Completion gate green.
+
+## Follow-up validation note (2026-07-17)
+
+**Re-entrancy finding confirmed. Add one public-library panic to this task.**
+`PreparedCommand` exposes `argv` publicly, while `plumber::exec::exec` indexes
+`argv[0]`. An external library caller can construct `PreparedCommand` with an
+empty vector and trigger a panic even though the template path never produces
+one.
+
+Choose one structural fix:
+
+- validate empty argv at `exec` and return an error; or
+- make `PreparedCommand` construction atomic with a validated constructor and
+  non-public invariant-bearing field.
+
+Add a regression test through the public surface. If compatibility prevents
+privatising the field, validation at `exec` is required. This addition is
+independent of whether `run()` is documented as single-shot or made re-entrant.
+
+## Completion Record (2026-07-17)
+
+- Sequential `run()` calls are supported. Enhanced diagnostics install once
+  when possible; a hook already installed by another library is success, not a
+  process failure.
+- SIGHUP routing uses an async-signal-safe atomic pointer to the latest run's
+  flag. Published flags intentionally live for the process lifetime so a
+  signal racing a re-point cannot observe freed storage. A regression test
+  proves the second install receives the signal and the first does not.
+- Public `exec(PreparedCommand)` validates both an empty argv and empty program
+  and returns an actionable error without indexing or panicking.
+- Completion gate passed.

@@ -1,9 +1,20 @@
 # Task 108 — Probe cycles must not starve browse events
 
-- **Priority**: P2 (latency bug, mdns-sd backend)
-- **Status**: ready
+- **Priority**: P2 (latency bug, mdns-sd backend) — but schedule with 107,
+  which shares its ADR
+- **Status**: done
 - **Depends on**: none
-- **Likely conflicts**: none
+- **Likely conflicts**: 107 (same ADR, same module; design and land together)
+
+> **Reconciliation (2026-07-17).**
+> [ADR 0005](../../adr/0005-discovery-overload-fails-closed.md) settles this
+> task's design question: mDNS "runs at most 32 probe resolvers concurrently,
+> applies results incrementally, and continues polling browse events while
+> probes are active. Probe cycles do not overlap." That is the multiplexing
+> this task asked for, plus the concurrency bound the follow-up note asked for.
+> The problem statement below stands; the ADR decides the shape. Treat 107 and
+> 108 as one piece of work in `src/discovery/` — the ADR's probe-concurrency
+> limit and its ingress bounds are the same defence.
 
 ## Problem
 
@@ -89,3 +100,34 @@ latency is unaffected by probing.
   unchanged.
 - Completion gate green (note: the mdns path is only exercised with a live
   network; state the verification method used).
+
+## Follow-up validation note (2026-07-17)
+
+**Finding confirmed, with a resource-use consequence.** Browse events normally
+are not lost during the nested probe wait because the dependency's channel is
+unbounded; they accumulate. The result is both latency and a possible memory
+burst when a busy network produces events during probing.
+
+Coordinate this task with the bounded ingress, tracker, and probe-concurrency
+work added to task 107. Multiplexing browse and probe completion fixes the deaf
+period but does not by itself bound the number of simultaneous resolvers or the
+queued event volume. Conversely, a bounded inbox must preserve removals and the
+latest useful state when it coalesces events.
+
+Prefer an internal deterministic seam for the timing test. Do not add a new
+public discovery adapter interface solely to make this select loop testable
+unless the interface has independent production leverage.
+
+## Completion Record (2026-07-17)
+
+- Removed the nested probe wait. One outer `tokio::select!` now continuously
+  polls shutdown, browse events, the probe timer, and incremental probe
+  completions.
+- A `VecDeque` plus local `FuturesUnordered` starts at most 32 non-`Send`
+  resolvers, applies each result immediately, and refills the window. Timer
+  guards prevent overlapping cycles; timeout, interface confinement, and
+  delayed missed-tick behavior remain unchanged.
+- The internal probe-window seam has deterministic tests. The real mDNS
+  Adapter was also smoke-run successfully; structural verification confirms
+  `browser.recv()` remains an active select arm throughout a probe cycle.
+- Completion gate passed.

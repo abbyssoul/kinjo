@@ -1,7 +1,7 @@
 # Task 106 — One XDG config-path derivation
 
 - **Priority**: P2 (maintainability)
-- **Status**: ready
+- **Status**: done
 - **Depends on**: none
 - **Likely conflicts**: none
 
@@ -60,3 +60,32 @@ not put it under `ui`.
 
 - One derivation, two callers, no drift risk.
 - Completion gate green.
+
+## Follow-up validation note (2026-07-17)
+
+**Duplication confirmed, and the current shared behaviour is itself a bug.**
+Both call sites accept `Some("")` and relative `XDG_CONFIG_HOME`, yielding
+current-working-directory-relative `kinjo/...` paths. Under the XDG Base
+Directory Specification, an empty value is treated as unset and referenced
+paths must be absolute.
+
+Remove the “no behaviour change” constraint. The shared helper should:
+
+- use an absolute, non-empty `XDG_CONFIG_HOME` when present;
+- otherwise fall back to an absolute, non-empty `HOME` plus `.config`;
+- ignore invalid relative/empty values rather than resolving them against the
+  process working directory; and
+- return `None` if no valid base exists.
+
+Add tests for empty and relative values in addition to the originally listed
+precedence cases. Consolidating the two callers and fixing them in one change
+provides the intended locality and prevents the bug from being preserved as a
+new shared invariant.
+
+## Completion Record (2026-07-17)
+
+- Added the shared crate-root `config_home` Module; command directories and
+  keybindings now append their leaf path to the same validated Kinjo directory.
+- Empty and relative `XDG_CONFIG_HOME`/`HOME` values are ignored, absolute XDG
+  wins, absolute HOME is the fallback, and no valid base returns no user path.
+- Direct and caller-level regression tests pass; completion gate passed.

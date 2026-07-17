@@ -1,11 +1,11 @@
-use std::net::IpAddr;
+use std::{collections::HashSet, net::IpAddr};
 
 use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
 
 use crate::discovery::{Entry, EntryGroup};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionMode {
     Fork,
     Execute,
@@ -62,18 +62,37 @@ impl CommandAction {
         })
     }
 
+    /// Compile an action whose trusted author explicitly accepts discovered
+    /// values in option-sensitive argument positions.
+    ///
+    /// Prefer [`Self::compile`]. This escape hatch exists for programs that do
+    /// not support a literal `--`, and for placeholders intentionally used as
+    /// option values. Discovered data still cannot select `argv[0]`.
+    pub fn compile_allowing_option_like_values(
+        description: Option<String>,
+        command: String,
+        mode: ActionMode,
+    ) -> Result<Self> {
+        let template = CommandTemplate::compile_allowing_option_like_values(&command)?;
+        Ok(Self {
+            description,
+            command,
+            mode,
+            template,
+        })
+    }
+
     /// Turn a chosen candidate into the exact argument vector to run.
     ///
     /// Interpolation happens strictly inside token boundaries decided at compile
     /// time, so a discovered value — which arrives from an untrusted device on
     /// the network — can fill an argument but never add, remove, or split one.
+    ///
+    /// Fails only when `candidate` does not carry a field the template names.
+    /// The matcher's own candidates always do; a library caller's hand-built
+    /// [`Entry`] need not.
     pub fn prepare(&self, candidate: &Entry) -> Result<PreparedCommand> {
         let argv = self.template.render(candidate)?;
-        // Compilation rejects a literally-empty program name; a placeholder one
-        // can only be judged now that it has a value.
-        if argv[0].is_empty() {
-            return Err(eyre!("action command has an empty program name"));
-        }
         Ok(PreparedCommand {
             argv,
             mode: self.mode,
@@ -162,6 +181,22 @@ impl Matcher {
         self.commands.len()
     }
 
+    /// The rules applicable to `group` when the caller only needs their
+    /// identities. This avoids cloning candidates and preparing commands for
+    /// the command projection, where targets are not shown until selection.
+    pub fn matching_command_names(&self, group: &EntryGroup) -> Vec<String> {
+        self.commands
+            .iter()
+            .filter(|command| {
+                group
+                    .instances()
+                    .iter()
+                    .any(|record| command.has_candidate(record))
+            })
+            .map(|command| command.name.clone())
+            .collect()
+    }
+
     pub fn commands(&self) -> &[CommandConfig] {
         &self.commands
     }
@@ -212,15 +247,22 @@ impl CommandConfig {
     /// dropped, so a rule that cannot run for the chosen service can never
     /// quietly run against a different one instead. Selecting it reports the
     /// failure, which is the honest outcome.
+    ///
+    /// No candidate reaching here can actually fail that way today:
+    /// [`Self::candidates`] admits a record only once
+    /// [`Self::template_fields_resolve`] has proved every non-address field
+    /// resolves, and gives the rule one concrete address when it names one. The
+    /// branch stays because that invariant is enforced in another method — if
+    /// candidate gating is ever loosened, this is what keeps a rule from
+    /// quietly running against a service the user did not choose.
     fn distinct_targets(&self, candidates: Vec<Entry>) -> Vec<Entry> {
-        let mut seen: Vec<Option<PreparedCommand>> = Vec::new();
+        let mut seen: HashSet<Option<PreparedCommand>> = HashSet::new();
         let mut targets = Vec::new();
         for candidate in candidates {
             let prepared = self.action.prepare(&candidate).ok();
-            if seen.contains(&prepared) {
+            if !seen.insert(prepared) {
                 continue;
             }
-            seen.push(prepared);
             targets.push(candidate);
         }
         targets
@@ -269,6 +311,21 @@ impl CommandConfig {
             .collect()
     }
 
+    /// Whether `record` yields at least one runnable candidate, without
+    /// constructing that candidate. The command view uses this existence check
+    /// while assigning services to rules; concrete targets are built only when
+    /// the user opens an action.
+    fn has_candidate(&self, record: &Entry) -> bool {
+        if !self.non_address_predicates_match(record) || !self.template_fields_resolve(record) {
+            return false;
+        }
+        !self.uses_address()
+            || record
+                .addresses
+                .iter()
+                .any(|address| self.address_predicates_match(address))
+    }
+
     /// Whether every field this rule's template interpolates is one `record`
     /// actually carries.
     ///
@@ -282,7 +339,7 @@ impl CommandConfig {
             .template
             .fields()
             .filter(|field| !is_address_field(field))
-            .all(|field| record.field(field).is_some())
+            .all(|field| record.has_field(field))
     }
 
     /// Whether `record` satisfies every predicate on a field other than
@@ -322,7 +379,7 @@ impl FieldPredicate {
             !is_address_field(&self.field),
             "address predicates are evaluated per concrete address, not per record"
         );
-        let Some(value) = record.field(&self.field) else {
+        let Some(value) = record.field_value(&self.field) else {
             return false;
         };
         self.predicate.matches_value(&value)
@@ -414,6 +471,18 @@ pub trait RuleEngine {
     /// visible row, so an engine that matches expensively should say so.
     fn matches_group(&self, group: &EntryGroup) -> Vec<MatchResult>;
 
+    /// The names of rules applying to `group`, in engine order.
+    ///
+    /// The default preserves compatibility for engines that only implement
+    /// full matching. Engines with a cheaper existence check should override
+    /// it; this is the Interface used to assemble the command projection.
+    fn matching_command_names(&self, group: &EntryGroup) -> Vec<String> {
+        self.matches_group(group)
+            .into_iter()
+            .map(|result| result.command.name)
+            .collect()
+    }
+
     /// Every rule this engine can offer, in the order the user should see them.
     ///
     /// Returns owned rules rather than a borrowed slice deliberately: a slice
@@ -441,6 +510,10 @@ impl RuleEngine for Matcher {
 
     fn commands(&self) -> Vec<CommandConfig> {
         self.commands.clone()
+    }
+
+    fn matching_command_names(&self, group: &EntryGroup) -> Vec<String> {
+        Matcher::matching_command_names(self, group)
     }
 
     /// Overridden: the rules are already a `Vec`, so counting them need not
@@ -542,7 +615,7 @@ name = "ssh"
 equals = "_ssh._tcp"
 
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#,
             )
@@ -563,7 +636,7 @@ mode = "execute"
             _ => panic!("unexpected predicate type"),
         }
         assert_eq!(command.action.description, None);
-        assert_eq!(command.action.command, "ssh {hostname}");
+        assert_eq!(command.action.command, "ssh -- {hostname}");
         assert_eq!(command.action.mode, ActionMode::Execute);
     }
 
@@ -619,6 +692,42 @@ mode = "fork"
     }
 
     #[test]
+    fn command_loading_enforces_option_safety_and_the_explicit_opt_out() {
+        let unsafe_rule = r#"
+[metadata]
+name = "unsafe"
+
+[match.service_type]
+equals = "_ssh._tcp"
+
+[action]
+command = "ssh {hostname}"
+mode = "execute"
+"#;
+        let mut builder = MatcherBuilder::new();
+        let err = builder
+            .add_str("unsafe.toml", unsafe_rule)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("can begin an option-like argument"), "{err}");
+
+        let guarded = unsafe_rule
+            .replace("name = \"unsafe\"", "name = \"guarded\"")
+            .replace("ssh {hostname}", "ssh -- {hostname}");
+        builder.add_str("guarded.toml", &guarded).unwrap();
+
+        let opted_out = unsafe_rule
+            .replace("name = \"unsafe\"", "name = \"opted-out\"")
+            .replace(
+                "mode = \"execute\"",
+                "mode = \"execute\"\nallow_option_like_values = true",
+            );
+        builder.add_str("opted-out.toml", &opted_out).unwrap();
+
+        assert_eq!(builder.build().command_count(), 2);
+    }
+
+    #[test]
     fn execute_mode_accepts_exec_alias() {
         let mut builder = MatcherBuilder::new();
         builder
@@ -632,7 +741,7 @@ name = "ssh"
 equals = "_ssh._tcp"
 
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "exec"
 "#,
             )
@@ -658,7 +767,7 @@ name = "ssh"
 equals = "_ssh._tcp"
 
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#,
             )
@@ -740,7 +849,7 @@ name = "ssh-port"
 equals = "22"
 
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#,
             )
@@ -775,6 +884,7 @@ regex = "^192[.]0[.]2[.]"
 [action]
 command = "echo {hostname}"
 mode = "execute"
+allow_option_like_values = true
 "#,
             )
             .unwrap();
@@ -1106,7 +1216,7 @@ name = "by-host"
 equals = "_workstation._tcp"
 
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#,
         );
@@ -1139,6 +1249,7 @@ contains = "x"
 [action]
 command = "echo {type} {txt.anything-a-device-invented}"
 mode = "execute"
+allow_option_like_values = true
 "#,
         );
 
@@ -1195,7 +1306,7 @@ name = "ssh"
 equals = "_workstation._tcp"
 
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#,
         );
@@ -1223,6 +1334,7 @@ equals = "_http._tcp"
 [action]
 command = "xdg-open {txt.adminurl}"
 mode = "fork"
+allow_option_like_values = true
 "#,
         );
         let with_key = {
@@ -1282,7 +1394,7 @@ name = "ssh"
 equals = "_ssh._tcp"
 
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#,
         );
@@ -1302,8 +1414,16 @@ mode = "execute"
         assert_eq!(
             target_argv(&matches[0]),
             [
-                vec!["ssh".to_string(), "alpha.local".to_string()],
-                vec!["ssh".to_string(), "beta.local".to_string()],
+                vec![
+                    "ssh".to_string(),
+                    "--".to_string(),
+                    "alpha.local".to_string(),
+                ],
+                vec![
+                    "ssh".to_string(),
+                    "--".to_string(),
+                    "beta.local".to_string(),
+                ],
             ]
         );
     }
@@ -1391,7 +1511,7 @@ name = "ssh"
 equals = "_ssh._tcp"
 
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#,
         );
@@ -1411,16 +1531,23 @@ mode = "execute"
         assert!(!matches[0].needs_selection());
         assert_eq!(
             target_argv(&matches[0]),
-            [vec!["ssh".to_string(), "shared.local".to_string()]]
+            [vec![
+                "ssh".to_string(),
+                "--".to_string(),
+                "shared.local".to_string(),
+            ]]
         );
     }
 
-    /// A candidate that cannot be prepared is kept rather than dropped, so the
-    /// rule can never quietly run against a different service instead.
+    /// Network data cannot select the executable, even through the explicit
+    /// option-like-value escape hatch.
     #[test]
-    fn a_candidate_that_cannot_prepare_is_offered_rather_than_skipped() {
-        let matcher = matcher_with(
-            r#"
+    fn a_discovered_value_cannot_select_the_executable() {
+        let mut builder = MatcherBuilder::new();
+        let err = builder
+            .add_str(
+                "dynamic-program",
+                r#"
 [metadata]
 name = "run-named"
 
@@ -1430,31 +1557,13 @@ equals = "_ssh._tcp"
 [action]
 command = "{name} --version"
 mode = "execute"
+allow_option_like_values = true
 "#,
-        );
-        // An empty name renders an empty program, which only preparation can
-        // catch. Dropping it here would silently run `htop --version` instead.
-        let group = group_of(
-            &[ssh_on("", "alpha.local"), ssh_on("htop", "beta.local")],
-            crate::discovery::BrowseMode::ServiceType,
-        );
+            )
+            .unwrap_err()
+            .to_string();
 
-        let matches = matcher.matches_group(&group);
-
-        assert_eq!(matches.len(), 1);
-        assert!(
-            matches[0].needs_selection(),
-            "a failing candidate must not hand its turn to another service"
-        );
-        assert_eq!(matches[0].targets.len(), 2);
-        assert!(
-            matches[0]
-                .command
-                .action
-                .prepare(&matches[0].targets[0])
-                .is_err(),
-            "the unpreparable candidate is still the first target"
-        );
+        assert!(err.contains("program must be literal"), "{err}");
     }
 
     /// The rule, not the caller, decides what running it means.
@@ -1469,7 +1578,7 @@ name = "ssh"
 equals = "_ssh._tcp"
 
 [action]
-command = "ssh -p {port} '{hostname}'"
+command = "ssh -p {port} -- '{hostname}'"
 mode = "execute"
 "#,
         );
@@ -1481,7 +1590,7 @@ mode = "execute"
 
         match outcome {
             ActionOutcome::Handoff(prepared) => {
-                assert_eq!(prepared.argv, ["ssh", "-p", "2222", "alpha.local"]);
+                assert_eq!(prepared.argv, ["ssh", "-p", "2222", "--", "alpha.local"]);
                 assert_eq!(prepared.mode, ActionMode::Execute);
             }
             other => panic!("expected a hand-off, got {other:?}"),
@@ -1554,7 +1663,7 @@ name = "notify"
 equals = "_ssh._tcp"
 
 [action]
-command = "notify-send {name} tail"
+command = "notify-send -- {name} tail"
 mode = "execute"
 "#,
         );
@@ -1570,6 +1679,7 @@ mode = "execute"
             prepared.argv,
             [
                 "notify-send",
+                "--",
                 r#"evil" 'x' {hostname} && rm -rf / #"#,
                 "tail",
             ]
@@ -1589,6 +1699,7 @@ equals = "_ssh._tcp"
 [action]
 command = "cmd '' {hostname} \"\""
 mode = "execute"
+allow_option_like_values = true
 "#,
         );
         let mut record = Entry::new("alpha", "_ssh._tcp", "local");
@@ -1613,7 +1724,7 @@ name = "ssh"
 equals = "_ssh._tcp"
 
 [action]
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 "#,
             )
@@ -2057,7 +2168,7 @@ mode = "execute"
     fn add_file_reads_a_command_from_disk() {
         let dir = temp_dir("add-file");
         let path = dir.join("ssh.toml");
-        fs::write(&path, command_toml("ssh", "ssh {hostname}")).unwrap();
+        fs::write(&path, command_toml("ssh", "ssh -- {hostname}")).unwrap();
 
         let mut builder = MatcherBuilder::new();
         builder.start_layer();
@@ -2242,6 +2353,31 @@ mode = "execute"
     fn config_dirs_from_omits_user_dir_without_env() {
         let dirs = config_dirs_from(None, None, None, &[]);
 
+        assert_eq!(dirs, vec![PathBuf::from(SYSTEM_CONFIG_DIR)]);
+    }
+
+    #[test]
+    fn config_dirs_from_ignores_empty_and_relative_config_homes() {
+        let dirs = config_dirs_from(
+            None,
+            Some(OsString::from("relative")),
+            Some(OsString::from("/home/user")),
+            &[],
+        );
+        assert_eq!(
+            dirs,
+            vec![
+                PathBuf::from(SYSTEM_CONFIG_DIR),
+                PathBuf::from("/home/user/.config/kinjo/commands"),
+            ]
+        );
+
+        let dirs = config_dirs_from(
+            None,
+            Some(OsString::new()),
+            Some(OsString::from("relative-home")),
+            &[],
+        );
         assert_eq!(dirs, vec![PathBuf::from(SYSTEM_CONFIG_DIR)]);
     }
 

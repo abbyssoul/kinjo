@@ -500,7 +500,7 @@ equals = "_ssh._tcp"
 
 [action]
 description = "SSH into the selected service"
-command = "ssh {hostname}"
+command = "ssh -- {hostname}"
 mode = "execute"
 ```
 

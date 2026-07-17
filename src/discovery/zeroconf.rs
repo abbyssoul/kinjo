@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, net::IpAddr, str::FromStr, sync::mpsc};
+use std::{net::IpAddr, str::FromStr};
 
 use tokio_util::sync::CancellationToken;
 use zeroconf_tokio::prelude::*;
@@ -6,7 +6,9 @@ use zeroconf_tokio::{
     BrowserEvent, MdnsBrowser, MdnsBrowserAsync, ServiceDiscovery, ServiceRemoval, ServiceType,
 };
 
+use super::inbox::EventSender;
 use super::session::DiscoverySession;
+use super::txt::TextTxtMap;
 use super::worker::{BrowseOutcome, DiscoveryWorker, RuntimeFlavor};
 use super::{
     DiscoveryEvent, DiscoveryOptions, Entry, Registration, ServiceTypeFilter as ValidServiceType,
@@ -74,7 +76,7 @@ async fn browse_loop(
     _domain: String,
     // Already resolved into `service_types` before the worker spawned.
     _service_type_filter: Option<ValidServiceType>,
-    tx: mpsc::Sender<DiscoveryEvent>,
+    tx: EventSender,
     shutdown: CancellationToken,
 ) -> BrowseOutcome {
     let mut workers = Vec::new();
@@ -130,11 +132,7 @@ async fn browse_loop(
     }
 }
 
-async fn browse_one(
-    mut browser: MdnsBrowserAsync,
-    tx: mpsc::Sender<DiscoveryEvent>,
-    shutdown: CancellationToken,
-) {
+async fn browse_one(mut browser: MdnsBrowserAsync, tx: EventSender, shutdown: CancellationToken) {
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -168,11 +166,13 @@ fn to_discovery_event(event: BrowserEvent) -> DiscoveryEvent {
 }
 
 fn record_from_discovery(discovery: &ServiceDiscovery) -> Entry {
-    let txt = discovery
-        .txt()
-        .as_ref()
-        .map(|txt| txt.iter().collect::<BTreeMap<String, String>>())
-        .unwrap_or_default();
+    let mut txt = TextTxtMap::default();
+    if let Some(native_txt) = discovery.txt() {
+        for (key, value) in native_txt.iter() {
+            txt.observe_text(&key, &value);
+        }
+    }
+    let txt = txt.into_values();
 
     // `zeroconf` resolves a service to a single address; carry it as the sole
     // element of the multi-address list the rest of the program expects.
@@ -233,6 +233,7 @@ fn resolve_service_types(filter: Option<&ValidServiceType>) -> Vec<ServiceType> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::inbox;
     use crate::discovery::{DiscoveryBackend, DiscoveryConfig, DiscoveryOptionError};
 
     fn zeroconf_config(domain: &str, service_type: Option<&str>) -> DiscoveryConfig {
@@ -332,8 +333,8 @@ mod tests {
     /// could act on.
     #[tokio::test]
     async fn no_started_workers_is_a_startup_failure_with_no_upsert() {
-        let (tx, rx) = mpsc::channel();
         let shutdown = CancellationToken::new();
+        let (tx, rx) = inbox::test_channel(&shutdown);
 
         let outcome = browse_loop(Vec::new(), "local".to_string(), None, tx, shutdown).await;
 

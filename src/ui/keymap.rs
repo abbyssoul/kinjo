@@ -402,11 +402,12 @@ impl KeySpec {
 
     fn matches(&self, event: KeyEvent) -> bool {
         // SHIFT is deliberately ignored: it is already encoded in the char
-        // (`?` arrives as Char('?') with SHIFT set). ALT is not part of any
-        // spec, so an ALT-modified key must not trigger a plain binding.
+        // (`?` arrives as Char('?') with SHIFT set). No other modifier except a
+        // spec's explicit CONTROL is part of the binding, so Super/Meta/Hyper
+        // chords cannot trigger a plain key either.
         self.code == event.code
             && event.modifiers.contains(KeyModifiers::CONTROL) == self.ctrl
-            && !event.modifiers.contains(KeyModifiers::ALT)
+            && (event.modifiers - KeyModifiers::SHIFT - KeyModifiers::CONTROL).is_empty()
     }
 
     /// How this key is shown to the user. Display lives here so that every
@@ -447,7 +448,11 @@ fn char_or_function_key(value: &str) -> Result<KeyCode> {
     }
     let mut chars = value.chars();
     match (chars.next(), chars.next()) {
-        (Some(ch), None) => Ok(KeyCode::Char(ch)),
+        (Some(ch), None) if !ch.is_control() => Ok(KeyCode::Char(ch)),
+        (Some(ch), None) => Err(eyre!(
+            "control character U+{:04X} cannot be used as a key",
+            ch as u32
+        )),
         _ => Err(eyre!("unsupported key `{value}`")),
     }
 }
@@ -466,18 +471,9 @@ fn config_paths(
     xdg_config_home: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
 ) -> Vec<PathBuf> {
-    if let Some(xdg) = xdg_config_home {
-        vec![PathBuf::from(xdg).join("kinjo").join("keybindings.toml")]
-    } else if let Some(home) = home {
-        vec![
-            PathBuf::from(home)
-                .join(".config")
-                .join("kinjo")
-                .join("keybindings.toml"),
-        ]
-    } else {
-        Vec::new()
-    }
+    crate::config_home::kinjo_config_dir(xdg_config_home, home)
+        .map(|directory| vec![directory.join("keybindings.toml")])
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -538,6 +534,21 @@ mod tests {
 
         assert!(KeySpec::parse("f0").is_err());
         assert!(KeySpec::parse("f13").is_err());
+    }
+
+    #[test]
+    fn literal_control_characters_are_not_valid_bindings() {
+        let error = KeySpec::parse("\u{7}").unwrap_err().to_string();
+        assert!(error.contains("control character"), "{error}");
+    }
+
+    #[test]
+    fn non_text_modifiers_do_not_trigger_plain_bindings() {
+        let plain = KeySpec::parse("x").unwrap();
+        for modifier in [KeyModifiers::ALT, KeyModifiers::SUPER, KeyModifiers::META] {
+            assert!(!plain.matches(KeyEvent::new(KeyCode::Char('x'), modifier)));
+        }
+        assert!(plain.matches(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SHIFT)));
     }
 
     #[test]
@@ -1157,5 +1168,20 @@ toggle = ["enter"]
     #[test]
     fn config_paths_are_empty_without_any_home_variables() {
         assert!(config_paths(None, None).is_empty());
+    }
+
+    #[test]
+    fn config_paths_ignore_empty_and_relative_environment_values() {
+        assert_eq!(
+            config_paths(Some(OsString::new()), Some(OsString::from("/home/user"))),
+            vec![PathBuf::from("/home/user/.config/kinjo/keybindings.toml")]
+        );
+        assert!(
+            config_paths(
+                Some(OsString::from("relative")),
+                Some(OsString::from("also-relative"))
+            )
+            .is_empty()
+        );
     }
 }

@@ -105,6 +105,21 @@ Normal startup semantics are unchanged and remain lenient: valid files load, and
 every invalid file is reported as a warning, so one bad system-wide file cannot
 stop Kinjo from launching.
 
+#### Discovered values are option-safe by default
+
+Command templates no longer allow a discovered field to select `argv[0]`, or
+to lead an argument before a literal `--`. The old shape `ssh {hostname}` could
+turn a hostile hostname such as `-oProxyCommand=...` into an SSH option even
+though it remained one argv token. Write `ssh -- {hostname}` (as the shipped
+rules now do), give the token a safe literal prefix, or set
+`action.allow_option_like_values = true` when the target program has no
+terminator or the field is intentionally an option value.
+
+This is a deliberate safety-breaking validation change. At normal startup an
+older unsafe file is skipped with the existing warning and details-on-exit
+diagnostic; `kinjo list-commands` reports the actionable migration error
+strictly before launch.
+
 #### Keybinding collisions are configuration errors
 
 A keymap could bind two actions in one mode to the same key; match order then

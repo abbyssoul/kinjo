@@ -14,7 +14,7 @@ use crate::{
         ChildService, Entry, EntryGroup, GroupFacts, GroupingMode, HostAggregate, LogicalService,
         RowHost, RowServiceType, ServiceTypeAggregate, SessionState, TxtValue,
     },
-    plumber::{MatchResult, Requirement},
+    plumber::{CommandConfig, MatchResult, Requirement},
 };
 
 use super::{
@@ -99,6 +99,14 @@ impl Activity {
 /// event loop worked out before this was called. Nothing here decides geometry,
 /// so nothing here has to be told to input handling afterwards.
 pub fn render(frame: &mut Frame<'_>, app: &App) {
+    render_with_details(frame, app, DetailsContent::for_app(app));
+}
+
+/// Draw a frame with the details rows already prepared by the event loop.
+/// Their length shaped `app.layout`; consuming those same rows here makes the
+/// measurement and rendered content one construction rather than two matching
+/// implementations.
+pub(crate) fn render_with_details(frame: &mut Frame<'_>, app: &App, details: DetailsContent) {
     let layout = app.layout;
 
     render_top_bar(frame, app, layout.top_bar());
@@ -106,15 +114,15 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
     if app.filter.grouping == GroupingMode::Command {
         render_commands(frame, app, layout.list());
-        render_command_details(frame, app, layout.details());
+        render_command_details(frame, app, layout.details(), details.into_rows());
     } else {
         render_services(frame, app, layout.list());
-        render_details(frame, app, layout.details());
+        render_details(frame, app, layout.details(), details.into_rows());
     }
 
     render_footer(frame, app, layout.footer());
 
-    match app.mode {
+    match app.mode() {
         AppMode::TypeFilter => render_type_filter(frame, app),
         AppMode::ActionPicker => render_action_picker(frame, app),
         AppMode::InstancePicker => render_instance_picker(frame, app),
@@ -178,7 +186,7 @@ fn render_top_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 // ── filter / search bar ──────────────────────────────────────────────────
 fn render_filter_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let searching = matches!(app.mode, AppMode::Search);
+    let searching = matches!(app.mode(), AppMode::Search);
     let prompt_style = if searching {
         Style::default()
             .fg(BG_BAR)
@@ -453,22 +461,40 @@ fn host_text(facts: &GroupFacts) -> String {
 /// to scroll.
 ///
 /// [`LayoutSnapshot`]: super::layout::LayoutSnapshot
+#[cfg(test)]
 pub(crate) fn details_content_height(app: &App) -> usize {
-    let rows = if app.filter.grouping == GroupingMode::Command {
-        command_detail_rows(app)
-    } else {
-        detail_rows(app)
-    };
-    rows.map_or(0, |rows| rows.len())
+    DetailsContent::for_app(app).height()
 }
 
-fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
+/// Per-frame details projection shared by layout and drawing.
+pub(crate) struct DetailsContent(Option<Vec<Row<'static>>>);
+
+impl DetailsContent {
+    pub(crate) fn for_app(app: &App) -> Self {
+        let rows = if app.filter.grouping == GroupingMode::Command {
+            command_detail_rows(app)
+        } else {
+            detail_rows(app)
+        };
+        Self(rows)
+    }
+
+    pub(crate) fn height(&self) -> usize {
+        self.0.as_ref().map_or(0, Vec::len)
+    }
+
+    fn into_rows(self) -> Option<Vec<Row<'static>>> {
+        self.0
+    }
+}
+
+fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect, rows: Option<Vec<Row<'static>>>) {
     let block = panel().title(Line::from(Span::styled(
         " details ",
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )));
 
-    let Some(rows) = detail_rows(app) else {
+    let Some(rows) = rows else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  no service selected",
@@ -552,9 +578,8 @@ fn push_logical_service_rows(
         "occurrences ({})",
         group.occurrence_count()
     )));
-    let last = group.occurrence_count().saturating_sub(1);
     for (i, record) in group.instances().iter().enumerate() {
-        let branch = if i == last { "└─" } else { "├─" };
+        let branch = tree_branch(i, group.occurrence_count());
         rows.push(Row::new(vec![
             Cell::from(Line::from(vec![
                 Span::styled(format!(" {branch} "), Style::default().fg(ACCENT_DIM)),
@@ -648,9 +673,8 @@ fn push_child_service_rows(
     children: &[ChildService],
     endpoint: ChildEndpoint,
 ) {
-    let last = children.len().saturating_sub(1);
     for (i, child) in children.iter().enumerate() {
-        let branch = if i == last { "└─" } else { "├─" };
+        let branch = tree_branch(i, children.len());
         let port = port_text(child.facts.port);
         let endpoint = match endpoint {
             ChildEndpoint::PortOnly => format!(":{port}"),
@@ -775,14 +799,34 @@ fn blank_row() -> Row<'static> {
     Row::new(vec![Cell::from(""), Cell::from("")])
 }
 
-fn action_row(action: &MatchResult) -> Row<'static> {
-    let description = action
-        .command
+/// The branch marker shared by the details-pane tree lists. Callers retain
+/// ownership of their distinct payload and styling; this helper owns only the
+/// easy-to-drift last-child rule.
+fn tree_branch(index: usize, len: usize) -> &'static str {
+    if index + 1 == len { "└─" } else { "├─" }
+}
+
+/// Description policy for an executable action: action metadata wins because
+/// `docs/actions.md` defines it as the text shown in the action picker.
+fn action_description(command: &CommandConfig) -> Option<&str> {
+    command
         .action
         .description
         .as_deref()
-        .or(action.command.description.as_deref())
-        .unwrap_or("");
+        .or(command.description.as_deref())
+}
+
+/// Description policy for a configured command: rule metadata describes the
+/// command row, with action metadata as its fallback.
+fn command_description(command: &CommandConfig) -> Option<&str> {
+    command
+        .description
+        .as_deref()
+        .or(command.action.description.as_deref())
+}
+
+fn action_row(action: &MatchResult) -> Row<'static> {
+    let description = action_description(&action.command).unwrap_or("");
     let mode = action.command.action.mode.to_string();
     let mut spans = vec![Span::styled(
         display::text(&action.command.name),
@@ -855,12 +899,7 @@ fn command_row(group: &CommandGroup, selected: bool) -> Row<'static> {
         Span::styled("·", base.fg(ACCENT_DIM))
     };
 
-    let description = group
-        .command
-        .description
-        .as_deref()
-        .or(group.command.action.description.as_deref())
-        .unwrap_or("");
+    let description = command_description(&group.command).unwrap_or("");
 
     Row::new(vec![
         Cell::from(Line::from(vec![
@@ -874,13 +913,18 @@ fn command_row(group: &CommandGroup, selected: bool) -> Row<'static> {
     .style(base)
 }
 
-fn render_command_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_command_details(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    rows: Option<Vec<Row<'static>>>,
+) {
     let block = panel().title(Line::from(Span::styled(
         " command ",
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )));
 
-    let Some(rows) = command_detail_rows(app) else {
+    let Some(rows) = rows else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  no command selected",
@@ -911,11 +955,7 @@ fn command_detail_rows(app: &App) -> Option<Vec<Row<'static>>> {
                 .add_modifier(Modifier::BOLD),
         )),
     ])];
-    if let Some(description) = command
-        .description
-        .as_deref()
-        .or(command.action.description.as_deref())
-    {
+    if let Some(description) = command_description(command) {
         rows.push(field_row("desc", description, Color::White));
     }
     rows.push(field_row("mode", &command.action.mode.to_string(), FG_DIM));
@@ -944,9 +984,8 @@ fn command_detail_rows(app: &App) -> Option<Vec<Row<'static>>> {
             )),
         ]));
     } else {
-        let last = group.services.len().saturating_sub(1);
         for (i, service) in group.services.iter().enumerate() {
-            let branch = if i == last { "└─" } else { "├─" };
+            let branch = tree_branch(i, group.services.len());
             rows.push(Row::new(vec![
                 Cell::from(Line::from(vec![
                     Span::styled(format!(" {branch} "), Style::default().fg(ACCENT_DIM)),
@@ -1036,7 +1075,7 @@ fn browse_footer_hints(app: &App) -> Vec<(String, &'static str)> {
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let hints = footer_hints(app, app.mode);
+    let hints = footer_hints(app, app.mode());
 
     let mut spans = vec![Span::raw(" ")];
     for (key, label) in &hints {
@@ -1130,26 +1169,23 @@ fn render_type_filter(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_action_picker(frame: &mut Frame<'_>, app: &App) {
+    let Some((matches, picker_index)) = app.action_picker() else {
+        return;
+    };
     render_picker(
         frame,
         PickerSpec {
             title: " matching actions ",
             hint: &picker_hint(app),
             empty: "  no matching actions",
-            selected: app.action_index,
-            total: app.action_matches.len(),
+            selected: picker_index,
+            total: matches.len(),
             width: 70,
             height: 50,
         },
         |index, selected, base| {
-            let action = &app.action_matches[index];
-            let description = action
-                .command
-                .action
-                .description
-                .as_deref()
-                .or(action.command.description.as_deref())
-                .unwrap_or("");
+            let action = &matches[index];
+            let description = action_description(&action.command).unwrap_or("");
             let mut spans = vec![
                 gutter_span(selected),
                 Span::styled("★ ", base.fg(STAR)),
@@ -1171,18 +1207,17 @@ fn render_action_picker(frame: &mut Frame<'_>, app: &App) {
 }
 
 fn render_instance_picker(frame: &mut Frame<'_>, app: &App) {
-    let records = app
-        .pending_action
-        .as_ref()
-        .map(|action| action.targets.as_slice())
-        .unwrap_or(&[]);
+    let Some((action, picker_index)) = app.instance_picker() else {
+        return;
+    };
+    let records = action.targets.as_slice();
     render_picker(
         frame,
         PickerSpec {
             title: " select instance ",
             hint: &picker_hint(app),
             empty: "  no instance to choose from",
-            selected: app.instance_index,
+            selected: picker_index,
             total: records.len(),
             width: 72,
             height: 55,
@@ -1211,7 +1246,7 @@ fn render_service_picker(frame: &mut Frame<'_>, app: &App) {
             title: &format!(" run {command_name} on "),
             hint: &picker_hint(app),
             empty: "  no service to run this on",
-            selected: app.service_picker_index,
+            selected: app.service_picker_index().unwrap_or(0),
             total: services.len(),
             width: 72,
             height: 55,
@@ -2170,7 +2205,7 @@ mod tests {
 
         let mut app = test_app("cli\u{1b}\ndomain");
         app.status = "status\u{7}\r\u{85}".to_string();
-        app.mode = AppMode::Search;
+        app.set_mode(AppMode::Search);
         app.filter.text_query = "query\t\u{7f}".to_string();
         app.filter.observe_types(std::slice::from_ref(&entry));
         app.rows =
@@ -2554,7 +2589,7 @@ select = ["space"]
 close = ["ctrl-g"]
 "#,
         );
-        app.mode = AppMode::ActionPicker;
+        app.set_action_picker_for_test(Vec::new(), 0);
 
         let text = buffer_text(&render_buffer(&mut app, 160, 24));
 
@@ -2564,7 +2599,7 @@ close = ["ctrl-g"]
     #[test]
     fn the_help_overlay_lists_every_key_bound_to_an_action() {
         let mut app = test_app("local");
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
 
         let text = buffer_text(&render_buffer(&mut app, 160, 40));
 
@@ -2584,7 +2619,7 @@ down = ["ctrl-n", "f9"]
 help = ["f1"]
 "#,
         );
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
 
         let text = buffer_text(&render_buffer(&mut app, 160, 40));
 
@@ -2599,7 +2634,7 @@ help = ["f1"]
     #[test]
     fn the_help_overlay_does_not_claim_that_closing_search_clears_it() {
         let mut app = test_app("local");
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
 
         let text = buffer_text(&render_buffer(&mut app, 160, 40));
 
@@ -2626,6 +2661,21 @@ help = ["f1"]
         }
     }
 
+    #[test]
+    fn action_and_command_description_policies_have_deliberate_precedence() {
+        let mut command = command_named("inspect");
+        command.description = Some("command description".to_string());
+        command.action.description = Some("action description".to_string());
+
+        assert_eq!(action_description(&command), Some("action description"));
+        assert_eq!(command_description(&command), Some("command description"));
+
+        command.action.description = None;
+        assert_eq!(action_description(&command), Some("command description"));
+        command.description = None;
+        assert_eq!(command_description(&command), None);
+    }
+
     /// An entry whose rendered line names `index` unmistakably.
     fn numbered_entry(index: usize) -> Entry {
         let mut record = Entry::new(format!("svc-{index:02}"), "_ssh._tcp", "local");
@@ -2649,7 +2699,7 @@ help = ["f1"]
     #[test]
     fn an_oversized_type_filter_shows_the_selected_row_at_every_index() {
         let mut app = test_app("local");
-        app.mode = AppMode::TypeFilter;
+        app.set_mode(AppMode::TypeFilter);
         let types = discover_types(&mut app, 40, |i| format!("_type{i:02}._tcp"));
 
         for (index, service_type) in types.iter().enumerate() {
@@ -2666,16 +2716,17 @@ help = ["f1"]
     #[test]
     fn an_oversized_action_picker_shows_the_selected_row_at_every_index() {
         let mut app = test_app("local");
-        app.mode = AppMode::ActionPicker;
-        app.action_matches = (0..30)
+        let matches: Vec<MatchResult> = (0..30)
             .map(|i| MatchResult {
                 command: command_named(&format!("act-{i:02}")),
                 targets: vec![numbered_entry(i)],
             })
             .collect();
+        let count = matches.len();
+        app.set_action_picker_for_test(matches, 0);
 
-        for index in 0..app.action_matches.len() {
-            app.action_index = index;
+        for index in 0..count {
+            app.set_picker_index_for_test(index);
             let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
             assert!(
@@ -2688,14 +2739,16 @@ help = ["f1"]
     #[test]
     fn an_oversized_instance_picker_shows_the_selected_row_at_every_index() {
         let mut app = test_app("local");
-        app.mode = AppMode::InstancePicker;
-        app.pending_action = Some(MatchResult {
-            command: command_named("ssh"),
-            targets: (0..30).map(numbered_entry).collect(),
-        });
+        app.set_instance_picker_for_test(
+            MatchResult {
+                command: command_named("ssh"),
+                targets: (0..30).map(numbered_entry).collect(),
+            },
+            0,
+        );
 
         for index in 0..30 {
-            app.instance_index = index;
+            app.set_picker_index_for_test(index);
             let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
             assert!(
@@ -2708,7 +2761,7 @@ help = ["f1"]
     #[test]
     fn an_oversized_service_picker_shows_the_selected_row_at_every_index() {
         let mut app = test_app("local");
-        app.mode = AppMode::ServicePicker;
+        app.set_service_picker_for_test(0);
         app.filter.grouping = GroupingMode::Command;
         let services: Vec<EntryGroup> = (0..30)
             .map(|i| {
@@ -2724,7 +2777,7 @@ help = ["f1"]
         app.selected = 0;
 
         for index in 0..30 {
-            app.service_picker_index = index;
+            app.set_picker_index_for_test(index);
             let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
             assert!(
@@ -2739,7 +2792,7 @@ help = ["f1"]
     #[test]
     fn a_picker_scrolls_only_once_the_selection_leaves_the_window() {
         let mut app = test_app("local");
-        app.mode = AppMode::TypeFilter;
+        app.set_mode(AppMode::TypeFilter);
         discover_types(&mut app, 40, |i| format!("_type{i:02}._tcp"));
         let label = |index: usize| format!("_type{index:02}._tcp");
 
@@ -2799,7 +2852,7 @@ help = ["f1"]
     #[test]
     fn shrinking_the_terminal_keeps_the_picker_selection_visible() {
         let mut app = test_app("local");
-        app.mode = AppMode::TypeFilter;
+        app.set_mode(AppMode::TypeFilter);
         discover_types(&mut app, 40, |i| format!("_type{i:02}._tcp"));
         app.type_filter_index = 25;
 
@@ -2818,7 +2871,7 @@ help = ["f1"]
     #[test]
     fn a_picker_shows_a_range_chip_only_when_it_is_clipped() {
         let mut app = test_app("local");
-        app.mode = AppMode::TypeFilter;
+        app.set_mode(AppMode::TypeFilter);
 
         discover_types(&mut app, 3, |i| format!("_type{i:02}._tcp"));
         let fits = buffer_text(&render_buffer(&mut app, 60, 24));
@@ -2835,7 +2888,7 @@ help = ["f1"]
     #[test]
     fn a_picker_with_unicode_labels_keeps_its_selection_visible() {
         let mut app = test_app("local");
-        app.mode = AppMode::TypeFilter;
+        app.set_mode(AppMode::TypeFilter);
         discover_types(&mut app, 30, |i| format!("_型{i:02}界._tcp"));
         app.type_filter_index = 29;
 
@@ -2859,7 +2912,19 @@ help = ["f1"]
             AppMode::Help,
         ] {
             let mut app = test_app("local");
-            app.mode = mode;
+            match mode {
+                AppMode::TypeFilter | AppMode::Help => app.set_mode(mode),
+                AppMode::ActionPicker => app.set_action_picker_for_test(Vec::new(), 0),
+                AppMode::InstancePicker => app.set_instance_picker_for_test(
+                    MatchResult {
+                        command: command_named("empty"),
+                        targets: Vec::new(),
+                    },
+                    0,
+                ),
+                AppMode::ServicePicker => app.set_service_picker_for_test(0),
+                AppMode::Browse | AppMode::Search => unreachable!(),
+            }
 
             for (width, height) in [(60u16, 18u16), (20, 5), (10, 3), (4, 2), (1, 1)] {
                 let buffer = render_buffer(&mut app, width, height);
@@ -2875,7 +2940,7 @@ help = ["f1"]
     #[test]
     fn a_long_picker_in_a_terminal_with_no_room_renders_safely() {
         let mut app = test_app("local");
-        app.mode = AppMode::TypeFilter;
+        app.set_mode(AppMode::TypeFilter);
         discover_types(&mut app, 40, |i| format!("_type{i:02}._tcp"));
         app.type_filter_index = 39;
         app.help_scroll = 999;
@@ -2885,7 +2950,7 @@ help = ["f1"]
             assert_eq!(buffer.area.height, height, "at {width}x{height}");
         }
 
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
         for (width, height) in [(60u16, 6u16), (10, 3), (1, 1)] {
             let buffer = render_buffer(&mut app, width, height);
             assert_eq!(buffer.area.height, height, "help at {width}x{height}");
@@ -2901,7 +2966,7 @@ help = ["f1"]
     #[test]
     fn every_help_row_is_reachable_on_a_short_terminal() {
         let mut app = test_app("local");
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
         let expected: Vec<String> = help_rows(&app)
             .iter()
             .map(|(_, label)| label.to_string())
@@ -2934,7 +2999,7 @@ help = ["f1"]
     #[test]
     fn the_help_overlay_reports_its_range_and_scrolls_to_the_end() {
         let mut app = test_app("local");
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
         let total = help_lines(&app).len();
 
         let top = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
@@ -2952,7 +3017,7 @@ help = ["f1"]
     #[test]
     fn help_that_fits_advertises_no_scrolling() {
         let mut app = test_app("local");
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
 
         let text = buffer_text(&render_buffer(&mut app, 160, 44));
 
@@ -2965,7 +3030,7 @@ help = ["f1"]
     #[test]
     fn help_scrolled_to_the_end_reflows_when_the_terminal_grows() {
         let mut app = test_app("local");
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
         let total = help_lines(&app).len();
         app.help_scroll = Window::max_scroll(total, help_viewport(Rect::new(0, 0, 60, 18)));
 
@@ -2985,7 +3050,7 @@ down = ["ctrl-n"]
 up = ["ctrl-p"]
 "#,
         );
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
 
         let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 
@@ -3004,7 +3069,7 @@ down = []
 up = []
 "#,
         );
-        app.mode = AppMode::Help;
+        app.set_mode(AppMode::Help);
 
         let text = buffer_text(&render_buffer(&mut app, SHORT.0, SHORT.1));
 

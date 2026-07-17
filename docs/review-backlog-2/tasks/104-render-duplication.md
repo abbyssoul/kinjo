@@ -1,7 +1,7 @@
 # Task 104 — Render duplication: tree rows and description precedence
 
 - **Priority**: P2 (maintainability)
-- **Status**: ready
+- **Status**: done
 - **Depends on**: none
 - **Likely conflicts**: 103 (same file)
 
@@ -80,3 +80,27 @@ behaviour change: the same rows, spans, colours, and description text as today.
 - Description-precedence helpers documented against `docs/actions.md`.
 - Rendered output unchanged (drive `scripts/drive-tui.sh` and compare).
 - Completion gate green.
+
+## Follow-up validation note (2026-07-17)
+
+**Partially confirmed.** The two named description-precedence helpers have good
+leverage: they name an intentional policy difference and prevent future drift.
+Keep that part of the task.
+
+Re-evaluate the generic tree-row closure before implementing it. The three
+branch loops are short and their payloads/styles differ; a closure-heavy helper
+may expose an interface as complex as the repeated implementation. Apply the
+deletion test: if removing the proposed helper would not delete meaningful
+caller knowledge or failure modes, split it out or leave the loops explicit.
+A tiny branch-prefix iterator/function is sufficient if it genuinely improves
+readability. Do not require “three loops to one helper” as a Definition of Done
+without that evidence.
+
+## Completion Record (2026-07-17)
+
+- Added the two named description policies and a regression test proving their
+  intentionally opposite precedence.
+- Applied the validation note's shallower design: `tree_branch` owns only the
+  last-child `├─`/`└─` rule; each caller retains its distinct payload and style.
+- Render output was verified through fake and live TUI smoke runs; completion
+  gate passed.

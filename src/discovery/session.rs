@@ -228,6 +228,10 @@ impl DiscoverySession {
                 kind: FailureKind::Stopped,
                 cause: "discovery was stopped".to_string(),
             }),
+            Some(BrowseOutcome::Overloaded(cause)) => SessionState::Failed(DiscoveryFailure {
+                kind: FailureKind::Stopped,
+                cause,
+            }),
             // A detached session has no producer to ask, and a worker whose
             // thread died without publishing cannot account for itself. Both
             // are an unexplained stop, which is the honest answer.

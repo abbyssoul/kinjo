@@ -105,7 +105,7 @@ mode = "execute"
 }
 
 fn fixture() -> KeyedEngine {
-    let ssh = rule_toml("ssh", "_ssh._tcp", "ssh {hostname}");
+    let ssh = rule_toml("ssh", "_ssh._tcp", "ssh -- {hostname}");
     let http = rule_toml("http", "_http._tcp", "curl {address}");
     KeyedEngine::new(&[("ssh", ssh.as_str()), ("http", http.as_str())])
 }
@@ -195,7 +195,7 @@ fn a_rule_from_a_foreign_engine_prepares_a_command() {
         .prepare(&matches[0].targets[0])
         .expect("the rule templates only fields the entry has");
 
-    assert_eq!(prepared.argv, vec!["ssh", "alpha.local"]);
+    assert_eq!(prepared.argv, vec!["ssh", "--", "alpha.local"]);
 }
 
 /// The transactional reload path accepts a foreign engine, so an extender's

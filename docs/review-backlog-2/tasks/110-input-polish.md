@@ -1,7 +1,7 @@
 # Task 110 — Input handling polish: modifiers, bursts, label escaping
 
 - **Priority**: P2 (input correctness/UX)
-- **Status**: ready
+- **Status**: done
 - **Depends on**: none
 - **Likely conflicts**: 103, 105 (same files)
 
@@ -94,3 +94,35 @@ config error instead of a mojibake footer.
 - All three fixed (or the ones taken, with the others left as noted follow-ups).
 - Tests as above; existing input tests unchanged.
 - Completion gate green.
+
+## Follow-up validation note (2026-07-17)
+
+**A and C are confirmed; B's rationale is overstated.** The 120 ms poll timeout
+does not impose an ~8 Hz ceiling while events are already queued: the next
+`event::poll` returns immediately. The actual cost is one complete
+layout/recompute/draw cycle per event, so throughput is limited by that work,
+not by the idle timeout. A bounded drain remains worthwhile, especially after
+task 103 introduces dirty redraws, but describe and benchmark it as reduced
+per-event rendering rather than a fixed-rate correctness bug.
+
+Do not use an unbounded “until empty” drain; task 107 demonstrates how a
+continuously ready producer can starve rendering. Preserve immediate quit/exec
+handling and impose a count or time budget.
+
+There is also a related low-severity display risk: `terminal::text` escapes
+control/ANSI input but leaves bidi formatting characters such as U+202E, which
+can visually reorder an untrusted discovered label. Either add deliberate
+escaping/rejection for Unicode bidi controls with tests, or record this as an
+accepted residual risk rather than describing displayed text as fully safe.
+
+## Completion Record (2026-07-17)
+
+- `typed_char` and binding resolution now reject every non-Shift modifier,
+  including Super and Meta, while Shift characters still type normally.
+- The event loop drains at most 64 immediately queued terminal events before
+  one replacement frame. Quit and execute handoff still return immediately.
+- Literal control-character bindings are rejected at parse time. The shared
+  terminal presentation Module now also visibly escapes Unicode bidi controls,
+  including U+202E, closing rather than accepting the review's spoofing risk.
+- Regression tests cover modifiers, burst movement, control bindings, and bidi
+  escaping. Completion gate passed.

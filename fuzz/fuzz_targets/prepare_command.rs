@@ -1,7 +1,7 @@
 #![no_main]
 
 //! Fuzz command templates: compiling one at load time, and rendering it into an
-//! argument vector for a discovered service. Three properties:
+//! argument vector for a discovered service. Four properties:
 //!
 //!  1. Load-time validation is total: an arbitrary template compiles or returns
 //!     an error, never panics. Whatever survives `compile` is executable.
@@ -9,7 +9,10 @@
 //!     template against two services with wildly different field values must
 //!     yield the same number of arguments — a discovered value can fill an
 //!     argument but never add, remove, or split one.
-//!  3. The injection barrier, stated exactly: with a known template, every argv
+//!  3. Default-safe templates keep discovered text out of `argv[0]` and behind
+//!     a literal `--`; typed pre-terminator values cannot begin with `-`.
+//!  4. The interpolation barrier, stated exactly: with an explicitly opted-out
+//!     known template, every argv
 //!     slot is precisely the corresponding field value, whatever it contains —
 //!     spaces, quotes, backslashes, or braces.
 //!
@@ -50,6 +53,7 @@ fuzz_target!(|input: Input| {
         input.domain.clone(),
     );
     entry.hostname = input.hostname;
+    entry.addresses = vec!["192.0.2.1".parse().unwrap()];
     entry.port = input.port;
     entry.txt.insert("v".to_string(), input.txt_value.clone());
 
@@ -73,10 +77,32 @@ fuzz_target!(|input: Input| {
         }
     }
 
-    // 3. With a fixed template, arbitrary field values land in their own
-    //    argument. `name`, `service_type`, `domain`, and the inserted TXT key
-    //    are always present, so this must prepare successfully.
-    let fixed = CommandAction::compile(
+    // 3. A default-safe template keeps every arbitrary text field behind its
+    //    explicit terminator. Before it, only typed address/port values and
+    //    literals exist, so a discovered value cannot become an option.
+    let safe = CommandAction::compile(
+        None,
+        "run {address} {port} literal -- {name} {service_type} {domain} {txt.v}".to_string(),
+        ActionMode::Execute,
+    )
+    .expect("the fixed default-safe template must compile");
+    let safe_argv = safe.prepare(&entry).expect("all fields are populated").argv;
+    assert_eq!(safe_argv[0], "run", "discovery cannot select argv[0]");
+    let terminator = safe_argv
+        .iter()
+        .position(|argument| argument == "--")
+        .expect("the fixed template has a terminator");
+    assert!(
+        safe_argv[1..terminator]
+            .iter()
+            .all(|argument| !argument.starts_with('-')),
+        "typed and literal pre-terminator arguments cannot become options"
+    );
+
+    // 4. With the explicit opt-out, arbitrary field values still land in their
+    //    own argument. This pins argv shape while acknowledging that the rule
+    //    author deliberately accepted option-like values.
+    let fixed = CommandAction::compile_allowing_option_like_values(
         None,
         "run {name} {service_type} {domain} {txt.v}".to_string(),
         ActionMode::Execute,

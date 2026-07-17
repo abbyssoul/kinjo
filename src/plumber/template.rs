@@ -64,6 +64,20 @@ impl CommandTemplate {
     /// stays literal for compatibility with templates such as
     /// `echo {hostname}}`.
     pub fn compile(command: &str) -> Result<Self> {
+        Self::compile_with_option_policy(command, false)
+    }
+
+    /// Compile a template whose author explicitly accepts field-led arguments
+    /// before an options terminator.
+    ///
+    /// This is an escape hatch for programs whose grammar has no `--`, or for
+    /// placeholders intentionally used as option values. It never permits a
+    /// discovered field to select the executable itself.
+    pub(super) fn compile_allowing_option_like_values(command: &str) -> Result<Self> {
+        Self::compile_with_option_policy(command, true)
+    }
+
+    fn compile_with_option_policy(command: &str, allow_option_like_values: bool) -> Result<Self> {
         let tokens = tokenize(command)?;
         let Some(program) = tokens.first() else {
             return Err(eyre!("action command is empty"));
@@ -74,6 +88,19 @@ impl CommandTemplate {
         // and `CommandAction::prepare` checks the rendered result.
         if program.fragments.is_empty() {
             return Err(eyre!("action command has an empty program name"));
+        }
+        if program
+            .fragments
+            .iter()
+            .any(|fragment| matches!(fragment, Fragment::Field(_)))
+        {
+            return Err(eyre!(
+                "action command program must be literal; a discovered field cannot select the executable"
+            ));
+        }
+
+        if !allow_option_like_values {
+            validate_option_like_values(&tokens)?;
         }
         Ok(Self { tokens })
     }
@@ -108,7 +135,52 @@ impl CommandTemplate {
     }
 }
 
+/// Reject an argument whose first character can come from an untrusted text
+/// field until the trusted template author has written a literal `--`.
+///
+/// Kinjo cannot infer an arbitrary program's option grammar, so it neither
+/// inserts `--` nor assumes that a preceding option consumes the next token.
+/// Authors of those grammars use the explicit action-level opt-out instead.
+fn validate_option_like_values(tokens: &[Token]) -> Result<()> {
+    let mut options_terminated = false;
+    for token in tokens.iter().skip(1) {
+        if token.is_literal("--") {
+            options_terminated = true;
+            continue;
+        }
+        if options_terminated {
+            continue;
+        }
+        if let Some(field) = token.leading_option_sensitive_field() {
+            return Err(eyre!(
+                "service field `{{{field}}}` can begin an option-like argument; put a literal `--` before it or set `action.allow_option_like_values = true`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Token {
+    fn is_literal(&self, expected: &str) -> bool {
+        matches!(self.fragments.as_slice(), [Fragment::Literal(value)] if value == expected)
+    }
+
+    /// The first field that can decide whether this token starts with `-`.
+    /// Address and port are rendered from typed values and cannot do so.
+    fn leading_option_sensitive_field(&self) -> Option<&str> {
+        for fragment in &self.fragments {
+            match fragment {
+                Fragment::Literal(text) if text.is_empty() => {}
+                Fragment::Literal(_) => return None,
+                Fragment::Field(field) if matches!(field.as_str(), "address" | "port") => {
+                    return None;
+                }
+                Fragment::Field(field) => return Some(field),
+            }
+        }
+        None
+    }
+
     fn render(&self, record: &Entry) -> Result<String> {
         let mut argument = String::new();
         for fragment in &self.fragments {
@@ -119,7 +191,7 @@ impl Token {
                     // here means this record does not carry it. Rules only offer
                     // candidates whose fields all resolve, so reaching this is a
                     // caller error rather than a configuration one.
-                    let Some(value) = record.field(field) else {
+                    let Some(value) = record.field_value(field) else {
                         return Err(eyre!(
                             "service field `{field}` is unavailable for `{}`",
                             record.name
@@ -249,7 +321,7 @@ mod tests {
         record.addresses = vec!["192.0.2.5".parse().unwrap()];
         record.port = Some(22);
         record.txt.insert("path".to_string(), "/admin".to_string());
-        CommandTemplate::compile(template)
+        CommandTemplate::compile_allowing_option_like_values(template)
             .expect("template compiles")
             .render(&record)
             .expect("all fields resolve")
@@ -364,10 +436,15 @@ mod tests {
 
     #[test]
     fn arbitrary_txt_keys_are_supported_but_a_bare_txt_is_not() {
-        assert!(CommandTemplate::compile("echo {txt.anything-at-all}").is_ok());
+        assert!(
+            CommandTemplate::compile_allowing_option_like_values("echo {txt.anything-at-all}")
+                .is_ok()
+        );
         // `txt.txt.path` is a TXT key literally named `txt.path`, not a nested
         // lookup, so it is a supported field name.
-        assert!(CommandTemplate::compile("echo {txt.txt.path}").is_ok());
+        assert!(
+            CommandTemplate::compile_allowing_option_like_values("echo {txt.txt.path}").is_ok()
+        );
         assert!(error("echo {txt}").contains("unknown service field"));
         assert!(error("echo {txt.}").contains("unknown service field"));
     }
@@ -381,10 +458,28 @@ mod tests {
     }
 
     #[test]
-    fn a_placeholder_program_name_compiles() {
-        // Whether it renders to anything usable is per-record, so it is checked
-        // at preparation rather than rejected here.
-        assert_eq!(render("{hostname} --flag"), ["alpha.local", "--flag"]);
+    fn a_discovered_field_cannot_select_the_program() {
+        let err = CommandTemplate::compile_allowing_option_like_values("{hostname} --flag")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("program must be literal"));
+    }
+
+    #[test]
+    fn option_sensitive_fields_need_a_terminator_or_explicit_opt_out() {
+        let err = CommandTemplate::compile("ssh {hostname}")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("can begin an option-like argument"));
+        assert!(err.contains("allow_option_like_values"));
+
+        assert!(CommandTemplate::compile("ssh -- {hostname}").is_ok());
+        assert!(CommandTemplate::compile("open http://{hostname}").is_ok());
+        assert!(CommandTemplate::compile("ssh -p {port} -- {hostname}").is_ok());
+        assert!(
+            CommandTemplate::compile_allowing_option_like_values("program {txt.value}").is_ok()
+        );
     }
 
     #[test]
@@ -410,7 +505,7 @@ mod tests {
     #[test]
     fn a_missing_field_fails_rendering_rather_than_dropping_an_argument() {
         let record = Entry::new("alpha", "_ssh._tcp", "local");
-        let template = CommandTemplate::compile("ssh {hostname}").unwrap();
+        let template = CommandTemplate::compile("ssh -- {hostname}").unwrap();
 
         let err = template.render(&record).unwrap_err().to_string();
 
@@ -425,7 +520,7 @@ mod tests {
         // value. All of it must land in exactly one argument, uninterpreted.
         let mut record = Entry::new("alpha", "_ssh._tcp", "local");
         record.hostname = Some(r#"h.local' -oProxyCommand=evil ' "x" \ {name} {{ }"#.to_string());
-        let template = CommandTemplate::compile("ssh {hostname} tail").unwrap();
+        let template = CommandTemplate::compile("ssh -- {hostname} tail").unwrap();
 
         let argv = template.render(&record).unwrap();
 
@@ -433,6 +528,7 @@ mod tests {
             argv,
             [
                 "ssh",
+                "--",
                 r#"h.local' -oProxyCommand=evil ' "x" \ {name} {{ }"#,
                 "tail",
             ]

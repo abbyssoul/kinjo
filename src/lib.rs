@@ -30,6 +30,7 @@
 //! enum. Adding a backend is a change to this crate, not something a dependent
 //! can do from outside.
 
+mod config_home;
 pub mod discovery;
 pub mod plumber;
 mod terminal;
@@ -38,7 +39,7 @@ pub mod ui;
 #[cfg(test)]
 mod test_support;
 
-use std::{ffi::OsString, process::ExitCode};
+use std::{ffi::OsString, process::ExitCode, sync::Once};
 
 use color_eyre::eyre::{Report, Result, WrapErr, eyre};
 
@@ -47,7 +48,8 @@ use ui::App;
 use ui::app::ReloadOutcome;
 use ui::cli::CliCommand;
 
-/// Source-compatible library entrypoint.
+/// Source-compatible library entrypoint. Sequential calls in one process are
+/// supported; each call becomes the current SIGHUP reload target.
 ///
 /// Detailed diagnostics are written through the same safe process boundary as
 /// the binary. A caller receives only a static summary when the process runner
@@ -69,12 +71,19 @@ pub fn process_main() -> ExitCode {
 fn process_exit_code() -> u8 {
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
-    if let Err(report) = color_eyre::install() {
-        let _ = write_error_report(&mut stderr, &report);
-        return 1;
-    }
+    install_error_hook();
 
     run_with_args(std::env::args_os(), &mut stdout, &mut stderr)
+}
+
+/// Install enhanced diagnostics once when possible. Another library may have
+/// installed a report/panic hook first; that already satisfies the process
+/// invariant and is not an invocation failure.
+fn install_error_hook() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let _ = color_eyre::install();
+    });
 }
 
 fn run_with_args<I, T>(
@@ -225,13 +234,13 @@ fn report_cli_error(
 #[cfg(unix)]
 mod sighup {
     use std::sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        Arc,
+        atomic::{AtomicBool, AtomicPtr, Ordering},
     };
 
     /// The flag the installed handler sets. A C signal handler cannot carry
     /// state, so the app's flag is stashed in a process-global.
-    static RELOAD_REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+    static RELOAD_REQUESTED: AtomicPtr<AtomicBool> = AtomicPtr::new(std::ptr::null_mut());
 
     /// Whether Kinjo had a terminal when the handler was installed.
     ///
@@ -279,14 +288,23 @@ mod sighup {
         }
         // Only async-signal-safe work is allowed in a handler; setting an
         // atomic flag that the event loop polls is the safe idiom.
-        if let Some(flag) = RELOAD_REQUESTED.get() {
-            flag.store(true, Ordering::Relaxed);
+        let flag = RELOAD_REQUESTED.load(Ordering::Acquire);
+        if !flag.is_null() {
+            // SAFETY: `install` turns each Arc into a process-lifetime raw
+            // reference before publishing it. Published targets are never
+            // freed, so a signal can safely race a later pointer replacement.
+            unsafe { (*flag).store(true, Ordering::Relaxed) };
         }
     }
 
     /// Route SIGHUP to `flag`, and record whether there is a terminal to lose.
     pub(crate) fn install(flag: Arc<AtomicBool>) {
-        let _ = RELOAD_REQUESTED.set(flag);
+        // Signal handlers cannot lock or participate in Arc reference counts.
+        // Keep each rare, per-run flag alive for the process lifetime and swap
+        // one raw pointer atomically; this makes sequential composition-root
+        // invocations re-pointable without a use-after-free race.
+        let flag = Arc::into_raw(flag).cast_mut();
+        RELOAD_REQUESTED.store(flag, Ordering::Release);
         HAD_TERMINAL.store(terminal_is_alive(), Ordering::Relaxed);
         unsafe {
             libc::signal(
@@ -299,6 +317,9 @@ mod sighup {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::sync::Mutex;
+
+        static SIGNAL_TEST: Mutex<()> = Mutex::new(());
 
         /// This test is also the hangup path's canary. It runs in-process, so
         /// if the handler ever misread a plain `raise` as a hangup it would
@@ -311,6 +332,7 @@ mod sighup {
         /// Neither is a hangup.
         #[test]
         fn sighup_sets_the_reload_flag_instead_of_terminating() {
+            let _guard = SIGNAL_TEST.lock().unwrap();
             let flag = Arc::new(AtomicBool::new(false));
             install(flag.clone());
 
@@ -319,6 +341,20 @@ mod sighup {
             unsafe { libc::raise(libc::SIGHUP) };
 
             assert!(flag.load(Ordering::Relaxed));
+        }
+
+        #[test]
+        fn reinstall_routes_sighup_to_the_latest_flag() {
+            let _guard = SIGNAL_TEST.lock().unwrap();
+            let first = Arc::new(AtomicBool::new(false));
+            let second = Arc::new(AtomicBool::new(false));
+            install(first.clone());
+            install(second.clone());
+
+            unsafe { libc::raise(libc::SIGHUP) };
+
+            assert!(!first.load(Ordering::Relaxed));
+            assert!(second.load(Ordering::Relaxed));
         }
 
         /// The handler's entire decision rests on this, so it must be total —
@@ -728,9 +764,9 @@ mode = "fork"
     }
 
     #[test]
-    fn failed_placeholder_program_is_raw_for_exec_but_safe_in_final_stderr() {
+    fn a_placeholder_program_is_rejected_at_the_config_seam() {
         let mut builder = plumber::MatcherBuilder::new();
-        builder
+        let err = builder
             .add_str(
                 "placeholder-program.toml",
                 r#"
@@ -745,39 +781,10 @@ command = "{hostname} --flag"
 mode = "execute"
 "#,
             )
-            .unwrap();
-        let raw_program = "kinjo-no-such\x1b[2J\nprogram.local";
-        let mut entry = discovery::Entry::new("remote", "_ssh._tcp", "local");
-        entry.hostname = Some(raw_program.to_string());
-        let command = builder.build().commands()[0]
-            .action
-            .prepare(&entry)
-            .unwrap();
-        assert_eq!(command.argv, [raw_program, "--flag"]);
-        let command_line = command.argv.join(" ");
+            .unwrap_err()
+            .to_string();
 
-        let report = plumber::exec::exec(command)
-            .wrap_err_with(|| format!("failed to run `{command_line}`"))
-            .unwrap_err();
-
-        assert!(
-            report
-                .chain()
-                .any(|cause| cause.to_string().contains(raw_program)),
-            "the execution layer must retain the exact attempted program"
-        );
-        let mut stderr = Vec::new();
-        write_error_report(&mut stderr, &report).unwrap();
-        let stderr = String::from_utf8(stderr).unwrap();
-        assert!(
-            stderr.contains("kinjo-no-such\\x1B[2J\\x0Aprogram.local"),
-            "{stderr:?}"
-        );
-        assert!(
-            stderr
-                .chars()
-                .all(|character| character == '\n' || !character.is_control()),
-            "{stderr:?}"
-        );
+        assert!(err.contains("program must be literal"), "{err}");
+        assert!(err.contains("placeholder-program.toml"), "{err}");
     }
 }

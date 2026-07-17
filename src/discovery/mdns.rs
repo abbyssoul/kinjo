@@ -1,22 +1,25 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
+    future::Future,
     num::NonZeroU32,
-    sync::mpsc,
+    pin::Pin,
     time::Duration,
 };
 
-use futures::future::join_all;
+use futures::{StreamExt, stream::FuturesUnordered};
 use mdns_sd_discovery::{
     BrowseEvent, DiscoveredService, RemovedService, ServiceBrowserBuilder, ServiceResolverBuilder,
     TxtRecord,
 };
 use tokio_util::sync::CancellationToken;
 
+use super::inbox::EventSender;
 use super::session::DiscoverySession;
+use super::txt::TextTxtMap;
 use super::worker::{BrowseOutcome, DiscoveryWorker, RuntimeFlavor};
 use super::{
-    DEFAULT_DOMAIN, DiscoveryEvent, DiscoveryOptions, Entry, EntryId, OccurrenceId, Registration,
-    ServiceTypeFilter,
+    DEFAULT_DOMAIN, DiscoveryEvent, DiscoveryOptions, Entry, EntryId, MAX_DISCOVERED_OCCURRENCES,
+    OccurrenceId, Registration, ServiceTypeFilter,
 };
 
 /// How often known services are re-confirmed with a one-shot resolve.
@@ -25,6 +28,11 @@ const PROBE_INTERVAL: Duration = Duration::from_secs(30);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Consecutive failed probes after which a service is reported as removed.
 const PROBE_FAILURE_THRESHOLD: u32 = 3;
+/// Bound native resolver work and descriptor use during one probe cycle.
+const MAX_CONCURRENT_PROBES: usize = 32;
+
+type ProbeResult = (ServiceKey, Option<DiscoveredService>);
+type ProbeFuture = Pin<Box<dyn Future<Output = ProbeResult>>>;
 
 /// The occurrence a browse event reported: the registration it announced, plus
 /// the network interface the announcement arrived on when the browser named
@@ -77,15 +85,34 @@ struct TrackedService {
 /// with one-shot resolves; a service whose probes fail
 /// [`PROBE_FAILURE_THRESHOLD`] times in a row is reported removed within a few
 /// probe cycles instead.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct LivenessTracker {
     services: HashMap<ServiceKey, TrackedService>,
+    limit: usize,
+}
+
+impl Default for LivenessTracker {
+    fn default() -> Self {
+        Self {
+            services: HashMap::new(),
+            limit: MAX_DISCOVERED_OCCURRENCES,
+        }
+    }
 }
 
 impl LivenessTracker {
     /// A browse event (re-)announced the occurrence: it is alive.
-    fn note_found(&mut self, key: ServiceKey) {
+    /// Returns `false` when accepting a new key would exceed the resource cap.
+    fn note_found(&mut self, key: ServiceKey) -> bool {
+        if let Some(service) = self.services.get_mut(&key) {
+            *service = TrackedService::default();
+            return true;
+        }
+        if self.services.len() >= self.limit {
+            return false;
+        }
         self.services.insert(key, TrackedService::default());
+        true
     }
 
     /// Avahi reported the occurrence removed: it is authoritatively gone, and a
@@ -159,7 +186,7 @@ pub(super) fn start(options: &DiscoveryOptions) -> DiscoverySession {
 async fn browse_loop(
     domain: String,
     service_type_filter: Option<ServiceTypeFilter>,
-    tx: mpsc::Sender<DiscoveryEvent>,
+    tx: EventSender,
     shutdown: CancellationToken,
 ) -> BrowseOutcome {
     // The filter arrives validated and canonical, so it is browsed as given;
@@ -199,31 +226,35 @@ async fn browse_loop(
     let mut tracker = LivenessTracker::default();
     let mut probe_timer = tokio::time::interval(PROBE_INTERVAL);
     probe_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut pending_probes = VecDeque::new();
+    let mut active_probes: FuturesUnordered<ProbeFuture> = FuturesUnordered::new();
 
     // Dropping `browser` when this loop returns stops the underlying native
     // browse operation.
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => break BrowseOutcome::Cancelled,
-            _ = probe_timer.tick() => {
-                let keys = tracker.probe_keys();
-                if keys.is_empty() {
-                    continue;
-                }
-                // A probe cycle is bounded by PROBE_TIMEOUT, but stay
-                // responsive to shutdown while it runs.
-                tokio::select! {
-                    _ = shutdown.cancelled() => break BrowseOutcome::Cancelled,
-                    results = probe_services(keys) => {
-                        if !apply_probe_results(results, &mut tracker, &tx) {
-                            break BrowseOutcome::Stopped;
-                        }
+            _ = probe_timer.tick(), if active_probes.is_empty() && pending_probes.is_empty() => {
+                pending_probes = tracker.probe_keys().into();
+                fill_probe_slots(&mut pending_probes, &mut active_probes);
+            }
+            result = active_probes.next(), if !active_probes.is_empty() => {
+                if let Some(result) = result {
+                    if !apply_probe_results(std::iter::once(result), &mut tracker, &tx) {
+                        break BrowseOutcome::Stopped;
                     }
+                    fill_probe_slots(&mut pending_probes, &mut active_probes);
                 }
             }
             event = browser.recv() => match event {
                 Some(Ok(event)) => {
-                    track_event(&event, &mut tracker);
+                    if !track_event(&event, &mut tracker) {
+                        let cause = format!(
+                            "discovery exceeded the {MAX_DISCOVERED_OCCURRENCES}-occurrence liveness limit; records were cleared; refresh to retry"
+                        );
+                        tx.overload(cause.clone());
+                        break BrowseOutcome::Overloaded(cause);
+                    }
                     if !emit_event(event, &tx) {
                         break BrowseOutcome::Stopped;
                     }
@@ -242,7 +273,7 @@ async fn browse_loop(
 }
 
 /// Keeps the liveness tracker in sync with what the browser reports.
-fn track_event(event: &BrowseEvent, tracker: &mut LivenessTracker) {
+fn track_event(event: &BrowseEvent, tracker: &mut LivenessTracker) -> bool {
     match event {
         BrowseEvent::Found(service) => tracker.note_found(key_from_service(service)),
         BrowseEvent::Removed(removal) => {
@@ -254,35 +285,44 @@ fn track_event(event: &BrowseEvent, tracker: &mut LivenessTracker) {
                 Some(_) => tracker.note_removed(&key),
                 None => tracker.note_registration_removed(&key.registration),
             }
+            true
         }
     }
 }
 
-/// Probes each occurrence with a bounded one-shot resolve, concurrently.
-/// Returns each key with the resolved data on success or `None` when it did not
-/// answer in time.
-async fn probe_services(keys: Vec<ServiceKey>) -> Vec<(ServiceKey, Option<DiscoveredService>)> {
-    // Joined in-task rather than spawned: the resolve future is not `Send` on
-    // Windows (it holds raw PWSTR pointers across an await), and the browse
-    // loop runs on a current-thread runtime anyway.
-    let probes = keys.into_iter().map(|key| async move {
-        let mut builder = ServiceResolverBuilder::new(
-            &key.registration.name,
-            &key.registration.service_type,
-            &key.registration.domain,
-        );
-        builder.timeout(PROBE_TIMEOUT);
-        // Confine the probe to the interface this occurrence was announced on.
-        // An unconfined resolve answers from any interface still carrying the
-        // registration, which would report a dead occurrence as alive for as
-        // long as one sibling survives.
-        if let Some(index) = key.interface_index {
-            builder.interface_index(index);
-        }
-        let result = builder.resolve().await;
-        (key, result.ok())
-    });
-    join_all(probes).await
+/// Start only enough non-`Send` resolver futures to fill the concurrency
+/// window. Completion refills it from `pending`, so a cycle never fans out over
+/// the whole tracker at once.
+fn fill_probe_slots(
+    pending: &mut VecDeque<ServiceKey>,
+    active: &mut FuturesUnordered<ProbeFuture>,
+) {
+    while active.len() < MAX_CONCURRENT_PROBES {
+        let Some(key) = pending.pop_front() else {
+            break;
+        };
+        active.push(Box::pin(probe_service(key)));
+    }
+}
+
+/// Resolve one occurrence. It remains in the browse-loop task because the
+/// native future is not `Send` on every platform.
+async fn probe_service(key: ServiceKey) -> ProbeResult {
+    let mut builder = ServiceResolverBuilder::new(
+        &key.registration.name,
+        &key.registration.service_type,
+        &key.registration.domain,
+    );
+    builder.timeout(PROBE_TIMEOUT);
+    // Confine the probe to the interface this occurrence was announced on.
+    // An unconfined resolve answers from any interface still carrying the
+    // registration, which would report a dead occurrence as alive for as long
+    // as one sibling survives.
+    if let Some(index) = key.interface_index {
+        builder.interface_index(index);
+    }
+    let result = builder.resolve().await;
+    (key, result.ok())
 }
 
 /// Feeds probe outcomes into the tracker and emits the resulting events: a
@@ -290,9 +330,9 @@ async fn probe_services(keys: Vec<ServiceKey>) -> Vec<(ServiceKey, Option<Discov
 /// previously-removed occurrences that answered again. Returns `false` once the
 /// receiver has been dropped so the caller can stop.
 fn apply_probe_results(
-    results: Vec<(ServiceKey, Option<DiscoveredService>)>,
+    results: impl IntoIterator<Item = ProbeResult>,
     tracker: &mut LivenessTracker,
-    tx: &mpsc::Sender<DiscoveryEvent>,
+    tx: &EventSender,
 ) -> bool {
     for (key, outcome) in results {
         let sent = match outcome {
@@ -318,7 +358,7 @@ fn apply_probe_results(
 
 /// Translates a [`BrowseEvent`] into [`DiscoveryEvent`]s and sends them.
 /// Returns `false` once the receiver has been dropped so the caller can stop.
-fn emit_event(event: BrowseEvent, tx: &mpsc::Sender<DiscoveryEvent>) -> bool {
+fn emit_event(event: BrowseEvent, tx: &EventSender) -> bool {
     let event = match event {
         BrowseEvent::Found(service) => DiscoveryEvent::Upsert(record_from_service(&service)),
         BrowseEvent::Removed(removal) => key_from_removal(&removal).removal_event(),
@@ -361,20 +401,15 @@ fn key_from_removal(removal: &RemovedService) -> ServiceKey {
     }
 }
 
-/// Collapses DNS-SD TXT records into the string map [`Entry`] carries. Binary
-/// values are decoded lossily; a key-only entry maps to an empty value.
+/// Collapses native DNS-SD TXT records into Kinjo's portable text-only model.
+/// Invalid keys and binary values are not made actionable; duplicate keys are
+/// case-insensitive and first-wins.
 fn txt_map(records: &[TxtRecord]) -> BTreeMap<String, String> {
-    records
-        .iter()
-        .map(|record| {
-            let value = record
-                .value
-                .as_deref()
-                .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
-                .unwrap_or_default();
-            (record.key.clone(), value)
-        })
-        .collect()
+    let mut txt = TextTxtMap::default();
+    for record in records {
+        txt.observe_bytes(&record.key, record.value.as_deref());
+    }
+    txt.into_values()
 }
 
 #[cfg(test)]
@@ -382,6 +417,11 @@ mod tests {
     use std::net::IpAddr;
 
     use super::*;
+    use crate::discovery::inbox;
+
+    fn event_channel() -> (EventSender, std::sync::mpsc::Receiver<DiscoveryEvent>) {
+        inbox::test_channel(&CancellationToken::new())
+    }
 
     fn txt_record(key: &str, value: Option<&str>) -> TxtRecord {
         TxtRecord {
@@ -438,6 +478,54 @@ mod tests {
         let map = txt_map(&records);
         assert_eq!(map.get("path").map(String::as_str), Some("/admin"));
         assert_eq!(map.get("secure").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn txt_map_is_case_insensitive_first_wins_and_never_lossy() {
+        let records = vec![
+            txt_record("Path", Some("first")),
+            txt_record("path", Some("second")),
+            TxtRecord {
+                key: "binary".to_string(),
+                value: Some(vec![0xff]),
+            },
+            txt_record("BINARY", Some("replacement")),
+            txt_record("bad=key", Some("ignored")),
+        ];
+
+        let map = txt_map(&records);
+
+        assert_eq!(map.get("path").map(String::as_str), Some("first"));
+        assert!(!map.contains_key("binary"));
+        assert!(!map.contains_key("bad=key"));
+    }
+
+    #[test]
+    fn a_rule_can_match_a_long_txt_key_normalized_by_the_adapter() {
+        let mut entry = Entry::new("printer", "_ipp._tcp", "local");
+        entry.txt = txt_map(&[txt_record("Printer-Type", Some("3"))]);
+        let group =
+            crate::discovery::browse_groups(&[entry], crate::discovery::BrowseMode::LogicalService)
+                .remove(0);
+        let mut builder = crate::plumber::MatcherBuilder::new();
+        builder
+            .add_str(
+                "printer-type",
+                r#"
+[metadata]
+name = "printer-type"
+
+[match.txt.printer-type]
+equals = "3"
+
+[action]
+command = "echo type={txt.printer-type}"
+mode = "execute"
+"#,
+            )
+            .unwrap();
+
+        assert_eq!(builder.build().matches_group(&group).len(), 1);
     }
 
     fn key(name: &str) -> ServiceKey {
@@ -520,7 +608,7 @@ mod tests {
     #[test]
     fn probe_results_emit_remove_after_threshold_and_upsert_on_recovery() {
         let mut tracker = LivenessTracker::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = event_channel();
         let nas = service("nas", "_http._tcp", vec!["192.168.1.30".parse().unwrap()]);
         tracker.note_found(key("nas"));
 
@@ -646,7 +734,7 @@ mod tests {
     #[test]
     fn probe_failure_on_a_named_occurrence_removes_only_that_occurrence() {
         let mut tracker = LivenessTracker::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = event_channel();
         tracker.note_found(key_on("nas", 2));
         tracker.note_found(key_on("nas", 3));
 
@@ -676,7 +764,7 @@ mod tests {
     #[test]
     fn recovered_probe_upserts_the_occurrence_that_was_probed() {
         let mut tracker = LivenessTracker::default();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = event_channel();
         tracker.note_found(key_on("nas", 2));
         for _ in 0..PROBE_FAILURE_THRESHOLD {
             tracker.record_failure(&key_on("nas", 2));
@@ -716,6 +804,36 @@ mod tests {
 
         // Both `nas` occurrences are gone; the unrelated registration stays.
         assert_eq!(tracker.probe_keys(), vec![key_on("printer", 2)]);
+    }
+
+    #[test]
+    fn liveness_capacity_rejects_only_new_keys_and_reopens_after_removal() {
+        let mut tracker = LivenessTracker {
+            services: HashMap::new(),
+            limit: 2,
+        };
+
+        assert!(tracker.note_found(key("one")));
+        assert!(tracker.note_found(key("two")));
+        assert!(!tracker.note_found(key("three")));
+        assert!(tracker.note_found(key("one")), "updates remain accepted");
+
+        tracker.note_removed(&key("two"));
+        assert!(tracker.note_found(key("three")));
+        assert_eq!(tracker.services.len(), 2);
+    }
+
+    #[test]
+    fn a_probe_cycle_starts_only_the_concurrency_window() {
+        let mut pending: VecDeque<_> = (0..(MAX_CONCURRENT_PROBES + 7))
+            .map(|index| key(&format!("service-{index}")))
+            .collect();
+        let mut active: FuturesUnordered<ProbeFuture> = FuturesUnordered::new();
+
+        fill_probe_slots(&mut pending, &mut active);
+
+        assert_eq!(active.len(), MAX_CONCURRENT_PROBES);
+        assert_eq!(pending.len(), 7);
     }
 
     #[test]
