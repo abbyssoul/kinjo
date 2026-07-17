@@ -175,6 +175,7 @@ CI runs a short soak on every push/PR and a longer one on a weekly schedule
   the Debian package.
 - `docs/actions.md`: custom command file reference.
 - `docs/keybindings.md`: keybinding configuration reference.
+- `docs/releasing.md`: protected two-stage release and recovery runbook.
 - `docs/adr/`: architectural decisions and the reasoning behind them. Read the
   relevant one before reversing a design choice that looks arbitrary.
 - `.github/workflows/`: CI, fuzzing, and release packaging workflows.

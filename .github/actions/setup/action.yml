@@ -9,17 +9,21 @@ inputs:
     description: Workspaces passed through to rust-cache (one `path -> target` per line).
     required: false
     default: "."
+  install-avahi:
+    description: Install the Avahi daemon and client headers needed by the zeroconf feature.
+    required: false
+    default: "false"
 
 runs:
   using: composite
   steps:
-    - name: Install system dependencies
-      if: runner.os == 'Linux'
+    - name: Install Avahi build dependencies
+      if: runner.os == 'Linux' && inputs.install-avahi == 'true'
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y xorg-dev libxcb-shape0-dev libxcb-xfixes0-dev clang avahi-daemon libavahi-client-dev
+        sudo apt-get install -y clang libclang-dev libavahi-client-dev
 
-    - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 #v2.9.1
+    - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
         workspaces: ${{ inputs.cache-workspaces }}

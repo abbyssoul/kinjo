@@ -1,74 +1,90 @@
 name: Nix flake
 
-# Nothing else in CI builds the flake, so Nix packaging can break while every
-# other job stays green: the crate still compiles under cargo, and only someone
-# installing through Nix finds out.
-#
-# `flake.lock` pins nixpkgs to an exact revision, so the build cannot drift on
-# its own — an unchanged tree rebuilds identically forever, which is why there
-# is no scheduled run. What breaks it is the crate acquiring something the Nix
-# sandbox cannot satisfy: a dependency needing a native library, or a build
-# script reaching for the network. Those arrive through the Cargo manifests,
-# so the paths filter watches those and the Nix files rather than all of
-# `src/`; a plain source change that fails to compile is caught sooner, and on
-# the same runner, by ci-test.yml.
+# Evaluate every flake output and build the package natively on both supported
+# Linux architectures. Source/build-script changes are included because Cargo
+# CI cannot reproduce Nix sandbox and closure failures.
 
 on:
   push:
     branches: [ "main" ]
     paths:
+      - "src/**"
+      - "tests/**"
+      - "actions/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "build.rs"
       - "flake.nix"
       - "flake.lock"
       - "package.nix"
-      - "Cargo.toml"
-      - "Cargo.lock"
       - ".github/workflows/nix.yml"
   pull_request:
     branches: [ "main" ]
     paths:
+      - "src/**"
+      - "tests/**"
+      - "actions/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "build.rs"
       - "flake.nix"
       - "flake.lock"
       - "package.nix"
-      - "Cargo.toml"
-      - "Cargo.lock"
       - ".github/workflows/nix.yml"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      caller-run-id:
+        description: >
+          Run ID of the calling workflow. `github.event_name` cannot be used to
+          detect a called run: inside a called workflow the github context is the
+          caller's, so it is never 'workflow_call'.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: nix-${{ inputs.caller-run-id || github.ref }}
+  cancel-in-progress: ${{ !inputs.caller-run-id }}
 
 jobs:
   flake:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
+    name: Nix on ${{ matrix.system }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            os: ubuntu-24.04
+            evaluate: true
+          - system: aarch64-linux
+            os: ubuntu-24.04-arm
+            evaluate: false
 
-      # The runner image ships no Nix. Upstream's installer, pinned by commit
-      # (v31.11.0); flakes are enabled explicitly rather than relying on the
-      # installer's default staying that way.
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
       - name: Install Nix
-        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 #v31.11.0
+        uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      # Evaluates every output for both systems in the flake's `systems`, not
-      # just the runner's, so an overlay or package that breaks only on
-      # aarch64 fails here instead of on a user's machine. Evaluation only —
-      # nothing is built for the foreign system.
-      - name: Check flake outputs
+      - name: Check every flake output
+        if: matrix.evaluate
         run: nix flake check --all-systems -L
 
-      # The real build. buildRustPackage runs the crate's test suite as its
-      # check phase, inside the sandbox and without network access.
-      - name: Build the package
+      - name: Build the native package
         run: nix build .#kinjo -L
 
-      # Proves the closure is complete: a package that builds can still fail to
-      # run if a runtime dependency was left out of the derivation.
       - name: Run the built binary
         run: ./result/bin/kinjo --version

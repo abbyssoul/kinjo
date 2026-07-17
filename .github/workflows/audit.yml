@@ -14,24 +14,37 @@ on:
     # Monday 04:00 UTC.
     - cron: '0 4 * * 1'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      caller-run-id:
+        description: >
+          Run ID of the calling workflow. `github.event_name` cannot be used to
+          detect a called run: inside a called workflow the github context is the
+          caller's, so it is never 'workflow_call'.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: audit-${{ inputs.caller-run-id || github.ref }}
+  cancel-in-progress: ${{ !inputs.caller-run-id }}
 
 jobs:
   audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Install cargo-audit
-        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145
+        uses: taiki-e/install-action@2ca9b94c269419b7b0c711c09d0b21c4e1d51145 # v2
         with:
-          tool: cargo-audit
+          tool: cargo-audit@0.22.2
 
       - name: Audit dependencies
         run: |

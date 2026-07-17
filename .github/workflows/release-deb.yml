@@ -1,43 +1,77 @@
-name: Publish Debian package
+name: Build Debian release packages
 
 on:
-  release:
-    types: [created]
-  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   deb:
+    name: Debian package on ${{ matrix.arch }}
+    timeout-minutes: 35
     strategy:
+      fail-fast: false
       matrix:
-        # Native runners for each architecture avoid cross-compiling the C
-        # dependencies (libavahi-client, libxcb, etc).
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+        include:
+          - arch: amd64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
 
     runs-on: ${{ matrix.os }}
-
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Check candidate identity
+        env:
+          VERSION: ${{ inputs.version }}
+        run: scripts/release/check-version.sh manifest "$VERSION"
 
       - name: Set up build environment
         uses: ./.github/actions/setup
 
       - name: Install cargo-deb
-        uses: taiki-e/cache-cargo-install-action@417450f3c33ee20393705369577571770643d4c7
+        uses: taiki-e/cache-cargo-install-action@417450f3c33ee20393705369577571770643d4c7 # v3
         with:
-          tool: cargo-deb
+          tool: cargo-deb@3.7.0
 
-      - name: Build Debian package
-        run: cargo deb --locked --verbose
-
-      - name: Upload package to release
+      - name: Build and inspect Debian package
         env:
-          GH_TOKEN: ${{ github.token }}
-        # github.event.release is only set for the `release` trigger; fall back
-        # to the checked-out ref when dispatched manually (see prepare-release.yml).
-        run: gh release upload "${{ github.event.release.tag_name || github.ref_name }}" target/debian/*.deb --clobber
+          VERSION: ${{ inputs.version }}
+        run: |
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export SOURCE_DATE_EPOCH
+          cargo deb --locked --verbose
+          package="$(find target/debian -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$package"
+          dpkg-deb --info "$package"
+          dpkg-deb --contents "$package"
+          dpkg-deb --field "$package" Version | grep -Fx "${VERSION}-1"
+          dpkg-deb --field "$package" Architecture | grep -Fx "${{ matrix.arch }}"
+          dpkg-deb --fsys-tarfile "$package" | tar -tf - > package-contents.txt
+          grep -Fx './usr/bin/kinjo' package-contents.txt
+          grep -Fx './usr/share/doc/kinjo/README.md' package-contents.txt
+          grep -Fx './usr/share/doc/kinjo/LICENSE' package-contents.txt
+          grep -Eq '^\./etc/kinjo/commands/[^/]+\.toml$' package-contents.txt
+          sudo apt-get update
+          sudo apt-get install -y "./$package"
+          test -x "$(command -v kinjo)"
+          kinjo --version | grep -F "$VERSION"
+
+      - name: Upload staged Debian package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-deb-${{ matrix.arch }}-${{ inputs.version }}
+          path: target/debian/*.deb
+          if-no-files-found: error
+          retention-days: 7
