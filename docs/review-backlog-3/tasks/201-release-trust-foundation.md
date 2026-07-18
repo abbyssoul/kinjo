@@ -25,12 +25,12 @@ tokens until the first successful production release, then revoke them.
 ## Acceptance Criteria
 
 - [x] App installation is restricted to the two release repositories.
-- [ ] Preparation can create a test PR with a short-lived App token.
+- [x] Preparation can create a test PR with a short-lived App token.
 - [X] Both environments reject workflow code dispatched from non-`main` refs.
-- [ ] Release jobs cannot access protected credentials before non-self approval.
+- [x] Release jobs cannot access protected credentials before non-self approval.
 - [x] crates.io trusts only the exact release workflow/environment identity.
 - [x] Future GitHub releases are immutable.
-- [ ] Tap `main` requires the Homebrew checks from task 206.
+- [x] Tap `main` requires the Homebrew checks from task 206.
 - [x] `kinjo` `main` requires the ordinary CI checks and denies admin bypass.
 - [x] `release-preparation` has **no** required reviewer: the Homebrew job runs
       inside the release and would deadlock behind a second approval.

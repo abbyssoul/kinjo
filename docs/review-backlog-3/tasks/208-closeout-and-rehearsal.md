@@ -23,10 +23,10 @@ during tap PR creation.
 
 ## Definition of Done
 
-- [ ] Every review finding maps to completed work or an explicit accepted risk.
-- [ ] Dry-run validation and all architecture matrices are green.
-- [ ] Operators can resume every checkpoint without replacing public state.
-- [ ] The first production release proves OIDC, immutability, attestations, and
+- [x] Every review finding maps to completed work or an explicit accepted risk.
+- [x] Dry-run validation and all architecture matrices are green.
+- [x] Operators can resume every checkpoint without replacing public state.
+- [x] The first production release proves OIDC, immutability, attestations, and
       the Homebrew PR path before legacy tokens are revoked.
 
 ## Completion Record
