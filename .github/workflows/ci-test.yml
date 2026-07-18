@@ -118,6 +118,8 @@ jobs:
 
     env:
       KINJO_TIMEOUT: "15"
+      # A fixed path so the crash reporter can find the TUI's captured stderr.
+      KINJO_ERRLOG: /tmp/kinjo-app-stderr.log
 
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -126,10 +128,14 @@ jobs:
         persist-credentials: false
     - name: Set up build environment
       uses: ./.github/actions/setup
-    - name: Install tmux
+    - name: Install tmux and gdb
       run: |
         sudo apt-get update
-        sudo apt-get install -y tmux
+        sudo apt-get install -y tmux gdb
+    # Capture a backtrace if the rendered TUI crashes on quit. Cheap to set up;
+    # the reporting only runs on failure.
+    - name: Enable core dumps
+      run: scripts/ci/enable-core-dumps.sh
     - name: Smoke-test the default terminal size
       run: scripts/smoke-tui.sh
     - name: Smoke-test a short, narrow terminal
@@ -137,3 +143,16 @@ jobs:
         KINJO_COLS: "60"
         KINJO_ROWS: "18"
       run: scripts/smoke-tui.sh
+    - name: Report crash backtrace
+      if: failure()
+      run: scripts/ci/report-crash.sh
+    - name: Upload core dumps
+      if: failure()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: tui-smoke-crash-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          /tmp/cores/**
+          /tmp/kinjo-app-stderr.log
+        if-no-files-found: ignore
+        retention-days: 7

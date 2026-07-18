@@ -56,7 +56,7 @@ jobs:
 
       - name: Check and test repository shell helpers
         run: |
-          shellcheck -x scripts/*.sh scripts/release/*.sh
+          shellcheck -x scripts/*.sh scripts/release/*.sh scripts/ci/*.sh
           scripts/release/test-version.sh
           scripts/release/test-homebrew-formula.sh
           scripts/release/test-artifacts.sh
