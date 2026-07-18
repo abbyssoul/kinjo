@@ -10,6 +10,7 @@ binary="${1:-target/debug/kinjo}"
 cores_dir="${CORE_DUMP_DIR:-/tmp/cores}"
 
 echo "::group::signal / kill evidence"
+echo "terminating signal (run-fg launcher): $(cat "${CORE_DUMP_DIR:-/tmp/cores}/kinjo-rc.txt" 2>/dev/null || echo '?')"
 echo "core_pattern now: $(cat /proc/sys/kernel/core_pattern 2>/dev/null)"
 echo "core ulimit a pane process saw: $(cat /tmp/cores/tmux-core-ulimit.txt 2>/dev/null || echo '?')"
 echo "-- dmesg faults/kills --"

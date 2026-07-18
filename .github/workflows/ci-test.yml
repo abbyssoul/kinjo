@@ -120,6 +120,9 @@ jobs:
       KINJO_TIMEOUT: "15"
       # A fixed path so the crash reporter can find the TUI's captured stderr.
       KINJO_ERRLOG: /tmp/kinjo-app-stderr.log
+      # Run the TUI under a foreground-preserving launcher that records the exact
+      # terminating signal (tmux reports neither status nor signal for it).
+      KINJO_WRAP: "python3 scripts/ci/run-fg.py /tmp/cores/kinjo-rc.txt --"
 
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7

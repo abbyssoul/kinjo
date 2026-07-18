@@ -42,6 +42,8 @@
 #   KINJO_TIMEOUT   maximum wait-text/wait-exit seconds (default: 10)
 #   KINJO_ERRLOG    file the app's stderr is captured to, dumped on a crash
 #                   (default: $TMPDIR/kinjo-drive-$SESSION.err)
+#   KINJO_WRAP      optional command prefix placed before the binary, for
+#                   diagnostics (e.g. a launcher that records the exit signal)
 #
 # The default arguments are `--backend fake --config-dir actions`: the sample
 # backend plus the bundled rules, which is the reproducible way to exercise the
@@ -119,12 +121,15 @@ cmd_start() {
 
     tmux kill-session -t "$SESSION" 2>/dev/null || true
     # Quote every argument: a rule path or service type may contain anything.
-    local command errlog
+    local command errlog launch
     command=$(printf '%q ' "$BIN" "${args[@]}")
     errlog=$(err_path)
     : > "$errlog" 2>/dev/null || true
     # tmux runs the string through a shell, so the stderr redirect is honored.
-    tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" "$command 2>$(printf '%q' "$errlog")"
+    launch="$command 2>$(printf '%q' "$errlog")"
+    # Optional diagnostic wrapper, prepended verbatim before the binary (e.g. a
+    # foreground-preserving launcher that records the terminating signal).
+    tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" "${KINJO_WRAP:+$KINJO_WRAP }$launch"
     # Keep the pane after the app exits, so the last frame — a handoff, a crash,
     # an error — is still there to look at.
     tmux set-option -t "$SESSION" remain-on-exit on >/dev/null
