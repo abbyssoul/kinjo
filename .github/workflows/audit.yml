@@ -24,6 +24,13 @@ on:
         required: false
         type: string
         default: ""
+      ref:
+        description: >
+          Exact commit to check out. Empty (the normal push/PR case) uses the
+          triggering ref; a release caller pins its resolved release commit.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -39,6 +46,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Install cargo-audit

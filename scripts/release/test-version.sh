@@ -37,4 +37,10 @@ expect_fail release_require_newer 0.1.9 0.2.0
 expect_ok release_require_main_ref refs/heads/main
 expect_fail release_require_main_ref refs/heads/release
 
+expect_ok release_validate_sha 0123456789abcdef0123456789abcdef01234567
+for sha in '' 0123456789ABCDEF0123456789abcdef01234567 0123456 \
+    0123456789abcdef0123456789abcdef012345678 z123456789abcdef0123456789abcdef01234567; do
+    expect_fail release_validate_sha "$sha"
+done
+
 printf 'release-version-test: PASS\n'

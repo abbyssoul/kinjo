@@ -89,3 +89,15 @@ release_require_main_ref() {
         return 1
     fi
 }
+
+# A pinned release commit must be a full, lowercase 40-hex SHA. Abbreviated or
+# uppercase forms are rejected so the tag, crate, and assets all resolve to one
+# unambiguous object.
+release_validate_sha() {
+    local sha="${1:-}"
+
+    if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+        release_error "'$sha' is not a full lowercase 40-hex commit SHA"
+        return 1
+    fi
+}

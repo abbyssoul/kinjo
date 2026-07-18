@@ -7,6 +7,11 @@ on:
         description: "Merged stable version without v (for example 0.3.0)"
         required: true
         type: string
+      sha:
+        description: "Optional exact commit to release (defaults to the merged release/v<version> PR)"
+        required: false
+        default: ""
+        type: string
       publish:
         description: "Publish after validation and protected-environment approval"
         required: true
@@ -28,6 +33,9 @@ jobs:
     name: Validate release identity
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       tag: ${{ steps.identity.outputs.tag }}
       sha: ${{ steps.identity.outputs.sha }}
@@ -38,24 +46,57 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Validate exact main candidate
+      # Pin the release to an immutable commit, not to main's moving tip. By
+      # default that commit is the merge commit of the merged release/v<version>
+      # PR that Prepare Release opened, so unrelated merges (Dependabot, etc.)
+      # after the version was cut cannot change or fail the release, and every
+      # retry resolves the same commit. An explicit sha input overrides the
+      # lookup for hand-merged or otherwise unusual cases.
+      - name: Resolve and validate the release commit
         id: identity
         env:
           VERSION: ${{ inputs.version }}
+          SHA_OVERRIDE: ${{ inputs.sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           scripts/release/check-version.sh main
           scripts/release/check-version.sh stable "$VERSION"
-          scripts/release/check-version.sh manifest "$VERSION"
-          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
-          if [ "$GITHUB_SHA" != "$remote_sha" ]; then
-            echo "::error::main advanced from $GITHUB_SHA to $remote_sha; dispatch the new head"
+
+          # The dispatch tip of main; the release commit must be one of its
+          # ancestors, i.e. an already-merged, reviewed commit.
+          main_tip="$(git rev-parse HEAD)"
+          branch="release/v${VERSION}"
+
+          if [ -n "$SHA_OVERRIDE" ]; then
+            scripts/release/check-version.sh sha "$SHA_OVERRIDE"
+            sha="$SHA_OVERRIDE"
+          else
+            sha="$(gh pr list --repo "$GITHUB_REPOSITORY" --state merged \
+              --head "$branch" --base main --json mergeCommit,mergedAt \
+              --jq 'sort_by(.mergedAt) | last | .mergeCommit.oid // empty')"
+            if [ -z "$sha" ]; then
+              echo "::error::no merged $branch PR found; run Prepare Release and merge it, or pass an explicit sha"
+              exit 1
+            fi
+          fi
+
+          if ! git cat-file -e "${sha}^{commit}" 2>/dev/null; then
+            echo "::error::$sha is not a known commit in this repository"
             exit 1
           fi
+          if ! git merge-base --is-ancestor "$sha" "$main_tip"; then
+            echo "::error::$sha is not an ancestor of main; only merged commits can be released"
+            exit 1
+          fi
+
+          git checkout --quiet --detach "$sha"
+          scripts/release/check-version.sh manifest "$VERSION"
+
+          echo "Releasing v$VERSION from $sha"
           {
             echo "version=$VERSION"
             echo "tag=v$VERSION"
-            echo "sha=$GITHUB_SHA"
+            echo "sha=$sha"
           } >> "$GITHUB_OUTPUT"
 
   rust-ci:
@@ -63,24 +104,28 @@ jobs:
     uses: ./.github/workflows/ci-test.yml
     with:
       caller-run-id: ${{ github.run_id }}
+      ref: ${{ needs.preflight.outputs.sha }}
 
   audit:
     needs: preflight
     uses: ./.github/workflows/audit.yml
     with:
       caller-run-id: ${{ github.run_id }}
+      ref: ${{ needs.preflight.outputs.sha }}
 
   nix:
     needs: preflight
     uses: ./.github/workflows/nix.yml
     with:
       caller-run-id: ${{ github.run_id }}
+      ref: ${{ needs.preflight.outputs.sha }}
 
   workflow-lint:
     needs: preflight
     uses: ./.github/workflows/actionlint.yml
     with:
       caller-run-id: ${{ github.run_id }}
+      ref: ${{ needs.preflight.outputs.sha }}
 
   source-package:
     name: Stage crate and SBOM
@@ -90,6 +135,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
+          ref: ${{ needs.preflight.outputs.sha }}
           persist-credentials: false
 
       - name: Set up build environment
@@ -108,7 +154,16 @@ jobs:
           cargo package --locked --verbose
           cargo publish --dry-run --locked --verbose
           cargo cyclonedx --format json --target all --all-features
-          mv kinjo.cdx.json "kinjo-${VERSION}.cdx.json"
+          # cargo-cyclonedx stamps a wall-clock timestamp and a random
+          # serialNumber, so two runs of an identical tree differ byte-for-byte.
+          # That would break a resumed publish, whose byte-identity check compares
+          # the regenerated SBOM against the one already uploaded. Pin the
+          # timestamp to the commit time and drop the serial so the SBOM is
+          # reproducible.
+          commit_iso="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"
+          jq --arg ts "$commit_iso" 'del(.serialNumber) | .metadata.timestamp = $ts' \
+            kinjo.cdx.json > "kinjo-${VERSION}.cdx.json"
+          rm -f kinjo.cdx.json
           git archive --format=tar --prefix="kinjo-${VERSION}/" HEAD |
             gzip -n > "kinjo-${VERSION}.tar.gz"
           tar -tzf "kinjo-${VERSION}.tar.gz" | grep -Fx "kinjo-${VERSION}/Cargo.toml"
@@ -133,12 +188,14 @@ jobs:
     uses: ./.github/workflows/release-deb.yml
     with:
       version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.sha }}
 
   macos:
     needs: [preflight, rust-ci, audit, nix, workflow-lint]
     uses: ./.github/workflows/release-macos.yml
     with:
       version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.sha }}
 
   stage:
     name: Assemble and verify the candidate artifacts
@@ -148,6 +205,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
+          ref: ${{ needs.preflight.outputs.sha }}
           persist-credentials: false
 
       - name: Download every staged artifact
