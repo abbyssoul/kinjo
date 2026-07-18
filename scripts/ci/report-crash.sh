@@ -9,9 +9,31 @@ set -uo pipefail
 binary="${1:-target/debug/kinjo}"
 cores_dir="${CORE_DUMP_DIR:-/tmp/cores}"
 
-echo "::group::kernel fault log (dmesg)"
-sudo dmesg 2>/dev/null | grep -iE 'segfault|general protection|trap|core dump' | tail -40 \
+echo "::group::signal / kill evidence"
+echo "core_pattern now: $(cat /proc/sys/kernel/core_pattern 2>/dev/null)"
+echo "core ulimit a pane process saw: $(cat /tmp/cores/tmux-core-ulimit.txt 2>/dev/null || echo '?')"
+echo "-- dmesg faults/kills --"
+sudo dmesg 2>/dev/null | grep -iE 'segfault|general protection|trap|core dump|killed process|out of memory|oom' | tail -40 \
     || echo "(no kernel fault lines; dmesg may be restricted)"
+echo "-- journal: anything that killed kinjo (OOM, etc.) --"
+sudo journalctl -k --no-pager --since '-5min' 2>/dev/null | grep -iE 'kinjo|killed|oom|segfault' | tail -20 \
+    || echo "(journal unavailable)"
+echo "::endgroup::"
+
+# On systemd runners the kernel may route cores to systemd-coredump regardless of
+# core_pattern; it records the terminating signal and can hand a core to gdb.
+echo "::group::systemd-coredump (coredumpctl)"
+if command -v coredumpctl >/dev/null; then
+    sudo coredumpctl list --no-pager 2>&1 | tail -15 || echo "(coredumpctl: nothing)"
+    # `info` prints the terminating signal and, with debuginfo, a stack trace.
+    sudo coredumpctl info kinjo 2>&1 | grep -iE 'signal|command|executable|storage|^ *#[0-9]' | head -40 \
+        || echo "(no systemd core for kinjo)"
+    if sudo coredumpctl --output="$cores_dir/core.systemd-kinjo" dump kinjo 2>/dev/null; then
+        echo "extracted a systemd-managed core to $cores_dir/core.systemd-kinjo"
+    fi
+else
+    echo "(coredumpctl not present)"
+fi
 echo "::endgroup::"
 
 echo "::group::captured app stderr"

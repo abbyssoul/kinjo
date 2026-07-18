@@ -23,5 +23,11 @@ ulimit -c unlimited
 tmux kill-server 2>/dev/null || true
 tmux new-session -d -s _coredump_keepalive 'sleep 3600'
 
+# Record the limit a pane process actually inherits. If a crash then leaves no
+# core, this tells whether the limit failed to propagate or the signal simply
+# does not dump (e.g. SIGKILL from the OOM killer).
+tmux new-session -d -s _limit_probe \
+    "sh -c 'ulimit -c > /tmp/cores/tmux-core-ulimit.txt 2>&1'"
+
 echo "core_pattern=$(cat /proc/sys/kernel/core_pattern)"
-echo "core ulimit: $(ulimit -c)"
+echo "core ulimit (this shell): $(ulimit -c)"
