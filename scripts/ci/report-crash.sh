@@ -16,7 +16,7 @@ echo "-- dmesg faults/kills --"
 sudo dmesg 2>/dev/null | grep -iE 'segfault|general protection|trap|core dump|killed process|out of memory|oom' | tail -40 \
     || echo "(no kernel fault lines; dmesg may be restricted)"
 echo "-- journal: anything that killed kinjo (OOM, etc.) --"
-sudo journalctl -k --no-pager --since '-5min' 2>/dev/null | grep -iE 'kinjo|killed|oom|segfault' | tail -20 \
+sudo journalctl --no-pager --since '-5min' 2>/dev/null | grep -iE 'kinjo|killed process|oom|segfault|traps' | tail -20 \
     || echo "(journal unavailable)"
 echo "::endgroup::"
 

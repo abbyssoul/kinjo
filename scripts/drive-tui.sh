@@ -83,15 +83,18 @@ dump_app_stderr() {
 }
 
 # tmux records a numeric exit code only for a normal exit; a pane killed by a
-# signal has an empty dead-status. Name that case so a crash-on-quit is not
-# reported as the confusing "exited with status " (no number).
+# signal has an empty dead-status but often a `pane_dead_signal`. Report whichever
+# is available so a crash-on-quit names its signal instead of an empty status.
 exit_description() {
-    local status
+    local status signal
     status=$(pane_status)
-    if [[ -z "$status" ]]; then
-        printf 'via a signal (no exit code)'
-    else
+    signal=$(tmux display-message -p -t "$SESSION" '#{pane_dead_signal}' 2>/dev/null)
+    if [[ -n "$status" ]]; then
         printf 'with status %s' "$status"
+    elif [[ -n "$signal" ]]; then
+        printf 'via signal %s' "$signal"
+    else
+        printf 'via a signal (no exit code)'
     fi
 }
 
