@@ -42,6 +42,16 @@ artifacts and do not compile with repository-write credentials.
   returned, so a mismatch would surface only once the version was permanent on
   crates.io — breaking invariant 5. The job now runs `cargo package` and `cmp`
   first and publishes only the bytes that matched.
+- **Resume correctness (review of this task):** resume depends on every artifact
+  being byte-reproducible, because a re-run regenerates them and the publisher
+  `cmp`s each against the already-uploaded asset (invariant 8). The CycloneDX
+  SBOM was not reproducible — `cargo-cyclonedx` stamps a wall-clock
+  `metadata.timestamp` and a random `serialNumber` (confirmed: two clean runs
+  produced different SHA-256s). `source-package` now pins the timestamp to the
+  commit time and drops the serial via `jq`, so a resumed publish no longer
+  fails its own byte-identity check. Remaining reproducibility rests on
+  `cargo package` and `cargo deb` (`SOURCE_DATE_EPOCH`), which a rerun rehearsal
+  should confirm.
 - **Recovery scenarios exercised:** Local validators only; external checkpoint
   rehearsals remain blocked on Task 201.
 - **Validation:** Actionlint and ShellCheck pass. Protected approval, OIDC,

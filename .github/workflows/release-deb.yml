@@ -6,6 +6,10 @@ on:
       version:
         required: true
         type: string
+      ref:
+        description: "Exact release commit to check out and package."
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -30,6 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Check candidate identity

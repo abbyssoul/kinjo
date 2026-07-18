@@ -67,6 +67,7 @@ meaning as the earlier review backlogs.
 | 206 | P1 | blocked | [Deliver Homebrew through a validated tap PR](tasks/206-homebrew-pr.md) | 201, 205 | 207 |
 | 207 | P1 | in-progress | [Pin and bound the workflow supply chain](tasks/207-workflow-hardening.md) | — | every workflow task |
 | 208 | P2 | blocked | [Close coverage gaps and rehearse recovery](tasks/208-closeout-and-rehearsal.md) | 201–207 | — |
+| 209 | P0 | in-progress | [Pin the release to the merged version commit, not moving main](tasks/209-pin-release-to-merged-commit.md) | 202, 204 | 203, 205, 207 |
 
 Priority meanings:
 
@@ -98,6 +99,7 @@ GitHub-only architecture/recovery checks are actually satisfied.
 | Finding | Resolution |
 |---|---|
 | Tags are deleted and moved; five of eight local release tags observed during review resolve to a mismatching manifest version | 202, 205 |
+| Release pinned to moving `main` tip, so a merge between prepare and publish aborts it and breaks retry determinism (found in first production run) | 209 |
 | Public release creation and publisher dispatch are asynchronous and non-retryable | 205 |
 | Version PR uses `[skip ci]`, `--admin`, and only one Linux test command | 202, 203 |
 | Debian/macOS publishers omit tag/SHA validation and replace assets | 204, 205 |

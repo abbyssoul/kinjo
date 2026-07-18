@@ -52,9 +52,21 @@ dispatch.
 
 ## Rehearse without publishing
 
-Run **Release** from `main` with the merged version and `publish=false`. This
-executes the reusable Rust, audit, Nix, and workflow-lint gates; builds and
-executes native packages on Linux x86/ARM and macOS ARM/Intel; verifies the
+Run **Release** from `main` with the merged version and `publish=false`. It does
+not matter how much has merged into `main` since the version PR: **Release** pins
+itself to the merge commit of the merged `release/v<version>` PR, not to `main`'s
+current tip, so unrelated merges (Dependabot and the like) neither change nor
+fail the release. That pinned commit is validated as an ancestor of `main`
+carrying the requested version, and every job — validation, packaging, and
+publication — checks out that exact commit.
+
+The version you release is therefore the state of `main` when the version PR
+merged; commits that landed afterward ride the next version. If you must release
+a different commit (for example a hand-merged one), pass its full 40-hex `sha`;
+it is validated the same way.
+
+The run executes the reusable Rust, audit, Nix, and workflow-lint gates; builds
+and executes native packages on Linux x86/ARM and macOS ARM/Intel; verifies the
 crate; stages the SBOM and artifacts internally; and asserts that the staged set
 is exactly what the publisher expects. It creates no tag, release, crate, or tap
 pull request.
@@ -63,8 +75,9 @@ The dry run and the publisher share `scripts/release/check-artifacts.sh`, so an
 artifact naming or packaging mistake fails here rather than after the `release`
 environment has been approved.
 
-Record the workflow URL in Task 208. Do not proceed if any architecture was
-skipped or if the workflow commit is no longer the current `main` commit.
+Record the workflow URL in Task 208. The workflow logs print `Releasing
+v<version> from <sha>`; note that commit — reruns and the publish step must
+resolve to it. Do not proceed if any architecture was skipped.
 
 ## Publish
 
@@ -87,9 +100,10 @@ not queue multiple release dispatches while another release is running.
 
 ## Recovery
 
-Always retry the same **Release** input from the same unchanged `main` commit.
-Never delete or move a tag, replace an asset, or bump the version solely to
-recover automation.
+Always retry the same **Release** with the same `version`. Retrying resolves the
+same merged-PR commit, so `main` may move freely between attempts. If you pinned
+an explicit `sha`, pass the same one again. Never delete or move a tag, replace
+an asset, or bump the version solely to recover automation.
 
 | Failure point | External state | Recovery |
 |---|---|---|
