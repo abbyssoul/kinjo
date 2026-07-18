@@ -33,7 +33,7 @@ publish. Retries reuse matching state and reject conflicts.
 ## Definition of Done
 
 - [x] No workflow deletes or moves a release tag.
-- [ ] The App-authored PR triggers ordinary required checks.
+- [x] The App-authored PR triggers ordinary required checks.
 - [x] The workflow contains no `[skip ci]`, `--admin`, merge, or publication.
 - [x] Release instructions describe the two-stage flow.
 
