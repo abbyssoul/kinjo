@@ -40,6 +40,8 @@
 #   KINJO_SETTLE    seconds to wait after a key batch (default: 0.6)
 #   KINJO_STARTUP   seconds to wait after start, for discovery (default: 2.5)
 #   KINJO_TIMEOUT   maximum wait-text/wait-exit seconds (default: 10)
+#   KINJO_ERRLOG    file the app's stderr is captured to, dumped on a crash
+#                   (default: $TMPDIR/kinjo-drive-$SESSION.err)
 #
 # The default arguments are `--backend fake --config-dir actions`: the sample
 # backend plus the bundled rules, which is the reproducible way to exercise the
@@ -63,6 +65,36 @@ die() {
     exit 1
 }
 
+# The app runs in the alternate screen, so anything it prints to stderr — a
+# panic message, an abort — is wiped by the screen restore and lost from a pane
+# capture. Redirect it to a file that outlives the pane, so a crash on exit is
+# diagnosable after the fact instead of only visible as a bare signal death.
+err_path() {
+    printf '%s' "${KINJO_ERRLOG:-${TMPDIR:-/tmp}/kinjo-drive-${SESSION}.err}"
+}
+
+dump_app_stderr() {
+    local errlog
+    errlog=$(err_path)
+    if [[ -s "$errlog" ]]; then
+        echo "drive-tui: captured app stderr:" >&2
+        sed 's/^/  | /' "$errlog" >&2
+    fi
+}
+
+# tmux records a numeric exit code only for a normal exit; a pane killed by a
+# signal has an empty dead-status. Name that case so a crash-on-quit is not
+# reported as the confusing "exited with status " (no number).
+exit_description() {
+    local status
+    status=$(pane_status)
+    if [[ -z "$status" ]]; then
+        printf 'via a signal (no exit code)'
+    else
+        printf 'with status %s' "$status"
+    fi
+}
+
 usage() {
     sed -n '3,/^set -euo pipefail$/p' "$0" | sed '$d; s/^# \{0,1\}//'
 }
@@ -84,9 +116,12 @@ cmd_start() {
 
     tmux kill-session -t "$SESSION" 2>/dev/null || true
     # Quote every argument: a rule path or service type may contain anything.
-    local command
+    local command errlog
     command=$(printf '%q ' "$BIN" "${args[@]}")
-    tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" "$command"
+    errlog=$(err_path)
+    : > "$errlog" 2>/dev/null || true
+    # tmux runs the string through a shell, so the stderr redirect is honored.
+    tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" "$command 2>$(printf '%q' "$errlog")"
     # Keep the pane after the app exits, so the last frame — a handoff, a crash,
     # an error — is still there to look at.
     tmux set-option -t "$SESSION" remain-on-exit on >/dev/null
@@ -150,7 +185,8 @@ cmd_wait_text() {
         fi
         if [[ "$(pane_dead)" == "1" ]]; then
             printf '%s\n' "$screen" >&2
-            die "pane exited with status $(pane_status) before rendering '$expected'"
+            dump_app_stderr
+            die "pane exited $(exit_description) before rendering '$expected'"
         fi
         sleep 0.1
     done
@@ -171,7 +207,8 @@ cmd_wait_exit() {
             status=$(pane_status)
             if [[ "$status" != "0" ]]; then
                 cmd_shot >&2
-                die "pane exited with status $status"
+                dump_app_stderr
+                die "pane exited $(exit_description)"
             fi
             printf '%s\n' "$status"
             return 0
