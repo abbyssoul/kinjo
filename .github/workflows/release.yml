@@ -108,7 +108,7 @@ jobs:
           cargo package --locked --verbose
           cargo publish --dry-run --locked --verbose
           cargo cyclonedx --format json --target all --all-features
-          mv bom.json "kinjo-${VERSION}.cdx.json"
+          mv kinjo.cdx.json "kinjo-${VERSION}.cdx.json"
           git archive --format=tar --prefix="kinjo-${VERSION}/" HEAD |
             gzip -n > "kinjo-${VERSION}.tar.gz"
           tar -tzf "kinjo-${VERSION}.tar.gz" | grep -Fx "kinjo-${VERSION}/Cargo.toml"
