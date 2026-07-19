@@ -3,6 +3,24 @@ description: Report something that is broken or behaving unexpectedly.
 title: "Bug: "
 labels: ["bug"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        **Fastest path, especially for a crash:** reproduce the problem under the
+        bundled wrapper and attach the folder it collects.
+
+        ```sh
+        scripts/bug-report.sh          # or: KINJO_BIN=./target/release/kinjo scripts/bug-report.sh
+        ```
+
+        It runs kinjo normally — no `sudo`, no system changes — and gathers a
+        `kinjo-bug-report-*/` folder with a full backtrace, the captured error
+        output, and your environment. If kinjo printed
+        `kinjo saved a crash report to …`, attach that file too.
+
+        kinjo browses your local network, so those files can contain hostnames,
+        service names, and IP addresses from your LAN. **Please review them
+        before attaching.**
   - type: textarea
     id: summary
     attributes:
@@ -29,17 +47,25 @@ body:
     validations:
       required: true
   - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostic report
+      description: >
+        Drag in the files from `kinjo-bug-report-*/` (or the `kinjo-crash-*.log`
+        kinjo saved). If you could not run the wrapper, fill in Environment and
+        Logs below instead.
+  - type: textarea
     id: environment
     attributes:
       label: Environment
-      description: Include OS, install method, package version, and whether Avahi is running.
+      description: >
+        Needed only if you did not attach a diagnostic report above. Include OS,
+        install method, package version, and whether Avahi is running.
       placeholder: |
         OS:
         kinjo version:
         Install method:
         Avahi daemon status:
-    validations:
-      required: true
   - type: textarea
     id: logs
     attributes:
