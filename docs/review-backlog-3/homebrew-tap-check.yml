@@ -35,7 +35,14 @@ jobs:
           persist-credentials: false
 
       - name: Audit the formula
-        run: brew audit --strict --online Formula/kinjo.rb
+        run: |
+          # `brew audit` no longer accepts a file path ("Calling `brew audit
+          # [path ...]` is disabled"); it requires a formula name. Register this
+          # checkout as the tap so the formula resolves by its qualified name.
+          tap_dir="$(brew --repository)/Library/Taps/abbyssoul/homebrew-abyss"
+          mkdir -p "$(dirname "$tap_dir")"
+          ln -sfn "$GITHUB_WORKSPACE" "$tap_dir"
+          brew audit --strict --online abbyssoul/abyss/kinjo
 
       - name: Install and execute the changed formula
         run: |
