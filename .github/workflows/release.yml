@@ -494,6 +494,11 @@ jobs:
     if: ${{ inputs.publish }}
     needs: [preflight, publish]
     uses: ./.github/workflows/update-homebrew-tap.yml
+    # secrets: inherit is required for the reusable workflow's job-level
+    # environment secret (RELEASE_APP_PRIVATE_KEY) to resolve. Without it a
+    # called workflow's environment secrets silently resolve to "" even though
+    # the environment's variables (RELEASE_APP_ID) do resolve.
+    secrets: inherit
     with:
       tag: ${{ needs.preflight.outputs.tag }}
       sha: ${{ needs.preflight.outputs.sha }}
