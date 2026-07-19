@@ -287,9 +287,13 @@ jobs:
             gh release create "$TAG" --target "$SHA" --draft --generate-notes --title "$TAG"
             gh release view "$TAG" --json isDraft,isPrerelease,name > "$metadata"
           fi
-          state="$(jq -er .isDraft "$metadata")"
-          name="$(jq -er .name "$metadata")"
-          prerelease="$(jq -er .isPrerelease "$metadata")"
+          # Read raw values only: jq -e would exit non-zero on a legitimate
+          # false/null (isDraft is false for a resumed published release,
+          # isPrerelease is false for every normal release), which under set -e
+          # would abort the step before the explicit checks below can run.
+          state="$(jq -r .isDraft "$metadata")"
+          name="$(jq -r .name "$metadata")"
+          prerelease="$(jq -r .isPrerelease "$metadata")"
           if [ "$name" != "$TAG" ] || [ "$prerelease" != false ]; then
             echo "::error::$TAG has conflicting release metadata"
             exit 1
