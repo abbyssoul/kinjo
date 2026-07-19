@@ -42,6 +42,12 @@ jobs:
       cancel-in-progress: false
     outputs:
       pull-request-url: ${{ steps.pr.outputs.url }}
+    # The identity check inspects this (kinjo) repo, while later steps operate on
+    # a nested tap/ clone with an explicit --repo. Default gh to this repo so the
+    # release-view step does not depend on the cwd's git remote; the --repo flags
+    # on the tap steps override this env where they target the tap.
+    env:
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
