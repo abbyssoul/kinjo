@@ -275,14 +275,17 @@ jobs:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: scripts/release/check-artifacts.sh ../dist "$VERSION"
 
-      # The release is pinned to the merged version commit, which is an ancestor
-      # of main's tip rather than this run's HEAD. With immutable releases
-      # enabled, creating/publishing the release materializes a locked tag at
-      # that commit, and the Actions GITHUB_TOKEN is categorically forbidden from
-      # tagging any commit other than HEAD ("Resource not accessible by
-      # integration"). Use the release App installation token, which -- like a
-      # PAT -- can tag an arbitrary commit, for every release-write gh call. The
-      # build-provenance attestations below stay on GITHUB_TOKEN + OIDC.
+      # The release is pinned to the merged version commit, an ancestor of main's
+      # tip rather than this run's HEAD. Under immutable releases, creating a
+      # release whose tag would land on a non-HEAD commit is rejected for every
+      # installation token -- both GITHUB_TOKEN and a GitHub App token -- with
+      # "Resource not accessible by integration"; only a user PAT can. To avoid a
+      # long-lived PAT we push the tag ourselves with the App token (a plain git
+      # push of this checkout's HEAD, which is the release commit) and then create
+      # the release from the already-existing tag, so no token has to create a
+      # non-HEAD tag through the releases API. The App token drives every
+      # release-write gh call; build-provenance attestations stay on
+      # GITHUB_TOKEN + OIDC.
       - name: Mint release App token
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
@@ -294,18 +297,37 @@ jobs:
 
       - name: Create or verify the draft release
         id: draft
+        working-directory: source
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TAG: ${{ needs.preflight.outputs.tag }}
           SHA: ${{ needs.preflight.outputs.sha }}
         run: |
           metadata="$RUNNER_TEMP/release.json"
-          if ! gh release view "$TAG" --json isDraft,isPrerelease,name > "$metadata" 2>/dev/null; then
-            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-              echo "::error::$TAG exists without a matching GitHub release"
+          # Make sure the immutable tag exists at the exact release commit before
+          # creating the release. On a resume it already exists and must point at
+          # SHA; otherwise push it from this checkout, whose HEAD is the release
+          # commit, using the App token via git (the releases API cannot create a
+          # non-HEAD tag under immutable releases).
+          if tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha 2>/dev/null)"; then
+            if [ "$tag_sha" != "$SHA" ]; then
+              echo "::error::$TAG already exists at $tag_sha instead of $SHA"
               exit 1
             fi
-            gh release create "$TAG" --target "$SHA" --draft --generate-notes --title "$TAG"
+          else
+            head_sha="$(git rev-parse HEAD)"
+            if [ "$head_sha" != "$SHA" ]; then
+              echo "::error::source checkout is at $head_sha, not the release commit $SHA"
+              exit 1
+            fi
+            gh auth setup-git
+            git push origin "HEAD:refs/tags/${TAG}"
+          fi
+
+          # Create the release from the now-existing tag (no --target, so no tag
+          # is created through the API). A resumed run reuses the existing draft.
+          if ! gh release view "$TAG" --json isDraft,isPrerelease,name > "$metadata" 2>/dev/null; then
+            gh release create "$TAG" --draft --generate-notes --title "$TAG"
             gh release view "$TAG" --json isDraft,isPrerelease,name > "$metadata"
           fi
           # Read raw values only: jq -e would exit non-zero on a legitimate
@@ -317,17 +339,6 @@ jobs:
           prerelease="$(jq -r .isPrerelease "$metadata")"
           if [ "$name" != "$TAG" ] || [ "$prerelease" != false ]; then
             echo "::error::$TAG has conflicting release metadata"
-            exit 1
-          fi
-          # A draft release has no git tag yet: GitHub creates the tag only when
-          # the release is published. Verify the release points at the validated
-          # commit through its stored target_commitish, which is available while
-          # it is still a draft. The immutable tag ref itself is checked after
-          # publication, once it exists.
-          target="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
-            --jq "map(select(.tag_name == \"$TAG\")) | .[0].target_commitish // empty")"
-          if [ "$target" != "$SHA" ]; then
-            echo "::error::$TAG targets ${target:-no commit} instead of $SHA"
             exit 1
           fi
           echo "is-draft=$state" >> "$GITHUB_OUTPUT"
