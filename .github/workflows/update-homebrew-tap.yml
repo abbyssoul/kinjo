@@ -163,4 +163,12 @@ jobs:
           esac
           url="$(gh pr view "$branch" --repo "$TAP_REPO" --json url --jq .url)"
           echo "url=$url" >> "$GITHUB_OUTPUT"
+          # The tap's checks can lag behind PR creation, and
+          # `gh pr checks --watch` errors out ("no checks reported") if none
+          # exist yet. Wait for at least one check to register before watching.
+          for _ in $(seq 1 30); do
+            count="$(gh pr checks "$branch" --repo "$TAP_REPO" --json name --jq 'length' 2>/dev/null || echo 0)"
+            [ "${count:-0}" -gt 0 ] && break
+            sleep 10
+          done
           gh pr checks "$branch" --repo "$TAP_REPO" --watch --fail-fast --interval 10
