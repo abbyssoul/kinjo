@@ -158,10 +158,14 @@ jobs:
           # serialNumber, so two runs of an identical tree differ byte-for-byte.
           # That would break a resumed publish, whose byte-identity check compares
           # the regenerated SBOM against the one already uploaded. Pin the
-          # timestamp to the commit time and drop the serial so the SBOM is
-          # reproducible.
+          # timestamp to the commit time and replace the random serial with a
+          # UUID derived deterministically from the release commit. The serial
+          # cannot simply be dropped: actions/attest requires a serialNumber and
+          # rejects a CycloneDX document without one as an unsupported format.
           commit_iso="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ HEAD)"
-          jq --arg ts "$commit_iso" 'del(.serialNumber) | .metadata.timestamp = $ts' \
+          serial="urn:uuid:$(python3 -c "import uuid, sys; print(uuid.uuid5(uuid.NAMESPACE_URL, 'kinjo-sbom-' + sys.argv[1]))" "$(git rev-parse HEAD)")"
+          jq --arg ts "$commit_iso" --arg serial "$serial" \
+            '.serialNumber = $serial | .metadata.timestamp = $ts' \
             kinjo.cdx.json > "kinjo-${VERSION}.cdx.json"
           rm -f kinjo.cdx.json
           git archive --format=tar --prefix="kinjo-${VERSION}/" HEAD |
