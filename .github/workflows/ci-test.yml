@@ -118,6 +118,11 @@ jobs:
 
     env:
       KINJO_TIMEOUT: "15"
+      # ubuntu-24.04 ships tmux 3.4, which intermittently signals the pane
+      # process during teardown and surfaces here as a spurious "crash on quit".
+      # tmux >= 3.5 is clean, so build 3.5a from source instead of the distro
+      # package. See docs/tui-smoke-crash-handover.md.
+      TMUX_VERSION: "3.5a"
 
     steps:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -126,10 +131,30 @@ jobs:
         persist-credentials: false
     - name: Set up build environment
       uses: ./.github/actions/setup
-    - name: Install tmux
+    - name: Cache tmux ${{ env.TMUX_VERSION }}
+      id: tmux-cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: /usr/local/bin/tmux
+        key: tmux-${{ runner.os }}-${{ env.TMUX_VERSION }}
+    - name: Install tmux runtime library
+      # libevent's runtime lib is pulled in by libevent-dev when building, but is
+      # absent on a cache hit (build skipped), so install it unconditionally.
       run: |
         sudo apt-get update
-        sudo apt-get install -y tmux
+        sudo apt-get install -y libevent-2.1-7
+    - name: Build tmux ${{ env.TMUX_VERSION }} from source
+      if: steps.tmux-cache.outputs.cache-hit != 'true'
+      run: |
+        sudo apt-get install -y build-essential libevent-dev libncurses-dev bison pkg-config
+        curl --proto '=https' -fsSLo tmux.tar.gz \
+          "https://github.com/tmux/tmux/releases/download/${TMUX_VERSION}/tmux-${TMUX_VERSION}.tar.gz"
+        tar xzf tmux.tar.gz
+        (cd "tmux-${TMUX_VERSION}" && ./configure && make -j"$(nproc)" && sudo make install)
+    - name: Verify tmux version
+      run: |
+        hash -r
+        echo "using $(command -v tmux): $(tmux -V)"
     - name: Smoke-test the default terminal size
       run: scripts/smoke-tui.sh
     - name: Smoke-test a short, narrow terminal
