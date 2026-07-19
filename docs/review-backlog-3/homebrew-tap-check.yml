@@ -34,21 +34,23 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Audit the formula
+      # brew audit and brew install no longer accept a file path; both require a
+      # formula name resolved through a tap. Expose this checkout as the tap once
+      # so the later steps can refer to abbyssoul/abyss/kinjo.
+      - name: Register the checkout as a tap
         run: |
-          # `brew audit` no longer accepts a file path ("Calling `brew audit
-          # [path ...]` is disabled"); it requires a formula name. Register this
-          # checkout as the tap so the formula resolves by its qualified name.
           tap_dir="$(brew --repository)/Library/Taps/abbyssoul/homebrew-abyss"
           mkdir -p "$(dirname "$tap_dir")"
           ln -sfn "$GITHUB_WORKSPACE" "$tap_dir"
-          brew audit --strict --online abbyssoul/abyss/kinjo
+
+      - name: Audit the formula
+        run: brew audit --strict --online abbyssoul/abyss/kinjo
 
       - name: Install and execute the changed formula
         run: |
           expected="$(sed -nE 's|.*(/releases/download/)v([0-9]+\.[0-9]+\.[0-9]+)/kinjo-.*|\2|p' Formula/kinjo.rb | head -1)"
           test -n "$expected"
-          brew install --formula ./Formula/kinjo.rb
+          brew install --formula abbyssoul/abyss/kinjo
           test "$(uname -m)" = "${{ matrix.arch }}"
           kinjo --version | grep -F "$expected"
 
