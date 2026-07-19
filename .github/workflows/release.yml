@@ -244,6 +244,11 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
+    # The source checkout lives under source/, so the workspace root is not a git
+    # repository. Give gh an explicit repo so its release subcommands never try to
+    # infer one from a local remote and fail with "not a git repository".
+    env:
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - name: Download the validated source

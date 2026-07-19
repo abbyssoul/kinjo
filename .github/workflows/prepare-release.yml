@@ -28,6 +28,11 @@ jobs:
     environment:
       name: release-preparation
       deployment: false
+    # Give gh an explicit repo rather than letting it infer one from the
+    # checkout's origin remote, so the release commands do not depend on the
+    # local git layout.
+    env:
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
