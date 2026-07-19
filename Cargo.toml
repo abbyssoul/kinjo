@@ -1,7 +1,7 @@
 [package]
 name = "kinjo"
 description = "Kinjo: mDNS TUI and commands launch for local network services"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 readme = "README.md"
 repository = "https://github.com/abbyssoul/kinjo"
