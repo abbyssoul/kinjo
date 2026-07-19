@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | `blocked` |
+| Status | `in-progress` |
 | Priority | `P0` |
 | Workstream | External release trust |
 | Depends on | — |
@@ -37,9 +37,17 @@ tokens until the first successful production release, then revoke them.
 
 ## Completion Record
 
-- **External settings:** Not changed from this repository. The exact setup is
-  now an ordered checklist in `docs/releasing.md`.
-- **Proof:** Pending App, environment, branch-rule, immutability, and crates.io
-  owner access.
-- **Legacy credentials revoked:** No. Revoke only after the first production
-  run succeeds end to end.
+- **External settings:** Provisioned by the repository/tap owner. The GitHub App
+  (installed on `abbyssoul/kinjo` and `abbyssoul/homebrew-abyss`), the
+  `release-preparation` and `release` environments with their protection rules,
+  and the crates.io trusted publisher bound to this repository/workflow/`release`
+  environment are all in place. The ordered setup checklist lives in
+  `docs/releasing.md`.
+- **Proof:** App installation, environment, branch-rule, immutability, and
+  crates.io trusted-publisher settings configured on the two repositories.
+- **Remaining before `done`:** Perform the first real `publish=true` release to
+  validate the wiring end to end (App token, protected approval, OIDC crates.io
+  publish, immutable release, tap PR). This is the last step and is what the task
+  is now gated on.
+- **Legacy credentials revoked:** No. Revoke `CARGO_REGISTRY_TOKEN` and
+  `HOMEBREW_TAP_TOKEN` only after that first production run succeeds end to end.

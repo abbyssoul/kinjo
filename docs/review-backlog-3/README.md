@@ -59,7 +59,7 @@ meaning as the earlier review backlogs.
 
 | ID | Priority | Status | Task | Depends on | Likely conflicts |
 |---|---|---|---|---|---|
-| 201 | P0 | blocked | [Provision release identities and protection settings](tasks/201-release-trust-foundation.md) | — | 202, 205, 206 |
+| 201 | P0 | in-progress | [Provision release identities and protection settings](tasks/201-release-trust-foundation.md) | — | 202, 205, 206 |
 | 202 | P0 | in-progress | [Replace movable request tags with a version PR](tasks/202-normal-version-pr.md) | 201 | 205, 207 |
 | 203 | P1 | in-progress | [Make CI checks reusable as a release gate](tasks/203-reusable-validation-gate.md) | — | 204, 207, 208 |
 | 204 | P0 | in-progress | [Build and stage verified artifacts without write credentials](tasks/204-read-only-artifact-staging.md) | 203 | 205, 207 |
