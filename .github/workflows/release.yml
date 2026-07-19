@@ -294,9 +294,15 @@ jobs:
             echo "::error::$TAG has conflicting release metadata"
             exit 1
           fi
-          tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)"
-          if [ "$tag_sha" != "$SHA" ]; then
-            echo "::error::$TAG targets $tag_sha instead of $SHA"
+          # A draft release has no git tag yet: GitHub creates the tag only when
+          # the release is published. Verify the release points at the validated
+          # commit through its stored target_commitish, which is available while
+          # it is still a draft. The immutable tag ref itself is checked after
+          # publication, once it exists.
+          target="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq "map(select(.tag_name == \"$TAG\")) | .[0].target_commitish // empty")"
+          if [ "$target" != "$SHA" ]; then
+            echo "::error::$TAG targets ${target:-no commit} instead of $SHA"
             exit 1
           fi
           echo "is-draft=$state" >> "$GITHUB_OUTPUT"
@@ -424,11 +430,28 @@ jobs:
           TAG: ${{ needs.preflight.outputs.tag }}
         run: gh release edit "$TAG" --draft=false --latest
 
-      - name: Verify the release is public
+      - name: Verify the release is public and immutably tagged
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.preflight.outputs.tag }}
-        run: test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false
+          SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          test "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false
+          # Publishing created the tag at the release target. Confirm the tag ref
+          # now exists and resolves to the exact validated commit. Allow a few
+          # retries for the ref to become readable right after publication.
+          for _ in 1 2 3 4 5; do
+            if tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha 2>/dev/null)"; then
+              test "$tag_sha" = "$SHA" || {
+                echo "::error::$TAG targets $tag_sha instead of $SHA"
+                exit 1
+              }
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::$TAG has no tag ref after publication"
+          exit 1
 
   homebrew:
     name: Open validated Homebrew PR
