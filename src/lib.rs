@@ -31,6 +31,7 @@
 //! can do from outside.
 
 mod config_home;
+mod crash;
 pub mod discovery;
 pub mod plumber;
 mod terminal;
@@ -83,6 +84,9 @@ fn install_error_hook() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
         let _ = color_eyre::install();
+        // Chain crash-report persistence onto whatever panic hook is now in
+        // place, so a panic also leaves a file a bug report can attach.
+        crash::install();
     });
 }
 
