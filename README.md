@@ -17,33 +17,146 @@
 
 </div>
 
-## What's it for?
+Kinjo turns the services already advertised on your local network into a useful,
+keyboard-driven launcher. Find an SSH server, a device's web interface, a
+development service, or a printer without memorizing hostnames and ports.
 
-Avahi, the common Linux implementation of Bonjour / mDNS / DNS-SD, allows services
-to be published and discovered on a local network. This TUI lets users browse
-discovered services, filter and group them, and launch configured actions for a
-selected service.
+- Browse services by name, host, type, or matching command.
+- Narrow a busy network with fuzzy search and service-type filters.
+- Launch configurable actions such as SSH or opening a web interface.
+- Discover over standard mDNS/DNS-SD—no external discovery CLI required.
+- Keep everything local: there is no telemetry, account, or cloud service.
 
-Launch the TUI without arguments to browse the default `local` domain:
+Kinjo supports **macOS, Linux, and Windows**. The default discovery backend works
+out of the box; Avahi is only needed if you deliberately build and select the
+optional `zeroconf` backend.
+
+## Installation
+
+Choose the most convenient option for your platform:
+
+| Platform | Recommended installation |
+|---|---|
+| macOS | [Homebrew](#homebrew-macos-and-linux) |
+| Debian / Ubuntu | [`.deb` package](#debian--ubuntu) or [Homebrew](#homebrew-macos-and-linux) |
+| Other Linux | [Homebrew](#homebrew-macos-and-linux) or [Nix](#nix--nixos) |
+| Windows | [Cargo](#cargo-advanced) or [build from source](#build-from-source) |
+
+### Homebrew (macOS and Linux)
+
+Install Kinjo directly from the
+[`abbyssoul/abyss`](https://github.com/abbyssoul/homebrew-abyss) tap:
+
+```sh
+brew install abbyssoul/abyss/kinjo
+```
+
+That single command adds the tap, installs Kinjo, and includes the default
+commands. Future releases are available through the usual `brew upgrade`.
+
+### Debian / Ubuntu
+
+Download the `.deb` for your architecture (`amd64` or `arm64`) from the
+[latest GitHub release](https://github.com/abbyssoul/kinjo/releases/latest),
+then install it with `apt`:
+
+```sh
+sudo apt install ./kinjo_*.deb
+```
+
+The package includes the `kinjo` binary and default commands. The default
+discovery backend does not require `avahi-daemon` or development headers.
+
+### Nix / NixOS
+
+Run Kinjo without installing it:
+
+```sh
+nix run github:abbyssoul/kinjo
+```
+
+The flake provides packages for `x86_64-linux` and `aarch64-linux`. To install
+Kinjo declaratively, add the flake as an input and use its overlay:
+
+```nix
+# flake inputs:
+kinjo.url = "github:abbyssoul/kinjo";
+
+# in your NixOS module:
+nixpkgs.overlays = [ inputs.kinjo.overlays.default ];
+environment.systemPackages = [ pkgs.kinjo ];
+```
+
+The Nix build uses the default `mdns-sd` backend, so there is no daemon to
+enable on NixOS.
+
+### Cargo (advanced)
+
+If you already have the [Rust toolchain](https://rustup.rs/), install Kinjo
+from crates.io:
+
+```sh
+cargo install kinjo
+```
+
+This works on macOS, Linux, and Windows and compiles Kinjo locally. Windows is
+tested in CI but does not currently have a package-manager installation, so
+Cargo is the simplest Windows option.
+
+Optional discovery backends are selected at compile time. For example, the
+Avahi-backed `zeroconf` backend on Linux requires the Avahi client development
+headers:
+
+```sh
+cargo install kinjo --features zeroconf
+```
+
+### Build from source
+
+Clone the repository and build a release binary:
+
+```sh
+git clone https://github.com/abbyssoul/kinjo.git
+cd kinjo
+cargo build --release --locked
+```
+
+The binary will be at `target/release/kinjo` (`target\release\kinjo.exe` on
+Windows). To install it into Cargo's bin directory instead:
+
+```sh
+cargo install --path .
+```
+
+Contributors can find the full development setup and verification commands in
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Try it
+
+Start Kinjo with no configuration to browse the default `local` domain:
 
 ```sh
 kinjo
 ```
 
-Browse another DNS-SD domain with the `--domain` (`-d`) flag (supported by the
-default `mdns-sd` backend; see [backends](#discovery-backends) below):
+Use the arrow keys or `j`/`k` to move, `/` to search, `tab` to switch views,
+`enter` to run a matching action, and `?` to see all shortcuts. Press `q` to
+quit.
+
+Browse another DNS-SD domain with `--domain` (`-d`):
 
 ```sh
 kinjo --domain example.local
 ```
 
-For development without a running Avahi setup:
+From a source checkout, you can explore a deterministic set of sample services
+even when there is nothing advertising on your network:
 
 ```sh
-cargo run --features fake -- --backend fake
+cargo run --features fake -- --backend fake --config-dir actions
 ```
 
-### Discovery backends
+## Discovery backends
 
 The app discovers services over mDNS/DNS-SD so no external CLI tools are
 required. Backends are selected exclusively with `--backend`:
@@ -166,110 +279,6 @@ The two network discovery backends differ in how they reach the network:
 Either way, the traffic involved is the same kind of local multicast query
 your OS already performs for Bonjour/AirPlay/network-printer discovery — not
 a general network scan.
-
-## Installation
-
-### Debian / Ubuntu
-
-Download the latest `.deb` package from the project's
-[GitHub Releases](https://github.com/abbyssoul/kinjo/releases) page, then
-install it with `apt`:
-
-```sh
-sudo apt install ./kinjo_*_amd64.deb
-```
-
-The package installs `kinjo` and the bundled system command files under
-`/etc/kinjo/commands`.
-
-For real local-network discovery, make sure Avahi is installed and running:
-
-```sh
-sudo apt-get update
-sudo apt-get install -y avahi-daemon
-sudo systemctl enable --now avahi-daemon
-```
-
-### Cargo
-
-Install from crates.io with Cargo:
-
-```sh
-cargo install kinjo
-```
-
-On Debian or Ubuntu, install native build dependencies first:
-
-```sh
-sudo apt-get update
-sudo apt-get install -y clang libavahi-client-dev libxcb-shape0-dev libxcb-xfixes0-dev xorg-dev
-```
-
-### Nix / NixOS
-
-This repository is a Nix flake (outputs for `x86_64-linux` and `aarch64-linux`).
-Run kinjo without installing it:
-
-```sh
-nix run github:abbyssoul/kinjo
-```
-
-To install it declaratively, add the flake as an input and apply
-`overlays.default` to get `pkgs.kinjo`:
-
-```nix
-# flake inputs:
-kinjo.url = "github:abbyssoul/kinjo";
-
-# in your NixOS module:
-nixpkgs.overlays = [ inputs.kinjo.overlays.default ];
-environment.systemPackages = [ pkgs.kinjo ];
-```
-
-The default `mdns-sd` backend speaks mDNS/DNS-SD itself and needs no system
-daemon, so discovery works as soon as it's installed — there's nothing to
-enable on NixOS. (The `zeroconf` backend does go through `avahi-daemon`, but
-it's behind an off-by-default cargo feature that this flake doesn't build.)
-
-The packaged Nix build intentionally omits the off-by-default `fake` feature.
-To try the UI against built-in sample data from a source checkout, use
-`cargo run --features fake -- --backend fake`.
-
-### Build From Source
-
-Clone the repository and build locally:
-
-```sh
-git clone https://github.com/abbyssoul/kinjo.git
-cd kinjo
-cargo build --locked
-```
-
-Run from the source tree:
-
-```sh
-cargo run --features fake -- --backend fake
-```
-
-Install the built binary into Cargo's bin directory:
-
-```sh
-cargo install --path .
-```
-
-### Smoke Test
-
-You can verify the UI without a running Avahi daemon:
-
-```sh
-cargo run --features fake -- --backend fake
-```
-
-To browse real services on the default `local` domain:
-
-```sh
-kinjo
-```
 
 ## How It Works
 
@@ -538,5 +547,8 @@ For the full command file format, examples, and overlay rules, see
 
 ## Contributing
 
-Development setup, required system packages, and local verification commands are
-documented in [CONTRIBUTING.md](CONTRIBUTING.md).
+Bug reports, feature ideas, documentation fixes, and pull requests are welcome.
+If you are not sure where to start, open an
+[issue](https://github.com/abbyssoul/kinjo/issues) or see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and local
+verification commands.
