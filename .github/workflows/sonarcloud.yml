@@ -47,7 +47,7 @@ jobs:
           install-avahi: true
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@c3ec0de9ae7f1019cea21aa96aa0a895b9552063 # v2
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2
         with:
           tool: cargo-llvm-cov@0.8.7
 
