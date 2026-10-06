@@ -33,7 +33,9 @@ env:
 jobs:
   update-tap:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Most of this is waiting for the tap's checks, which include macOS
+    # runners that can queue for a long time; Urth and Exp-Bench allow the same.
+    timeout-minutes: 60
     environment:
       name: release-preparation
       deployment: false
@@ -82,13 +84,29 @@ jobs:
           version="${VERSION#v}"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG"
           fetch() { curl --proto '=https' --proto-redir '=https' -fsSL -o "$1" "$2"; }
-          fetch arm64.tar.gz "$base/kinjo-${version}-aarch64-apple-darwin.tar.gz"
-          fetch intel.tar.gz "$base/kinjo-${version}-x86_64-apple-darwin.tar.gz"
-          fetch source.tar.gz "$base/kinjo-${version}.tar.gz"
+          arm64="kinjo-${version}-aarch64-apple-darwin.tar.gz"
+          intel="kinjo-${version}-x86_64-apple-darwin.tar.gz"
+          source="kinjo-${version}.tar.gz"
+          mkdir assets
+          cd assets
+          for name in SHA256SUMS "$arm64" "$intel" "$source"; do
+            fetch "$name" "$base/$name"
+          done
+          # The formula must carry the digests the release published, not
+          # whatever bytes this download happened to receive: a truncated or
+          # replaced asset fails here instead of reaching the tap.
+          for name in "$arm64" "$intel" "$source"; do
+            awk -v name="$name" '$2 == name' SHA256SUMS
+          done > formula.sha256
+          test "$(wc -l < formula.sha256)" -eq 3 || {
+            echo "::error::SHA256SUMS does not list all three formula assets"
+            exit 1
+          }
+          sha256sum --check --strict formula.sha256
           {
-            echo "arm64=$(sha256sum arm64.tar.gz | cut -d' ' -f1)"
-            echo "intel=$(sha256sum intel.tar.gz | cut -d' ' -f1)"
-            echo "source=$(sha256sum source.tar.gz | cut -d' ' -f1)"
+            echo "arm64=$(sha256sum "$arm64" | cut -d' ' -f1)"
+            echo "intel=$(sha256sum "$intel" | cut -d' ' -f1)"
+            echo "source=$(sha256sum "$source" | cut -d' ' -f1)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Mint release App token for the tap
