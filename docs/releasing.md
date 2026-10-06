@@ -23,10 +23,11 @@ before enabling the workflows:
 5. Enable immutable GitHub releases for new releases.
 6. Copy the [tap check workflow](review-backlog-3/homebrew-tap-check.yml) to
    `homebrew-abyss/.github/workflows/kinjo.yml` and make its two jobs required
-   on tap `main`. `Formula/kinjo.rb` already carries the three
-   `# kinjo-*-sha256` comments the previous workflow relied on, so it needs no
-   hand edit: the first tap PR migrates its source URL from the generated tag
-   archive to the uploaded `kinjo-<version>.tar.gz` asset automatically.
+   on tap `main`. `Formula/kinjo.rb` is generated: each tap PR rewrites the
+   whole file from `scripts/release/update-homebrew-formula.sh`, so change the
+   template there, never the tap copy. The first release rendered by it
+   replaces the older formula's Linux source build with the static Linux
+   archives; no tap edit is needed.
 7. Require the ordinary CI checks on `kinjo`'s protected `main` and disallow
    administrator bypass. Preparation deliberately opens a normal PR and merges
    nothing; without required checks, a red version PR could still be merged by
@@ -66,7 +67,8 @@ a different commit (for example a hand-merged one), pass its full 40-hex `sha`;
 it is validated the same way.
 
 The run executes the reusable Rust, audit, Nix, and workflow-lint gates; builds
-and executes native packages on Linux x86/ARM and macOS ARM/Intel; verifies the
+and executes native packages on Linux x86/ARM and macOS ARM/Intel, plus static
+musl archives for Linux x86/ARM; verifies the
 crate; stages the SBOM and artifacts internally; and asserts that the staged set
 is exactly what the publisher expects. It creates no tag, release, crate, or tap
 pull request.
@@ -92,7 +94,9 @@ workflow then:
 4. publishes crates.io through its short-lived trusted-publisher token and
    verifies the registry checksum;
 5. publishes the immutable GitHub release; and
-6. opens or reuses a versioned Homebrew tap PR and waits for required checks.
+6. opens or reuses a versioned Homebrew tap PR and waits up to an hour for its
+   required checks. The PR's formula installs the macOS and static Linux
+   archives, whose digests must match the published `SHA256SUMS`.
 
 The workflow is globally serialized and never cancels an active publication.
 GitHub Actions retains at most one pending run for a concurrency group, so do

@@ -84,30 +84,32 @@ jobs:
           version="${VERSION#v}"
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG"
           fetch() { curl --proto '=https' --proto-redir '=https' -fsSL -o "$1" "$2"; }
-          arm64="kinjo-${version}-aarch64-apple-darwin.tar.gz"
-          intel="kinjo-${version}-x86_64-apple-darwin.tar.gz"
-          source="kinjo-${version}.tar.gz"
+          # Output name and release asset for each platform the formula installs.
+          assets=(
+            "macos-arm64 kinjo-${version}-aarch64-apple-darwin.tar.gz"
+            "macos-intel kinjo-${version}-x86_64-apple-darwin.tar.gz"
+            "linux-arm64 kinjo-${version}-aarch64-unknown-linux-musl.tar.gz"
+            "linux-x86_64 kinjo-${version}-x86_64-unknown-linux-musl.tar.gz"
+          )
           mkdir assets
           cd assets
-          for name in SHA256SUMS "$arm64" "$intel" "$source"; do
+          fetch SHA256SUMS "$base/SHA256SUMS"
+          for entry in "${assets[@]}"; do
+            name="${entry#* }"
             fetch "$name" "$base/$name"
-          done
-          # The formula must carry the digests the release published, not
-          # whatever bytes this download happened to receive: a truncated or
-          # replaced asset fails here instead of reaching the tap.
-          for name in "$arm64" "$intel" "$source"; do
+            # The formula must carry the digests the release published, not
+            # whatever bytes this download happened to receive: a truncated or
+            # replaced asset fails here instead of reaching the tap.
             awk -v name="$name" '$2 == name' SHA256SUMS
           done > formula.sha256
-          test "$(wc -l < formula.sha256)" -eq 3 || {
-            echo "::error::SHA256SUMS does not list all three formula assets"
+          test "$(wc -l < formula.sha256)" -eq "${#assets[@]}" || {
+            echo "::error::SHA256SUMS does not list all ${#assets[@]} formula assets"
             exit 1
           }
           sha256sum --check --strict formula.sha256
-          {
-            echo "arm64=$(sha256sum "$arm64" | cut -d' ' -f1)"
-            echo "intel=$(sha256sum "$intel" | cut -d' ' -f1)"
-            echo "source=$(sha256sum "$source" | cut -d' ' -f1)"
-          } >> "$GITHUB_OUTPUT"
+          for entry in "${assets[@]}"; do
+            echo "${entry% *}=$(sha256sum "${entry#* }" | cut -d' ' -f1)"
+          done >> "$GITHUB_OUTPUT"
 
       - name: Mint release App token for the tap
         id: app-token
@@ -122,9 +124,10 @@ jobs:
         id: formula
         env:
           VERSION: ${{ inputs.tag }}
-          ARM64_SHA: ${{ steps.sha.outputs.arm64 }}
-          INTEL_SHA: ${{ steps.sha.outputs.intel }}
-          SOURCE_SHA: ${{ steps.sha.outputs.source }}
+          MACOS_ARM64_SHA: ${{ steps.sha.outputs.macos-arm64 }}
+          MACOS_INTEL_SHA: ${{ steps.sha.outputs.macos-intel }}
+          LINUX_ARM64_SHA: ${{ steps.sha.outputs.linux-arm64 }}
+          LINUX_X86_64_SHA: ${{ steps.sha.outputs.linux-x86_64 }}
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           version="${VERSION#v}"
@@ -135,7 +138,8 @@ jobs:
           formula="Formula/kinjo.rb"
 
           ../scripts/release/update-homebrew-formula.sh \
-            "$formula" "$version" "$ARM64_SHA" "$INTEL_SHA" "$SOURCE_SHA"
+            "$formula" "$version" "$MACOS_ARM64_SHA" "$MACOS_INTEL_SHA" \
+            "$LINUX_ARM64_SHA" "$LINUX_X86_64_SHA"
 
           if git diff --quiet; then
             echo "Formula already contains v${version} and the expected hashes."

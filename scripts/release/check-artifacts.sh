@@ -27,6 +27,8 @@ expected=(
     "kinjo-${version}.tar.gz"
     "kinjo-${version}-aarch64-apple-darwin.tar.gz"
     "kinjo-${version}-x86_64-apple-darwin.tar.gz"
+    "kinjo-${version}-aarch64-unknown-linux-musl.tar.gz"
+    "kinjo-${version}-x86_64-unknown-linux-musl.tar.gz"
     "kinjo_${version}-1_amd64.deb"
     "kinjo_${version}-1_arm64.deb"
 )

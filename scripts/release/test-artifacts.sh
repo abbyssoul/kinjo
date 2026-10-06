@@ -18,6 +18,8 @@ stage() {
           "kinjo-${version}.tar.gz" \
           "kinjo-${version}-aarch64-apple-darwin.tar.gz" \
           "kinjo-${version}-x86_64-apple-darwin.tar.gz" \
+          "kinjo-${version}-aarch64-unknown-linux-musl.tar.gz" \
+          "kinjo-${version}-x86_64-unknown-linux-musl.tar.gz" \
           "kinjo_${version}-1_amd64.deb" \
           "kinjo_${version}-1_arm64.deb" )
 }
@@ -30,7 +32,7 @@ fail() {
 complete="$tmp/complete"
 stage "$complete"
 scripts/release/check-artifacts.sh "$complete" "$version" >/dev/null
-[[ "$(wc -l < "$complete/SHA256SUMS")" -eq 7 ]] || fail "expected seven digest lines"
+[[ "$(wc -l < "$complete/SHA256SUMS")" -eq 9 ]] || fail "expected nine digest lines"
 
 # Rerunning after a resumed publication must not trip over its own digest file.
 scripts/release/check-artifacts.sh "$complete" "$version" >/dev/null
@@ -53,6 +55,17 @@ mv "$nested/kinjo-${version}.crate" "$nested/target/package/"
 if scripts/release/check-artifacts.sh "$nested" "$version" >/dev/null 2>&1; then
     fail "crate nested under target/package was accepted"
 fi
+
+# The Linux archives are what Homebrew installs on Linux; a release without
+# them would leave the formula pointing at assets that do not exist.
+for target in aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+    no_linux="$tmp/no-$target"
+    stage "$no_linux"
+    rm "$no_linux/kinjo-${version}-${target}.tar.gz"
+    if scripts/release/check-artifacts.sh "$no_linux" "$version" >/dev/null 2>&1; then
+        fail "release without the $target archive was accepted"
+    fi
+done
 
 extra="$tmp/extra"
 stage "$extra"

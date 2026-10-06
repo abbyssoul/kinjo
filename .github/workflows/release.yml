@@ -201,9 +201,16 @@ jobs:
       version: ${{ needs.preflight.outputs.version }}
       ref: ${{ needs.preflight.outputs.sha }}
 
+  linux:
+    needs: [preflight, rust-ci, audit, nix, workflow-lint]
+    uses: ./.github/workflows/release-linux.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.sha }}
+
   stage:
     name: Assemble and verify the candidate artifacts
-    needs: [preflight, source-package, debian, macos]
+    needs: [preflight, source-package, debian, macos, linux]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
