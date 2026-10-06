@@ -52,7 +52,9 @@ brew install abbyssoul/abyss/kinjo
 ```
 
 That single command adds the tap, installs Kinjo, and includes the default
-commands. Future releases are available through the usual `brew upgrade`.
+commands. It installs a prebuilt release binary on macOS (Apple silicon and
+Intel) and Linux (x86_64 and ARM64), so no Rust toolchain is needed. Future
+releases are available through the usual `brew upgrade`.
 
 ### Debian / Ubuntu
 

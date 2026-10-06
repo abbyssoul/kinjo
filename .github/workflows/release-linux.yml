@@ -1,0 +1,100 @@
+name: Build Linux release archives
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      ref:
+        description: "Exact release commit to check out and package."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Static musl executables, so one archive runs on any Linux distribution and
+# glibc version: Homebrew installs them on Linux without a Rust toolchain. The
+# default features are pure Rust and need no C toolchain; the optional zeroconf
+# backend links the system Avahi library and is not part of these archives.
+jobs:
+  linux:
+    name: Linux archive on ${{ matrix.arch }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            file-arch: x86-64
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            file-arch: aarch64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Check candidate identity
+        env:
+          VERSION: ${{ inputs.version }}
+        run: scripts/release/check-version.sh manifest "$VERSION"
+
+      - name: Add the musl target to the pinned toolchain
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "$TARGET"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build, run, and package the static target
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          cargo build --release --locked --verbose --target "$TARGET"
+          binary="target/${TARGET}/release/kinjo"
+          "$binary" --version | grep -F "$VERSION"
+          file "$binary" | grep -F "${{ matrix.file-arch }}"
+          # A dynamically linked binary would tie the archive to the build
+          # runner's libc, which is the dependency these archives exist to drop.
+          file "$binary" | grep -E 'static(-pie)? linked'
+
+          name="kinjo-${VERSION}-${TARGET}"
+          mkdir -p "$name/commands"
+          cp "$binary" "$name/"
+          cp README.md LICENSE "$name/"
+          cp actions/*.toml "$name/commands/"
+          timestamp="$(TZ=UTC git show -s --format=%cd --date=format-local:%Y%m%d%H%M.%S HEAD)"
+          find "$name" -exec touch -h -t "$timestamp" {} +
+          tar --sort=name --owner=0 --group=0 --numeric-owner -cf "${name}.tar" "$name"
+          gzip -n "${name}.tar"
+          tar -tzf "${name}.tar.gz" > archive-contents.txt
+          grep -Fx "${name}/kinjo" archive-contents.txt
+          grep -Fx "${name}/README.md" archive-contents.txt
+          grep -Fx "${name}/LICENSE" archive-contents.txt
+          grep -Eq "^${name}/commands/[^/]+\.toml$" archive-contents.txt
+          mkdir smoke
+          tar -xzf "${name}.tar.gz" -C smoke
+          test -x "smoke/${name}/kinjo"
+          "smoke/${name}/kinjo" --version | grep -F "$VERSION"
+
+      - name: Upload staged Linux archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-linux-${{ matrix.arch }}-${{ inputs.version }}
+          path: kinjo-${{ inputs.version }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
