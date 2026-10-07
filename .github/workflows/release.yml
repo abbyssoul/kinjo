@@ -208,9 +208,18 @@ jobs:
       version: ${{ needs.preflight.outputs.version }}
       ref: ${{ needs.preflight.outputs.sha }}
 
+  image:
+    needs: [preflight, rust-ci, audit, nix, workflow-lint]
+    uses: ./.github/workflows/release-image.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      ref: ${{ needs.preflight.outputs.sha }}
+
   stage:
     name: Assemble and verify the candidate artifacts
-    needs: [preflight, source-package, debian, macos, linux]
+    # image stages no release asset; it is here so a dry run proves the image
+    # builds and passes its smoke test before anyone approves publication.
+    needs: [preflight, source-package, debian, macos, linux, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -495,6 +504,63 @@ jobs:
           done
           echo "::error::$TAG has no tag ref after publication"
           exit 1
+
+  # Pushes the archives the image job smoke-tested, never a rebuild. Each
+  # architecture gets a <version>-<arch> tag, joined into the multi-arch
+  # <version> and latest tags. Every push is idempotent, so a rerun after a
+  # partial failure converges.
+  container:
+    name: Publish container image
+    if: ${{ inputs.publish }}
+    needs: [preflight, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      VERSION: ${{ needs.preflight.outputs.version }}
+    steps:
+      - name: Download the staged images
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: image-*-${{ needs.preflight.outputs.version }}
+          path: images
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      # skopeo reads the credentials docker login writes.
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push both architectures and the multi-arch tags
+        id: push
+        run: |
+          for arch in amd64 arm64; do
+            skopeo copy --retry-times 3 \
+              "docker-archive:images/kinjo-${VERSION}-image-${arch}.tar" \
+              "docker://${IMAGE}:${VERSION}-${arch}"
+          done
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${VERSION}" --tag "${IMAGE}:latest" \
+            "${IMAGE}:${VERSION}-amd64" "${IMAGE}:${VERSION}-arm64"
+          digest="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}' | jq -er .digest)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest image provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
 
   homebrew:
     name: Open validated Homebrew PR

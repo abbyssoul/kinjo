@@ -32,6 +32,9 @@ before enabling the workflows:
    administrator bypass. Preparation deliberately opens a normal PR and merges
    nothing; without required checks, a red version PR could still be merged by
    hand.
+8. After the first publication, confirm that the `ghcr.io/abbyssoul/kinjo`
+   container package is public and linked to this repository. The release
+   workflow pushes it with `GITHUB_TOKEN`, so no further credential is needed.
 
 Keep the legacy crates.io and tap tokens until the first production run proves
 OIDC and App authentication. They are not referenced by the new workflows and
@@ -68,8 +71,8 @@ it is validated the same way.
 
 The run executes the reusable Rust, audit, Nix, and workflow-lint gates; builds
 and executes native packages on Linux x86/ARM and macOS ARM/Intel, plus static
-musl archives for Linux x86/ARM; verifies the
-crate; stages the SBOM and artifacts internally; and asserts that the staged set
+musl archives for Linux x86/ARM; builds and smoke-tests the container image
+natively on Linux x86/ARM; verifies the crate; stages the SBOM and artifacts internally; and asserts that the staged set
 is exactly what the publisher expects. It creates no tag, release, crate, or tap
 pull request.
 
@@ -96,7 +99,11 @@ workflow then:
 5. publishes the immutable GitHub release; and
 6. opens or reuses a versioned Homebrew tap PR and waits up to an hour for its
    required checks. The PR's formula installs the macOS and static Linux
-   archives, whose digests must match the published `SHA256SUMS`.
+   archives, whose digests must match the published `SHA256SUMS`;
+7. in parallel with the tap PR, pushes the two smoke-tested images staged by
+   the candidate gate as `ghcr.io/abbyssoul/kinjo:<version>-amd64` and
+   `-arm64`, joins them into the multi-arch `<version>` and `latest` tags, and
+   attests the image's provenance. Images are never rebuilt after approval.
 
 The workflow is globally serialized and never cancels an active publication.
 GitHub Actions retains at most one pending run for a concurrency group, so do
@@ -115,6 +122,7 @@ an asset, or bump the version solely to recover automation.
 | Draft creation or asset upload | matching draft/tag and possibly some assets | Rerun. Matching tag SHA and asset bytes are reused; conflicts stop the run. |
 | After crates.io publication | public crate plus matching draft | Rerun. The registry checksum is verified, then the draft is published. |
 | After GitHub publication | immutable release and crate | Rerun. Public state is verified without replacement, then Homebrew resumes. |
+| Container image push | immutable release and crate, possibly some image tags | Rerun. The rerun builds and smoke-tests its own staged images, then pushes them and recreates the tags. |
 | Tap branch/PR/checks | immutable upstream release plus partial tap state | Fix the tap check or matching version branch and rerun. A conflicting branch fails closed. |
 
 If crates.io contains the version with another checksum, a tag targets another

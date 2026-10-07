@@ -36,7 +36,7 @@ Elige la opción más conveniente para tu plataforma:
 |---|---|
 | macOS | [Homebrew](#homebrew-macos-y-linux) |
 | Debian / Ubuntu | [paquete `.deb`](#debian--ubuntu) o [Homebrew](#homebrew-macos-y-linux) |
-| Otro Linux | [Homebrew](#homebrew-macos-y-linux) o [Nix](#nix--nixos) |
+| Otro Linux | [Homebrew](#homebrew-macos-y-linux), [Nix](#nix--nixos) o [Docker](#docker-linux) |
 | Windows | [Cargo](#cargo-avanzado) o [compilar desde el código fuente](#compilar-desde-el-código-fuente) |
 
 ### Homebrew (macOS y Linux)
@@ -85,6 +85,42 @@ environment.systemPackages = [ pkgs.kinjo ];
 
 La compilación de Nix utiliza el backend predeterminado `mdns-sd`, por lo que no
 hay ningún demonio que habilitar en NixOS.
+
+### Docker (Linux)
+
+Cada versión publica una imagen multiarquitectura (`linux/amd64`, `linux/arm64`)
+con ambos backends de descubrimiento y los comandos predeterminados.
+
+```sh
+docker run --rm -it \
+  --network host \
+  -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket \
+  -v /run/avahi-daemon/socket:/run/avahi-daemon/socket \
+  ghcr.io/abbyssoul/kinjo
+```
+
+El contenedor no explora la red por sí mismo: en Linux ambos backends consultan
+al `avahi-daemon` del host a través del D-Bus del sistema, por lo que el host
+debe ejecutar `avahi-daemon`. Cada argumento cumple una función distinta:
+
+- `-it` proporciona una terminal a la TUI.
+- `/run/dbus/system_bus_socket` es obligatorio: sin él, el descubrimiento no
+  arranca.
+- `/run/avahi-daemon/socket` permite que los comandos resuelvan los nombres
+  `.local` de `{hostname}`, como el comando `ssh` predeterminado. Sin él, el
+  descubrimiento sigue funcionando, pero esos nombres no se resuelven.
+- `--network host` permite que los comandos lleguen a lo descubierto, incluidas
+  las direcciones IPv6 de enlace local, que un contenedor en red puente no puede
+  enrutar. El descubrimiento por sí solo no lo necesita.
+
+Con Podman sin root, añade también `--userns=keep-id --user "$(id -u):$(id -g)"`.
+De lo contrario, el usuario del contenedor se asigna a un UID subordinado que no
+coincide con el UID que presenta a D-Bus, y el bus rechaza la conexión.
+
+Para añadir tus propios comandos, móntalos sobre los predeterminados, por ejemplo
+`-v ~/.config/kinjo/commands:/etc/kinjo/commands:ro`. Los comandos se ejecutan
+dentro del contenedor, así que los `xdg-open` predeterminados no pueden abrir un
+navegador en el host.
 
 ### Cargo (avanzado)
 
