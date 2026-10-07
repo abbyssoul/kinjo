@@ -16,6 +16,7 @@ body:
       label: Install method
       options:
         - GitHub Release .deb
+        - Snap
         - cargo install
         - Built from source
         - Other

@@ -575,3 +575,53 @@ jobs:
     with:
       tag: ${{ needs.preflight.outputs.tag }}
       sha: ${{ needs.preflight.outputs.sha }}
+
+  # Classic confinement needs Snap Store approval before any revision can be
+  # released, so the upload is opt-in: set the SNAP_STORE_PUBLISH repository
+  # variable to true once the store has granted it. Until then the snaps are
+  # release assets only. A rerun skips an architecture whose stable channel
+  # already carries this version.
+  snap-store:
+    name: Upload snaps to the Snap Store
+    if: ${{ inputs.publish && vars.SNAP_STORE_PUBLISH == 'true' }}
+    needs: [preflight, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download the staged snaps
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-linux-*-${{ needs.preflight.outputs.version }}
+          path: dist
+          merge-multiple: true
+
+      - name: Verify the snaps against the published checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        working-directory: dist
+        run: |
+          gh release download "$TAG" --pattern SHA256SUMS
+          grep -E "  kinjo_${VERSION}_(amd64|arm64)\.snap$" SHA256SUMS > snaps.sha256
+          test "$(wc -l < snaps.sha256)" -eq 2
+          sha256sum -c snaps.sha256
+
+      - name: Upload to the stable channel
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          sudo snap install snapcraft --classic
+          for arch in amd64 arm64; do
+            released="$(curl --proto '=https' -sS -H 'Snap-Device-Series: 16' \
+              'https://api.snapcraft.io/v2/snaps/info/kinjo?fields=version' |
+              jq -r --arg arch "$arch" \
+                '[."channel-map"[]? | select(.channel.name == "stable" and .channel.architecture == $arch) | .version] | first // empty')"
+            if [ "$released" = "$VERSION" ]; then
+              echo "kinjo $VERSION is already stable for $arch"
+              continue
+            fi
+            snapcraft upload --release=stable "dist/kinjo_${VERSION}_${arch}.snap"
+          done

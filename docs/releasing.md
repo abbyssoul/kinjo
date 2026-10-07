@@ -35,6 +35,12 @@ before enabling the workflows:
 8. After the first publication, confirm that the `ghcr.io/abbyssoul/kinjo`
    container package is public and linked to this repository. The release
    workflow pushes it with `GITHUB_TOKEN`, so no further credential is needed.
+9. For the Snap Store: register the `kinjo` name (`snapcraft register kinjo`),
+   request classic confinement for it on the Snapcraft forum, and keep a store
+   login exported with `snapcraft export-login` in the `SNAPCRAFT_STORE_CREDENTIALS`
+   repository secret. Once classic confinement is granted, set the repository
+   variable `SNAP_STORE_PUBLISH` to `true`. Until then the snaps are release
+   assets only and the upload job is skipped.
 
 Keep the legacy crates.io and tap tokens until the first production run proves
 OIDC and App authentication. They are not referenced by the new workflows and
@@ -71,7 +77,8 @@ it is validated the same way.
 
 The run executes the reusable Rust, audit, Nix, and workflow-lint gates; builds
 and executes native packages on Linux x86/ARM and macOS ARM/Intel, plus static
-musl archives for Linux x86/ARM; builds and smoke-tests the container image
+musl archives for Linux x86/ARM, and classic snaps of those binaries, each
+installed and run on its runner; builds and smoke-tests the container image
 natively on Linux x86/ARM; verifies the crate; stages the SBOM and artifacts internally; and asserts that the staged set
 is exactly what the publisher expects. It creates no tag, release, crate, or tap
 pull request.
@@ -103,7 +110,9 @@ workflow then:
 7. in parallel with the tap PR, pushes the two smoke-tested images staged by
    the candidate gate as `ghcr.io/abbyssoul/kinjo:<version>-amd64` and
    `-arm64`, joins them into the multi-arch `<version>` and `latest` tags, and
-   attests the image's provenance. Images are never rebuilt after approval.
+   attests the image's provenance. Images are never rebuilt after approval;
+8. with `SNAP_STORE_PUBLISH` set, verifies the staged snaps against the
+   published `SHA256SUMS` and uploads them to the Snap Store's stable channel.
 
 The workflow is globally serialized and never cancels an active publication.
 GitHub Actions retains at most one pending run for a concurrency group, so do
@@ -123,6 +132,7 @@ an asset, or bump the version solely to recover automation.
 | After crates.io publication | public crate plus matching draft | Rerun. The registry checksum is verified, then the draft is published. |
 | After GitHub publication | immutable release and crate | Rerun. Public state is verified without replacement, then Homebrew resumes. |
 | Container image push | immutable release and crate, possibly some image tags | Rerun. The rerun builds and smoke-tests its own staged images, then pushes them and recreates the tags. |
+| Snap Store upload | immutable release and crate, possibly one architecture uploaded | Rerun. An architecture whose stable channel already has the version is skipped. |
 | Tap branch/PR/checks | immutable upstream release plus partial tap state | Fix the tap check or matching version branch and rerun. A conflicting branch fails closed. |
 
 If crates.io contains the version with another checksum, a tag targets another

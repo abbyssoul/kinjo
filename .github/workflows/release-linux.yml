@@ -21,6 +21,7 @@ env:
 # glibc version: Homebrew installs them on Linux without a Rust toolchain. The
 # default features are pure Rust and need no C toolchain; the optional zeroconf
 # backend links the system Avahi library and is not part of these archives.
+# The same binary is packed into the classic snap.
 jobs:
   linux:
     name: Linux archive on ${{ matrix.arch }}
@@ -33,10 +34,12 @@ jobs:
             os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             file-arch: x86-64
+            snap-arch: amd64
           - arch: aarch64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             file-arch: aarch64
+            snap-arch: arm64
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -91,10 +94,32 @@ jobs:
           test -x "smoke/${name}/kinjo"
           "smoke/${name}/kinjo" --version | grep -F "$VERSION"
 
+      # The snap wraps the same static binary, so it inherits its portability.
+      # Installing it on the runner proves classic confinement keeps the user's
+      # HOME (so ~/.config/kinjo is shared with other installs) and that the
+      # default commands beside the binary are found.
+      - name: Pack, install, and run the snap
+        env:
+          VERSION: ${{ inputs.version }}
+          TARGET: ${{ matrix.target }}
+          SNAP_ARCH: ${{ matrix.snap-arch }}
+        run: |
+          sudo snap install snapcraft --classic
+          scripts/release/pack-snap.sh "$VERSION" "$SNAP_ARCH" "target/${TARGET}/release/kinjo"
+          sudo snap install --dangerous --classic "kinjo_${VERSION}_${SNAP_ARCH}.snap"
+          /snap/bin/kinjo --version | grep -F "$VERSION"
+          # $HOME must expand inside the snap's environment, not here.
+          # shellcheck disable=SC2016
+          test "$(snap run --shell kinjo -c 'printf %s "$HOME"')" = "$HOME"
+          /snap/bin/kinjo list-commands | grep -E '^ssh[[:space:]]'
+          sudo snap remove kinjo
+
       - name: Upload staged Linux archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-linux-${{ matrix.arch }}-${{ inputs.version }}
-          path: kinjo-${{ inputs.version }}-${{ matrix.target }}.tar.gz
+          path: |
+            kinjo-${{ inputs.version }}-${{ matrix.target }}.tar.gz
+            kinjo_${{ inputs.version }}_${{ matrix.snap-arch }}.snap
           if-no-files-found: error
           retention-days: 7
