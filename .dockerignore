@@ -1,0 +1,9 @@
+# The image build copies only Cargo.toml, Cargo.lock, src/, actions/, LICENSE
+# and README.md; keep everything else, above all target/, out of the context.
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!actions/
+!LICENSE
+!README.md

@@ -39,7 +39,7 @@ Choose the most convenient option for your platform:
 |---|---|
 | macOS | [Homebrew](#homebrew-macos-and-linux) |
 | Debian / Ubuntu | [`.deb` package](#debian--ubuntu) or [Homebrew](#homebrew-macos-and-linux) |
-| Other Linux | [Homebrew](#homebrew-macos-and-linux) or [Nix](#nix--nixos) |
+| Other Linux | [Homebrew](#homebrew-macos-and-linux), [Nix](#nix--nixos) or [Docker](#docker-linux) |
 | Windows | [Cargo](#cargo-advanced) or [build from source](#build-from-source) |
 
 ### Homebrew (macOS and Linux)
@@ -91,6 +91,41 @@ environment.systemPackages = [ pkgs.kinjo ];
 
 The Nix build uses the default `mdns-sd` backend, so there is no daemon to
 enable on NixOS.
+
+### Docker (Linux)
+
+A multi-arch image (`linux/amd64`, `linux/arm64`) is published with each
+release. It contains both discovery backends and the default commands.
+
+```sh
+docker run --rm -it \
+  --network host \
+  -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket \
+  -v /run/avahi-daemon/socket:/run/avahi-daemon/socket \
+  ghcr.io/abbyssoul/kinjo
+```
+
+The container does not browse the network itself: on Linux both backends ask
+the host's `avahi-daemon` over the system D-Bus, so the host must run
+`avahi-daemon`. Each argument does a separate job:
+
+- `-it` gives the TUI a terminal.
+- `/run/dbus/system_bus_socket` is required: discovery fails to start without
+  it.
+- `/run/avahi-daemon/socket` lets commands resolve the `.local` host names in
+  `{hostname}`, such as the default `ssh` command. Without it discovery still
+  works, but those names do not resolve.
+- `--network host` lets commands reach what was discovered, including
+  link-local IPv6 addresses that a bridged container cannot route to. Discovery
+  alone does not need it.
+
+With rootless Podman, also pass `--userns=keep-id --user "$(id -u):$(id -g)"`.
+Otherwise the container user is mapped to a subordinate UID that does not match
+the UID it presents to D-Bus, and the bus rejects the connection.
+
+Add your own commands by mounting them over the defaults, for example
+`-v ~/.config/kinjo/commands:/etc/kinjo/commands:ro`. Commands run inside the
+container, so the `xdg-open` defaults cannot open a browser on the host.
 
 ### Cargo (advanced)
 
