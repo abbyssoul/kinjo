@@ -38,7 +38,7 @@ Choose the most convenient option for your platform:
 | Platform | Recommended installation |
 |---|---|
 | macOS | [Homebrew](#homebrew-macos-and-linux) |
-| Debian / Ubuntu | [`.deb` package](#debian--ubuntu) or [Homebrew](#homebrew-macos-and-linux) |
+| Debian / Ubuntu | [`.deb` package](#debian--ubuntu), [Snap](#snap-linux) or [Homebrew](#homebrew-macos-and-linux) |
 | Other Linux | [Homebrew](#homebrew-macos-and-linux), [Nix](#nix--nixos) or [Docker](#docker-linux) |
 | Windows | [Cargo](#cargo-advanced) or [build from source](#build-from-source) |
 
@@ -68,6 +68,27 @@ sudo apt install ./kinjo_*.deb
 
 The package includes the `kinjo` binary and default commands. The default
 discovery backend does not require `avahi-daemon` or development headers.
+
+### Snap (Linux)
+
+Each release attaches a snap for `amd64` and `arm64`. Download the one for your
+architecture from the
+[latest GitHub release](https://github.com/abbyssoul/kinjo/releases/latest)
+and install it:
+
+```sh
+sudo snap install --dangerous --classic ./kinjo_*.snap
+```
+
+Once Kinjo is in the Snap Store, `sudo snap install kinjo --classic` installs it
+from there and keeps it updated. `--dangerous` is needed only for a downloaded
+file, which the Store has not signed.
+
+The snap uses classic confinement because Kinjo runs the commands you
+configure, such as `ssh` or a browser, and a confined snap could run only
+programs it ships. It shares `~/.config/kinjo` with other installations and
+includes the default commands. Like the `.deb`, it browses through the host's
+`avahi-daemon`.
 
 ### Nix / NixOS
 

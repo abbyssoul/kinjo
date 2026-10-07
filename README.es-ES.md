@@ -35,7 +35,7 @@ Elige la opción más conveniente para tu plataforma:
 | Plataforma | Instalación recomendada |
 |---|---|
 | macOS | [Homebrew](#homebrew-macos-y-linux) |
-| Debian / Ubuntu | [paquete `.deb`](#debian--ubuntu) o [Homebrew](#homebrew-macos-y-linux) |
+| Debian / Ubuntu | [paquete `.deb`](#debian--ubuntu), [Snap](#snap-linux) o [Homebrew](#homebrew-macos-y-linux) |
 | Otro Linux | [Homebrew](#homebrew-macos-y-linux), [Nix](#nix--nixos) o [Docker](#docker-linux) |
 | Windows | [Cargo](#cargo-avanzado) o [compilar desde el código fuente](#compilar-desde-el-código-fuente) |
 
@@ -62,6 +62,27 @@ sudo apt install ./kinjo_*.deb
 
 El paquete incluye el binario `kinjo` y los comandos predeterminados. El backend
 de descubrimiento predeterminado no requiere `avahi-daemon` ni encabezados de desarrollo.
+
+### Snap (Linux)
+
+Cada versión adjunta un snap para `amd64` y `arm64`. Descarga el de tu
+arquitectura desde la
+[última versión en GitHub](https://github.com/abbyssoul/kinjo/releases/latest)
+e instálalo:
+
+```sh
+sudo snap install --dangerous --classic ./kinjo_*.snap
+```
+
+Cuando Kinjo esté en la Snap Store, `sudo snap install kinjo --classic` lo
+instalará desde allí y lo mantendrá actualizado. `--dangerous` solo hace falta
+para un archivo descargado, que la Store no ha firmado.
+
+El snap usa confinamiento clásico porque Kinjo ejecuta los comandos que
+configuras, como `ssh` o un navegador, y un snap confinado solo podría ejecutar
+los programas que incluye. Comparte `~/.config/kinjo` con otras instalaciones e
+incluye los comandos predeterminados. Igual que el `.deb`, explora a través del
+`avahi-daemon` del host.
 
 ### Nix / NixOS
 

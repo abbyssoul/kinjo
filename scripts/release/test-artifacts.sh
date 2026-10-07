@@ -21,7 +21,9 @@ stage() {
           "kinjo-${version}-aarch64-unknown-linux-musl.tar.gz" \
           "kinjo-${version}-x86_64-unknown-linux-musl.tar.gz" \
           "kinjo_${version}-1_amd64.deb" \
-          "kinjo_${version}-1_arm64.deb" )
+          "kinjo_${version}-1_arm64.deb" \
+          "kinjo_${version}_amd64.snap" \
+          "kinjo_${version}_arm64.snap" )
 }
 
 fail() {
@@ -32,7 +34,7 @@ fail() {
 complete="$tmp/complete"
 stage "$complete"
 scripts/release/check-artifacts.sh "$complete" "$version" >/dev/null
-[[ "$(wc -l < "$complete/SHA256SUMS")" -eq 9 ]] || fail "expected nine digest lines"
+[[ "$(wc -l < "$complete/SHA256SUMS")" -eq 11 ]] || fail "expected eleven digest lines"
 
 # Rerunning after a resumed publication must not trip over its own digest file.
 scripts/release/check-artifacts.sh "$complete" "$version" >/dev/null

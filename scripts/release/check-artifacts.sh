@@ -31,6 +31,8 @@ expected=(
     "kinjo-${version}-x86_64-unknown-linux-musl.tar.gz"
     "kinjo_${version}-1_amd64.deb"
     "kinjo_${version}-1_arm64.deb"
+    "kinjo_${version}_amd64.snap"
+    "kinjo_${version}_arm64.snap"
 )
 
 for name in "${expected[@]}"; do
