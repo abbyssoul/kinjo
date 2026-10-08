@@ -1,0 +1,23 @@
+Source: kinjo
+Section: net
+Priority: optional
+Maintainer: Ivan Ryabov <abbyssoul@gmail.com>
+# Launchpad builds offline against the series' own archive, whose default rustc
+# is too old for edition 2024. Ubuntu ships versioned toolchains in -updates;
+# 1.91 is the newest one every targeted series (jammy, noble, resolute) has.
+# Keep RUST_VERSION in debian/rules in step with these two.
+Build-Depends: debhelper-compat (= 13), cargo-1.91, rustc-1.91
+Standards-Version: 4.6.0
+Homepage: https://github.com/abbyssoul/kinjo
+Vcs-Browser: https://github.com/abbyssoul/kinjo
+Vcs-Git: https://github.com/abbyssoul/kinjo.git
+Rules-Requires-Root: no
+
+Package: kinjo
+# The architectures the release workflow test-builds before every upload.
+Architecture: amd64 arm64
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: mDNS TUI and command launcher for local network services
+ Kinjo discovers services advertised over mDNS/DNS-SD on the local network,
+ shows them in a terminal user interface, and launches the commands you
+ configure for them (ssh, a browser, anything).
