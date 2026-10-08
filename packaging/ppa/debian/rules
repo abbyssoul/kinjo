@@ -1,0 +1,50 @@
+#!/usr/bin/make -f
+
+# Must match the cargo-X.Y / rustc-X.Y versions in Build-Depends.
+RUST_VERSION := 1.91
+
+export PATH := /usr/lib/rust-$(RUST_VERSION)/bin:$(PATH)
+# Launchpad builders have no network and set HOME to a nonexistent directory,
+# so cargo gets a private home that points crates.io at the crates vendored
+# into the orig tarball.
+export CARGO_HOME := $(CURDIR)/debian/cargo-home
+
+# A locked dependency (mdns-sd-discovery) declares rust-version 1.94, newer than
+# any toolchain in the targeted series' archives, yet builds and passes its tests
+# on 1.91. The release workflow test-builds every series offline before upload,
+# so an actual incompatibility fails there, not on Launchpad.
+CARGO_FLAGS := --release --frozen --ignore-rust-version
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	mkdir -p $(CARGO_HOME)
+	printf '%s\n' \
+		'[source.crates-io]' \
+		'replace-with = "vendored-sources"' \
+		'[source.vendored-sources]' \
+		'directory = "$(CURDIR)/vendor"' \
+		> $(CARGO_HOME)/config.toml
+
+override_dh_auto_build:
+	cargo build $(CARGO_FLAGS) --verbose
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	cargo test $(CARGO_FLAGS)
+endif
+
+override_dh_auto_install:
+
+# dwz does not understand rustc's DWARF and fails the build.
+override_dh_dwz:
+
+# Cargo is not needed to build the source package, so clean without it.
+override_dh_auto_clean:
+	rm -rf target $(CARGO_HOME)
+
+# dh_clean deletes every *.orig file, but vendored crates ship Cargo.toml.orig
+# and cargo refuses to build when a file listed in .cargo-checksum.json is gone.
+override_dh_clean:
+	dh_clean -XCargo.toml.orig

@@ -41,6 +41,22 @@ before enabling the workflows:
    repository secret. Once classic confinement is granted, set the repository
    variable `SNAP_STORE_PUBLISH` to `true`. Until then the snaps are release
    assets only and the upload job is skipped.
+10. For the Launchpad PPA (optional; every PPA job is skipped until all three
+    values below are set):
+    1. Create a PPA on Launchpad, named `kinjo` unless you set `PPA_NAME`. In
+       its settings, enable the amd64 and arm64 processors. Those are the
+       architectures the release workflow test-builds.
+    2. Create a signing key with a passphrase, publish it with `gpg
+       --keyserver keyserver.ubuntu.com --send-keys <fingerprint>`, and register
+       it at `https://launchpad.net/~<user>/+editpgpkeys`.
+    3. Add the ASCII-armoured secret key (`gpg --armor --export-secret-keys
+       <fingerprint>`) as the repository secret `PPA_GPG_PRIVATE_KEY` and its
+       passphrase as `PPA_GPG_PASSPHRASE`.
+    4. Set the repository variable `PPA_USERNAME` to your Launchpad user name,
+       and `PPA_NAME` if the PPA is not called `kinjo`.
+
+    A partial configuration is skipped too, with a warning on the run summary
+    that names what is missing.
 
 Keep the legacy crates.io and tap tokens until the first production run proves
 OIDC and App authentication. They are not referenced by the new workflows and
@@ -83,6 +99,13 @@ natively on Linux x86/ARM; verifies the crate; stages the SBOM and artifacts int
 is exactly what the publisher expects. It creates no tag, release, crate, or tap
 pull request.
 
+With the PPA configured, the run also builds Debian source packages for each
+Ubuntu series in `release-ppa.yml`, crates vendored, and builds each one for
+amd64 and arm64 in a clean container of that series with networking cut off,
+the way Launchpad does. A dependency raising its minimum Rust beyond the
+series' `rustc-1.91` package, for example, fails here instead of in a Launchpad
+email. These jobs do not gate the GitHub release.
+
 The dry run and the publisher share `scripts/release/check-artifacts.sh`, so an
 artifact naming or packaging mistake fails here rather than after the `release`
 environment has been approved.
@@ -112,7 +135,11 @@ workflow then:
    `-arm64`, joins them into the multi-arch `<version>` and `latest` tags, and
    attests the image's provenance. Images are never rebuilt after approval;
 8. with `SNAP_STORE_PUBLISH` set, verifies the staged snaps against the
-   published `SHA256SUMS` and uploads them to the Snap Store's stable channel.
+   published `SHA256SUMS` and uploads them to the Snap Store's stable channel;
+9. with the PPA configured, signs the tested source packages, uploads them as
+   `<version>-1~<series>1`, and waits up to 30 minutes for Launchpad to accept
+   each one. Launchpad then builds them on its own schedule; a failed build is
+   reported only by email and on the PPA page.
 
 The workflow is globally serialized and never cancels an active publication.
 GitHub Actions retains at most one pending run for a concurrency group, so do
@@ -133,6 +160,7 @@ an asset, or bump the version solely to recover automation.
 | After GitHub publication | immutable release and crate | Rerun. Public state is verified without replacement, then Homebrew resumes. |
 | Container image push | immutable release and crate, possibly some image tags | Rerun. The rerun builds and smoke-tests its own staged images, then pushes them and recreates the tags. |
 | Snap Store upload | immutable release and crate, possibly one architecture uploaded | Rerun. An architecture whose stable channel already has the version is skipped. |
+| Launchpad PPA upload | immutable release and crate, possibly some series uploaded | Read Launchpad's rejection email, fix the cause, and rerun. A series the PPA already has is skipped. |
 | Tap branch/PR/checks | immutable upstream release plus partial tap state | Fix the tap check or matching version branch and rerun. A conflicting branch fails closed. |
 
 If crates.io contains the version with another checksum, a tag targets another
