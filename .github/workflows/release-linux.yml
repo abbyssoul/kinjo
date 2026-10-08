@@ -75,7 +75,33 @@ jobs:
           # runner's libc, which is the dependency these archives exist to drop.
           # x86_64 musl links as static-pie; aarch64 musl as plain static,
           # which file(1) reports as "statically linked".
-          file "$binary" | grep -E 'statically linked|static-pie linked'
+          file_info="$(file "$binary")"
+          if ! grep -qE 'statically linked|static-pie linked' <<<"$file_info"; then
+            echo "::error title=Release binary is not statically linked::${binary} must have no runtime libc dependency, but file(1) did not report it as static."
+            {
+              echo "Check:    the release binary must be statically linked, so the archive,"
+              echo "          Homebrew formula and snap run on any Linux distro."
+              echo "Expected: file(1) output containing 'statically linked' or 'static-pie linked'."
+              echo "Got:      ${file_info}"
+              if command -v ldd >/dev/null; then
+                echo "ldd says:"
+                ldd "$binary" 2>&1 | sed 's/^/          /' || true
+              fi
+              echo "Possible causes:"
+              echo "  - A new or updated dependency links a system library (build script"
+              echo "    using pkg-config, e.g. *-sys crates for openssl, dbus, avahi)."
+              echo "    Check: cargo tree --target ${TARGET} -i <crate>"
+              echo "  - RUSTFLAGS or .cargo/config.toml disables crt-static"
+              echo "    (-C target-feature=-crt-static)."
+              echo "  - The build used a non-musl target (TARGET=${TARGET})."
+              echo "  - file(1) changed its wording for static binaries. If ldd above shows"
+              echo "    'not a dynamic executable' / 'statically linked', the binary is fine"
+              echo "    and this check's pattern needs updating."
+              echo "Next step: find the newly linked library (ldd output above), then switch"
+              echo "that dependency to a pure-Rust or vendored/static feature, or drop it."
+            } >&2
+            exit 1
+          fi
 
           name="kinjo-${VERSION}-${TARGET}"
           mkdir -p "$name/commands"
