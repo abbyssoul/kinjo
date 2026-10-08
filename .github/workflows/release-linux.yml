@@ -73,7 +73,9 @@ jobs:
           file "$binary" | grep -F "${{ matrix.file-arch }}"
           # A dynamically linked binary would tie the archive to the build
           # runner's libc, which is the dependency these archives exist to drop.
-          file "$binary" | grep -E 'static(-pie)? linked'
+          # x86_64 musl links as static-pie; aarch64 musl as plain static,
+          # which file(1) reports as "statically linked".
+          file "$binary" | grep -E 'statically linked|static-pie linked'
 
           name="kinjo-${VERSION}-${TARGET}"
           mkdir -p "$name/commands"
