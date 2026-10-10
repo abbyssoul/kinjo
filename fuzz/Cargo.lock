@@ -99,9 +99,9 @@ dependencies = [
 
 [[package]]
 name = "arbitrary"
-version = "1.4.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 dependencies = [
  "derive_arbitrary",
 ]
@@ -593,13 +593,13 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "derive_arbitrary"
-version = "1.4.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
+checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "kinjo"
-version = "0.3.8"
+version = "0.3.12"
 dependencies = [
  "clap",
  "color-eyre",
@@ -1193,9 +1193,9 @@ dependencies = [
 
 [[package]]
 name = "mdns-sd-discovery"
-version = "0.3.0"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebafd035235802ec561b1cfa4e1a12b4999aa7ec87806960dafdec9a14a9208c"
+checksum = "96bf68ffa4f0699e06acd8e590da4cd78b86ef29a3990b20b6bc74eb1352358d"
 dependencies = [
  "futures-util",
  "libc",
