@@ -12,6 +12,7 @@ set -euo pipefail
 # state, is skipped. Launchpad would reject a second upload of it anyway.
 #
 # Set PPA_DRY_RUN=1 to sign and simulate the upload without sending anything.
+# PPA_UPLOAD_GAP sets the pause between series uploads (seconds, default 60).
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=scripts/release/lib.sh
@@ -100,15 +101,23 @@ chmod 0700 "$GNUPGHOME/gpg-sign"
 dput_flags=()
 [[ "$dry_run" == 1 ]] && dput_flags+=(--simulate)
 
-# Launchpad's FTP server occasionally answers "550 internal server error" for
-# one upload and accepts the next. An interrupted upload has no .changes file,
-# so Launchpad discards it and a fresh attempt starts clean.
+# Launchpad's FTP server answers "550 internal server error" to an upload that
+# starts seconds after the previous one finished: in the 0.3.13 release the
+# second series failed this way in two runs out of two, while the first always
+# went through. So wait between series, and retry in case the gap was not
+# enough. An interrupted upload has no .changes file, so Launchpad discards it
+# and a fresh attempt starts clean.
+upload_gap="${PPA_UPLOAD_GAP:-60}"
 upload_delays=(30 90)
 
 uploaded=()
 for changes in "${pending[@]}"; do
     pkg_version="$(sed -n 's/^Version: //p' "$changes")"
     debsign --no-conf -p"$GNUPGHOME/gpg-sign" -k"$fingerprint" "$changes"
+    if ((${#uploaded[@]})) && [[ "$dry_run" != 1 ]]; then
+        echo "Waiting ${upload_gap}s before the next upload to Launchpad"
+        sleep "$upload_gap"
+    fi
     attempt=1
     flags=("${dput_flags[@]}")
     until dput "${flags[@]}" "ppa:$ppa" "$changes"; do
@@ -116,7 +125,8 @@ for changes in "${pending[@]}"; do
             echo "::error title=dput failed for kinjo ${pkg_version}::Gave up after ${attempt} attempts."
             {
                 echo "Series uploaded so far: ${uploaded[*]:-none}."
-                echo "Next step: rerun the job; Launchpad FTP errors are usually transient."
+                echo "Next step: rerun the job, or set PPA_UPLOAD_GAP above ${upload_gap}s if"
+                echo "every series after the first keeps failing."
                 echo "Series already in the PPA are skipped on rerun."
             } >&2
             exit 1
