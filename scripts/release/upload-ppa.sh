@@ -100,11 +100,34 @@ chmod 0700 "$GNUPGHOME/gpg-sign"
 dput_flags=()
 [[ "$dry_run" == 1 ]] && dput_flags+=(--simulate)
 
+# Launchpad's FTP server occasionally answers "550 internal server error" for
+# one upload and accepts the next. An interrupted upload has no .changes file,
+# so Launchpad discards it and a fresh attempt starts clean.
+upload_delays=(30 90)
+
 uploaded=()
 for changes in "${pending[@]}"; do
+    pkg_version="$(sed -n 's/^Version: //p' "$changes")"
     debsign --no-conf -p"$GNUPGHOME/gpg-sign" -k"$fingerprint" "$changes"
-    dput "${dput_flags[@]}" "ppa:$ppa" "$changes"
-    uploaded+=("$(sed -n 's/^Version: //p' "$changes")")
+    attempt=1
+    flags=("${dput_flags[@]}")
+    until dput "${flags[@]}" "ppa:$ppa" "$changes"; do
+        if ((attempt > ${#upload_delays[@]})); then
+            echo "::error title=dput failed for kinjo ${pkg_version}::Gave up after ${attempt} attempts."
+            {
+                echo "Series uploaded so far: ${uploaded[*]:-none}."
+                echo "Next step: rerun the job; Launchpad FTP errors are usually transient."
+                echo "Series already in the PPA are skipped on rerun."
+            } >&2
+            exit 1
+        fi
+        delay="${upload_delays[attempt - 1]}"
+        echo "::warning title=dput failed for kinjo ${pkg_version}::Attempt ${attempt} failed; retrying in ${delay}s with --debug."
+        sleep "$delay"
+        attempt=$((attempt + 1))
+        flags=("${dput_flags[@]}" --debug)
+    done
+    uploaded+=("$pkg_version")
 done
 
 if [[ "$dry_run" == 1 ]]; then
