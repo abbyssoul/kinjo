@@ -265,7 +265,7 @@ jobs:
           persist-credentials: false
 
       - name: Download every staged artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: release-*-${{ needs.preflight.outputs.version }}
           path: dist
@@ -315,7 +315,7 @@ jobs:
           persist-credentials: false
 
       - name: Download every staged artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: release-*-${{ needs.preflight.outputs.version }}
           path: dist
@@ -562,7 +562,7 @@ jobs:
       VERSION: ${{ needs.preflight.outputs.version }}
     steps:
       - name: Download the staged images
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: image-*-${{ needs.preflight.outputs.version }}
           path: images
@@ -625,7 +625,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Download the staged snaps
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: release-linux-*-${{ needs.preflight.outputs.version }}
           path: dist
@@ -680,7 +680,7 @@ jobs:
           persist-credentials: false
 
       - name: Download the tested source packages
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ppa-source-${{ needs.preflight.outputs.version }}
           path: ppa
