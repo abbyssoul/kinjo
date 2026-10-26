@@ -1,205 +1,126 @@
-
 # Kinjo
 
 <div align="center">
 
 **Browse local DNS-SD services, filter them, and run custom actions from a terminal UI.**
 
-![GitHub Release](https://img.shields.io/github/v/release/abbyssoul/kinjo?display_name=tag&color=%23a6a)
+[![GitHub Release](https://img.shields.io/github/v/release/abbyssoul/kinjo?display_name=tag&color=%23a6a)](https://github.com/abbyssoul/kinjo/releases/latest)
 [![Crates.io](https://img.shields.io/crates/v/kinjo.svg)](https://crates.io/crates/kinjo)
 [![docs.rs](https://img.shields.io/docsrs/kinjo)](https://docs.rs/kinjo)
 [![GitHub branch check runs](https://img.shields.io/github/check-runs/abbyssoul/kinjo/main)](https://github.com/abbyssoul/kinjo/actions/workflows/ci-test.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=abbyssoul_kinjo&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=abbyssoul_kinjo)
 [![License: MIT](https://img.shields.io/github/license/abbyssoul/kinjo)](LICENSE)
 
-<img width="1430" height="609" alt="kinjo-screenshot" src="https://github.com/user-attachments/assets/319acde6-a3d0-4cb1-aefc-12088bc67328" />
-
-
 </div>
 
-Kinjo turns the services already advertised on your local network into a useful,
-keyboard-driven launcher. Find an SSH server, a device's web interface, a
-development service, or a printer without memorizing hostnames and ports.
+<img width="1430" height="609" alt="kinjo-screenshot" src="https://github.com/user-attachments/assets/319acde6-a3d0-4cb1-aefc-12088bc67328" />
+
+## Why Kinjo?
+
+Your network already advertises SSH servers, printers, device web interfaces,
+and development services over mDNS/DNS-SD. Finding those services and turning
+their hostnames and ports into a useful command can still take several steps.
+
+Kinjo brings discovery and actions together in a terminal: find a service,
+narrow the list, and open a connection or web interface without memorizing
+addresses or leaving your keyboard.
 
 - Browse services by name, host, type, or matching command.
 - Narrow a busy network with fuzzy search and service-type filters.
 - Launch configurable actions such as SSH or opening a web interface.
-- Discover over standard mDNS/DNS-SD—no external discovery CLI required.
-- Keep everything local: there is no telemetry, account, or cloud service.
+- Discover through your operating system's DNS-SD stack.
+- Keep everything local: no telemetry, account, or cloud service.
 
-Kinjo supports **macOS, Linux, and Windows**. The default discovery backend works
-out of the box; Avahi is only needed if you deliberately build and select the
-optional `zeroconf` backend.
+Kinjo supports **macOS, Linux, and Windows**.
+
+[Installation](#installation) · [Getting started](#getting-started) ·
+[Configuration](#configuration) · [Documentation](#documentation) ·
+[Contributing](#contributing)
 
 ## Installation
 
-Choose the most convenient option for your platform:
+For most users, choose **Homebrew on macOS or Linux**, or the **PPA on Ubuntu**.
+Both install Kinjo and its default action commands without a Rust toolchain.
 
-| Platform | Recommended installation |
+| Platform | Installation |
 |---|---|
-| macOS | [Homebrew](#homebrew-macos-and-linux) |
-| Debian / Ubuntu | [`.deb` package](#debian--ubuntu), [Snap](#snap-linux) or [Homebrew](#homebrew-macos-and-linux) |
-| Other Linux | [Homebrew](#homebrew-macos-and-linux), [Nix](#nix--nixos) or [Docker](#docker-linux) |
-| Windows | [Cargo](#cargo-advanced) or [build from source](#build-from-source) |
+| macOS | [Homebrew](#homebrew-macos-and-linux) or [release archive](docs/installation.md#download-a-release-macos-and-linux) |
+| Ubuntu | [PPA](#ubuntu-ppa) or [`.deb` package](docs/installation.md#debian--ubuntu) |
+| Debian | [`.deb` package](docs/installation.md#debian--ubuntu) |
+| Other Linux | [Homebrew](#homebrew-macos-and-linux) or [release archive](docs/installation.md#download-a-release-macos-and-linux) |
+| Windows | [Cargo](docs/installation.md#cargo-advanced) or [build from source](docs/installation.md#build-from-source) |
 
 ### Homebrew (macOS and Linux)
 
-Install Kinjo directly from the
-[`abbyssoul/abyss`](https://github.com/abbyssoul/homebrew-abyss) tap:
+With [Homebrew](https://brew.sh/) installed, run:
 
 ```sh
 brew install abbyssoul/abyss/kinjo
 ```
 
-That single command adds the tap, installs Kinjo, and includes the default
-commands. It installs a prebuilt release binary on macOS (Apple silicon and
-Intel) and Linux (x86_64 and ARM64), so no Rust toolchain is needed. Future
-releases are available through the usual `brew upgrade`.
+This adds the [`abbyssoul/abyss`](https://github.com/abbyssoul/homebrew-abyss)
+tap automatically and installs a prebuilt binary for Apple silicon or Intel
+macOS, or x86_64 or ARM64 Linux. To update later, run `brew update` followed by
+`brew upgrade kinjo`.
 
-### Debian / Ubuntu
+### Ubuntu (PPA)
 
-Download the `.deb` for your architecture (`amd64` or `arm64`) from the
-[latest GitHub release](https://github.com/abbyssoul/kinjo/releases/latest),
-then install it with `apt`:
-
-```sh
-sudo apt install ./kinjo_*.deb
-```
-
-The package includes the `kinjo` binary and default commands. The default
-discovery backend does not require `avahi-daemon` or development headers.
-
-### Snap (Linux)
-
-Each release attaches a snap for `amd64` and `arm64`. Download the one for your
-architecture from the
-[latest GitHub release](https://github.com/abbyssoul/kinjo/releases/latest)
-and install it:
+Add the [Kinjo PPA](https://launchpad.net/~abbyssoul/+archive/ubuntu/ppa), then
+install the package:
 
 ```sh
-sudo snap install --dangerous --classic ./kinjo_*.snap
+sudo add-apt-repository ppa:abbyssoul/ppa
+sudo apt update
+sudo apt install kinjo
 ```
 
-Once Kinjo is in the Snap Store, `sudo snap install kinjo --classic` installs it
-from there and keeps it updated. `--dangerous` is needed only for a downloaded
-file, which the Store has not signed.
+If `add-apt-repository` is unavailable, install it first with
+`sudo apt install software-properties-common`. Future Kinjo releases arrive
+through your normal APT updates. For other Debian-based distributions, use the
+[downloadable `.deb` package](docs/installation.md#debian--ubuntu).
 
-The snap uses classic confinement because Kinjo runs the commands you
-configure, such as `ssh` or a browser, and a confined snap could run only
-programs it ships. It shares `~/.config/kinjo` with other installations and
-includes the default commands. Like the `.deb`, it browses through the host's
-`avahi-daemon`.
+For release downloads, source builds, Snap, Nix / NixOS, or Docker, see the
+[full installation guide](docs/installation.md).
 
-### Nix / NixOS
+## Getting started
 
-Run Kinjo without installing it:
+### Linux setup
+
+**On Linux, discovery requires a running Avahi daemon and system D-Bus**, whichever
+installation method you choose. On Ubuntu or Debian, install and start Avahi:
 
 ```sh
-nix run github:abbyssoul/kinjo
+sudo apt install avahi-daemon
+sudo systemctl enable --now avahi-daemon
 ```
 
-The flake provides packages for `x86_64-linux` and `aarch64-linux`. To install
-Kinjo declaratively, add the flake as an input and use its overlay:
+On other Linux distributions, install `avahi` using your system package manager
+and enable its service (see also [NixOS](docs/installation.md#nix--nixos) and
+[Docker](docs/installation.md#docker-linux)).
+macOS and Windows use their built-in DNS-SD services.
 
-```nix
-# flake inputs:
-kinjo.url = "github:abbyssoul/kinjo";
+### Start browsing
 
-# in your NixOS module:
-nixpkgs.overlays = [ inputs.kinjo.overlays.default ];
-environment.systemPackages = [ pkgs.kinjo ];
-```
-
-The Nix build uses the default `mdns-sd` backend, so there is no daemon to
-enable on NixOS.
-
-### Docker (Linux)
-
-A multi-arch image (`linux/amd64`, `linux/arm64`) is published with each
-release. It contains both discovery backends and the default commands.
-
-```sh
-docker run --rm -it \
-  --network host \
-  -v /run/dbus/system_bus_socket:/run/dbus/system_bus_socket \
-  -v /run/avahi-daemon/socket:/run/avahi-daemon/socket \
-  ghcr.io/abbyssoul/kinjo
-```
-
-The container does not browse the network itself: on Linux both backends ask
-the host's `avahi-daemon` over the system D-Bus, so the host must run
-`avahi-daemon`. Each argument does a separate job:
-
-- `-it` gives the TUI a terminal.
-- `/run/dbus/system_bus_socket` is required: discovery fails to start without
-  it.
-- `/run/avahi-daemon/socket` lets commands resolve the `.local` host names in
-  `{hostname}`, such as the default `ssh` command. Without it discovery still
-  works, but those names do not resolve.
-- `--network host` lets commands reach what was discovered, including
-  link-local IPv6 addresses that a bridged container cannot route to. Discovery
-  alone does not need it.
-
-With rootless Podman, also pass `--userns=keep-id --user "$(id -u):$(id -g)"`.
-Otherwise the container user is mapped to a subordinate UID that does not match
-the UID it presents to D-Bus, and the bus rejects the connection.
-
-Add your own commands by mounting them over the defaults, for example
-`-v ~/.config/kinjo/commands:/etc/kinjo/commands:ro`. Commands run inside the
-container, so the `xdg-open` defaults cannot open a browser on the host.
-
-### Cargo (advanced)
-
-If you already have the [Rust toolchain](https://rustup.rs/), install Kinjo
-from crates.io:
-
-```sh
-cargo install kinjo
-```
-
-This works on macOS, Linux, and Windows and compiles Kinjo locally. Windows is
-tested in CI but does not currently have a package-manager installation, so
-Cargo is the simplest Windows option.
-
-Optional discovery backends are selected at compile time. For example, the
-Avahi-backed `zeroconf` backend on Linux requires the Avahi client development
-headers:
-
-```sh
-cargo install kinjo --features zeroconf
-```
-
-### Build from source
-
-Clone the repository and build a release binary:
-
-```sh
-git clone https://github.com/abbyssoul/kinjo.git
-cd kinjo
-cargo build --release --locked
-```
-
-The binary will be at `target/release/kinjo` (`target\release\kinjo.exe` on
-Windows). To install it into Cargo's bin directory instead:
-
-```sh
-cargo install --path .
-```
-
-Contributors can find the full development setup and verification commands in
-[CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Try it
-
-Start Kinjo with no configuration to browse the default `local` domain:
+Start Kinjo in your terminal:
 
 ```sh
 kinjo
 ```
 
-Use the arrow keys or `j`/`k` to move, `/` to search, `tab` to switch views,
-`enter` to run a matching action, and `?` to see all shortcuts. Press `q` to
-quit.
+Kinjo browses the default `local` domain immediately; no configuration is needed
+to discover services. Homebrew, PPA, and release packages also include default
+actions such as SSH and opening a web interface. Those actions need the programs
+they launch, such as `ssh` or a browser, installed on your machine.
+
+- Move with the arrow keys or `j` / `k`.
+- Press `/` to search, or `tab` to switch views.
+- Press `enter` to choose or run an action for the selected service.
+- Press `?` for all shortcuts, or `q` to quit.
+
+If the list is empty, make sure a device on the same local network advertises
+services over mDNS/DNS-SD. Check the status line for discovery errors; on Linux,
+check that Avahi is running. Press `r` to restart discovery after fixing an error.
+On macOS, allow Local Network access for your terminal app if prompted.
 
 Browse another DNS-SD domain with `--domain` (`-d`):
 
@@ -207,354 +128,19 @@ Browse another DNS-SD domain with `--domain` (`-d`):
 kinjo --domain example.local
 ```
 
-From a source checkout, you can explore a deterministic set of sample services
-even when there is nothing advertising on your network:
-
-```sh
-cargo run --features fake -- --backend fake --config-dir actions
-```
-
-## Discovery backends
-
-The app discovers services over mDNS/DNS-SD so no external CLI tools are
-required. Backends are selected exclusively with `--backend`:
-
-- `mdns-sd` (default): the `mdns-sd-discovery` crate. A single browser
-  enumerates every service type on the link via the native DNS-SD meta-query.
-  It accepts a custom `--domain`.
-- `zeroconf`: the `zeroconf-tokio` crate, which talks to the system Avahi daemon
-  on Linux. It browses one service type at a time, so a curated set of common
-  types is swept in parallel when no `--service-type` is given. This backend is
-  behind the off-by-default `zeroconf` cargo feature (it needs the Avahi client
-  headers to build, e.g. `libavahi-client-dev` on Debian/Ubuntu).
-- `fake`: a finite built-in sample stream for development and deterministic UI
-  smoke tests. It is behind the off-by-default `fake` Cargo feature so release
-  binaries do not ship actionable sample endpoints unless explicitly requested.
-
-```sh
-cargo install kinjo --features zeroconf
-kinjo --backend zeroconf
-```
-
-Install or build with sample discovery explicitly:
-
-```sh
-cargo install kinjo --features fake
-kinjo --backend fake
-```
-
-Selecting an optional backend in a binary built without it fails with an error
-that names the Cargo feature to enable.
-
-`--fake-discovery` has been removed; replace it with `--backend fake`. See the
-[release notes](docs/release-notes.md) for the migration decision.
-
-**The `zeroconf` backend browses only the default `local` domain.** Its browser
-exposes no way to select a domain, so rather than accept `--domain` and quietly
-browse `local` anyway, it refuses the combination up front:
-
-```console
-$ kinjo --backend zeroconf --domain corp
-error: invalid value for `--domain`: the `zeroconf` backend cannot browse the
-`corp` domain: it can only browse the default `local` domain. Browse `local`, or
-select the `mdns-sd` backend, which supports custom domains
-```
-
-Use the default `mdns-sd` backend to browse a custom domain. Empty, `local`, and
-`local.` all name the default domain.
-
-### Limiting discovery to one service type
-
-When a `--service-type` is given, only that type is browsed:
-
-```sh
-kinjo --service-type _ssh._tcp
-```
-
-The value must be a DNS-SD service type — `_<name>._tcp` or `_<name>._udp`,
-where `<name>` is 1–15 ASCII letters, digits, and internal hyphens, begins and
-ends alphanumeric, and contains at least one letter. Service types are
-case-insensitive, so `_SSH._TCP` and `_ssh._tcp` are the same browse.
-
-A value that is not a service type is rejected before discovery starts, rather
-than being ignored in favour of browsing everything — a filter is there to
-narrow what the program observes, so a typo must never widen it:
-
-```console
-$ kinjo --service-type bogus
-error: invalid value for `--service-type`: `bogus` is not a DNS-SD service type:
-a service type begins with `_`. Use a type such as `_ssh._tcp` or `_dns-sd._udp`,
-or omit it to browse every service type
-```
-
-Omit `--service-type` to browse every supported type.
-
-Discovery never falls back to sample records. If mDNS discovery is unavailable,
-the list stays empty and the status line explains why. If a running browse stops
-unexpectedly, `kinjo` says so and clears the list rather than leaving stale
-entries on screen: mDNS is edge-triggered, so once the browse is gone nothing can
-report that a listed service has since disappeared, and a command launched at one
-could be pointed at a host that is no longer there. Either way the failure and its
-cause stay on screen rather than scrolling past — discovery is not retried
-automatically. Refresh (`r`) restarts it, and is the recovery action from a
-failure.
-
-Select `--backend fake` in a build with the `fake` feature for sample records on
-demand. Those samples are a short, finite stream; when it ends the status line
-reports normal completion and the samples remain listed.
-
-The sample set is chosen to exercise the behavior the real app has: a service
-reachable at several addresses, a service with no resolved host yet, and SSH on
-two different hosts — so the `_ssh._tcp` service-type row aggregates children
-whose commands differ and asks which host to act on.
-
-## Privacy
-
-`kinjo` browses your local network, so it's worth being explicit about what it
-does and does not do with that access:
-
-- **No telemetry.** `kinjo` does not phone home, collect analytics, or send
-  usage data anywhere. There is no update checker and no crash reporter.
-- **No proactive scanning.** `kinjo` never port-scans or probes hosts on its
-  own initiative. All discovery is delegated to a pluggable backend behind a
-  discovery session (see [Architecture](#architecture)), and every backend
-  speaks only the standard mDNS/DNS-SD protocol — it surfaces services that
-  are already being announced on the link, nothing more.
-- **Discovered data stays local.** Services found on the network are shown in
-  the terminal and used only to fill in the commands you configure. Nothing is
-  uploaded or shared with anyone but you.
-
-The two network discovery backends differ in how they reach the network:
-
-- `mdns-sd` (default) implements mDNS/DNS-SD itself: it sends standard
-  multicast queries on the local link and listens for responses. It makes no
-  other network calls and talks to nothing off-link.
-- `zeroconf` (opt-in, behind the `zeroconf` cargo feature) delegates all
-  network I/O to the system `avahi-daemon` over D-Bus. `kinjo` itself opens no
-  sockets in this mode — it only reads the records the daemon already
-  maintains.
-
-Either way, the traffic involved is the same kind of local multicast query
-your OS already performs for Bonjour/AirPlay/network-printer discovery — not
-a general network scan.
-
-## How It Works
-
-`kinjo` has five moving parts:
-
-1. Discovery finds DNS-SD service records on the network. Each record can carry
-   fields such as service name, service type, domain, hostname, address, port,
-   and TXT values.
-2. Filtering and view tabs organize those records in the UI. You can fuzzy-search
-   the visible services, limit by service type, and switch the top-panel tab to
-   view discovery by service, host, service type, or matching command.
-3. Actions decide what can be done with a selected service. Action command files
-   define match predicates such as "service type equals `_ssh._tcp`" or "TXT
-   field contains a URL".
-4. Command templates turn service fields into executable commands. For example,
-   `ssh {hostname}` uses the selected service hostname, while
-   `xdg-open http://{hostname}:{port}` builds a URL from the selected instance.
-5. Keybindings control the TUI. The defaults use Vim-style navigation, and every
-   built-in UI command can be rebound in `keybindings.toml`.
-
-The result is a small local service browser that behaves like a configurable
-launcher: discover services, narrow the list, choose a matching action, and run
-the command built from that service's fields.
-
-### Architecture
-
-Internally those moving parts live in three deliberately decoupled modules, so
-the project is easy to extend and hack on. Each is designed to be swapped or
-reused independently:
-
-1. **Discovery** (`src/discovery/`) — the producer of *entries*. An entry is a
-   discovered record described entirely by its attributes (name, type, host,
-   address, port, TXT, …); `Entry` is the only contract the rest of the program
-   depends on. Starting discovery hands back a `DiscoverySession`: one value
-   owning the running adapter, its events, its state, and its shutdown, so the
-   caller cannot hold a receiver whose producer has silently died, and dropping
-   it stops the browse. Adapters vary behind that session — the mDNS/Avahi
-   backend is the default, with a feature-gated built-in sample backend selected
-   by `--backend fake` — so a different DNS-SD source, a static file, or an
-   SSDP/UPnP browser slots in beside them without disturbing anything above
-   (see [Extending it](#extending-it) for where that seam is). Discovery options are
-   checked once at that seam: a `DiscoveryConfig` is a request, and validating
-   it yields the `DiscoveryOptions` that starting an adapter requires. A
-   malformed service type, or a domain the selected backend cannot honour, is
-   therefore refused before anything spawns — no adapter can be reached with a
-   value it would have to quietly reinterpret.
-2. **Plumber** (`src/plumber/`) — the rules engine. A serializable collection of
-   command rules (the TOML command files) is matched against entries by their
-   attributes; multiple rules can match one entry, and a matching rule can be
-   executed. It depends only on `Entry`, never on the UI, and sits behind the
-   `RuleEngine` trait so an alternative matching strategy can be substituted.
-3. **UI** (`src/ui/`) — ties discovery and the rules engine together for a person
-   at the terminal: CLI parsing, config and keymap loading, the application
-   state machine, and rendering. It depends on the other two; they do not depend
-   on it. `App` is the event loop and the state it decides from; its interface is
-   six operations — build it, attach a discovery factory and a config loader,
-   hand out its reload trigger, run it, and take any reload diagnostics that
-   outlived the terminal. Its state is not public. Rendering is a pure function
-   of it (`&App` in, a frame out), and the app/render boundary is field
-   visibility rather than a projected view — see
-   [ADR 0002](docs/adr/0002-render-reads-the-app-directly.md).
-
-The dependency flow is one-directional — `discovery ← plumber ← ui` — wired
-together by `run` in `src/lib.rs`, which the `kinjo` binary is a thin wrapper
-around.
-
-### Extending it
-
-The two layers are extensible in deliberately different ways, and the difference
-is the interesting part:
-
-- **A rule engine is substitutable from outside.** `RuleEngine` is public, and
-  `App::new` accepts any implementor, so a crate depending on `kinjo` can bring
-  its own matching strategy. `Matcher` is the engine kinjo ships, not the only
-  one the interface admits. Doing so means writing your own composition root:
-  `run` loads a `Matcher` and uses it concretely, so it is not generic over the
-  engine — do what `run` does, with your engine in its place. See
-  [ADR 0001](docs/adr/0001-rule-engine-is-a-supported-extension-point.md).
-- **A discovery backend is not.** Adapters vary *inside* `src/discovery/`, at
-  the browse loop, behind one concrete `DiscoverySession` and a closed
-  `DiscoveryBackend` enum. They differ in how they browse but not in how a
-  caller runs and stops them, so there is no trait to implement: a new source —
-  a static file, an SSDP/UPnP browser — is a module and an enum variant in this
-  crate, not something a dependent adds from outside.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
-
-## UI
-
-Default keys follow Vim-style conventions:
-
-- `j` / `down`: move down
-- `k` / `up`: move up
-- `enter`: show or run matching actions
-- `/`: fuzzy text filter
-- `t`: service type checklist filter
-- `tab` / `shift+tab` (or `←` / `→`): switch view tab
-- `s`: narrow the list to the selected row's host (press again to clear)
-- `d` / `u` (or `page down` / `page up`): scroll the details pane
-- `r` / `F5`: refresh — restart service discovery from scratch
-- `?`: help
-- `q`: quit
-
-The top panel exposes four tabs — services, hosts, types, and commands. Each tab
-swaps the list and details panes to view discovery from that angle: individual
-services, hosts and the services they offer, discovered service types, or
-configured commands and the services they match. The list also supports fuzzy
-text search and service type filtering.
-
-Each tab shows how many rows it lists: logical services, hosts (plus one row for
-the registrations that have not resolved a host yet), distinct service types, or
-configured commands. The aggregate tabs report only what is true of a whole row.
-A host's details name the host and list every service on it — each with its own
-type, port, and TXT data — rather than presenting one service's fields as the
-host's. A service type's details likewise list every host offering it. Actions
-always run against a concrete discovered service, whichever tab they start from.
-
-The indicator at the top left says what discovery is doing, and it only animates
-while something is actually happening:
-
-| Indicator | Meaning |
-|---|---|
-| `⠋` (spinning) | Browsing. The list may still change. |
-| `✓` | A sample stream finished normally. Its records stay valid; nothing more will arrive. |
-| `✗` | Discovery failed or stopped. Its records are no longer being confirmed. |
-
-A still indicator therefore means the list is final until you refresh (`r`),
-which starts a new browse and returns the indicator to spinning. The empty-list
-message says the same thing in words, so the two can never disagree. Neither
-ending retries by itself.
-
-The type filter (`t`) lists the service types currently being advertised, and
-its `types n/m` chip counts only those: `m` is how many types are on the link
-right now, and `n` is how many of them you are showing. Switching a type off is
-remembered rather than observed, so a device that drops off the link and comes
-back stays switched off — but a type nobody is advertising is counted on neither
-side of the chip.
-
-The details pane keeps your scroll position while you stay on the same row,
-including as discovery re-reports it. Moving to a different row starts its
-details from the top, and a row that shortens or a terminal that grows pulls the
-view back to the end of the content rather than past it.
-
-The `s` (same-host) filter needs a row with a single host, so it is offered in
-the services and hosts tabs. The types and commands tabs report it unavailable
-instead of guessing a host; an active filter can be cleared from any tab.
-
-Keybindings are fully customizable: all built-in UI commands can be rebound with
-a keybindings config file. See [docs/keybindings.md](docs/keybindings.md) for
-the full keybinding reference and examples.
+See the [usage reference](docs/usage.md) for all shortcuts, filters, views, and
+discovery options.
 
 ## Configuration
 
-Command files follow the XDG Base Directory Specification. User command files are
-loaded from:
+Homebrew, PPA, and release packages include default actions, so you can start
+using Kinjo before writing any configuration. To add or customize an action,
+save a TOML file under `~/.config/kinjo/commands/` (or
+`$XDG_CONFIG_HOME/kinjo/commands/` if set). A user action with the same
+`metadata.name` overrides the bundled one.
 
-```sh
-$XDG_CONFIG_HOME/kinjo/commands/*.toml
-```
-
-If `XDG_CONFIG_HOME` is not set, the fallback path is:
-
-```sh
-~/.config/kinjo/commands/*.toml
-```
-
-Additional command directories can be provided with:
-
-```sh
-kinjo --config-dir ./commands
-```
-
-Validate and list the registered commands with:
-
-```sh
-kinjo list-commands
-```
-
-To validate and list only the commands from a specific directory:
-
-```sh
-kinjo list-commands --config-dir ./commands
-```
-
-`--config-dir` may be written on either side of `list-commands`, and repeated on
-both; the two lines below are equivalent. Directories always overlay in the
-order they appear on the command line, whichever side they were written on.
-
-```sh
-kinjo --config-dir ./commands list-commands
-kinjo list-commands --config-dir ./commands
-```
-
-A running instance reloads its command files on `SIGHUP` (the conventional
-reload signal), so edits apply without restarting the TUI:
-
-```sh
-pkill -HUP kinjo
-```
-
-The reload is transactional: it applies only if every configured command file is
-valid. If one is not, the commands already loaded stay in force and the reason is
-reported, rather than a half-saved edit taking away a command you were using. See
-[docs/actions.md](docs/actions.md#reloading-while-it-runs).
-
-Keybindings can be overridden at:
-
-```sh
-$XDG_CONFIG_HOME/kinjo/keybindings.toml
-```
-
-See [docs/keybindings.md](docs/keybindings.md) for examples and the complete
-list of bindable commands.
-
-## Command Files
-
-Each command file defines one action and structured match predicates. Example SSH
-opener:
+For example, save this as `~/.config/kinjo/commands/ssh.toml` to connect to SSH
+services:
 
 ```toml
 [metadata]
@@ -571,42 +157,76 @@ command = "ssh -- {hostname}"
 mode = "execute"
 ```
 
-Supported action modes:
+Validate your commands before starting Kinjo:
 
-- `fork`: spawn the command and return to the TUI.
-- `execute`: restore the terminal and replace the TUI process with the command.
+```sh
+kinjo list-commands
+```
 
-Supported match predicates:
+To load an additional directory, run `kinjo --config-dir ./commands`. Restart
+Kinjo after editing actions, or reload a running instance with `pkill -HUP kinjo`
+on Unix systems. An invalid reload leaves the current actions in place.
 
-- `equals`
-- `contains`
-- `regex`
+See the [custom commands guide](docs/actions.md) for matching rules, templates,
+action modes, directory precedence, and reloading. To change shortcuts, create
+`~/.config/kinjo/keybindings.toml` (or `$XDG_CONFIG_HOME/kinjo/keybindings.toml`)
+and follow the [keybindings guide](docs/keybindings.md).
 
-Supported service fields:
+## Documentation
 
-- `name`
-- `service_type` or `type`
-- `domain`
-- `hostname`
-- `address`
-- `port`
-- `txt.<key>`
-
-The same fields can be used in action command interpolation, for example
-`{hostname}`, `{address}`, and `{port}`.
-
-Multiple configured actions can match the same service. In that case, the TUI
-shows an action picker. If an action needs instance-specific fields such as
-`address` or `port` and the selected row contains multiple instances, the TUI
-asks which exact instance to use.
-
-For the full command file format, examples, and overlay rules, see
-[docs/actions.md](docs/actions.md).
+| What you want to do | Guide |
+|---|---|
+| Install from a release archive, Cargo, source, Snap, Nix, or Docker | [Installation options](docs/installation.md) |
+| Explore views, shortcuts, filtering, and discovery backends | [Usage reference](docs/usage.md) |
+| Add an action or change how services are matched | [Custom commands](docs/actions.md) |
+| Customize keyboard shortcuts | [Keybindings](docs/keybindings.md) |
+| Understand the code and extension points | [Architecture](docs/architecture.md) |
+| Check changes between releases | [Release notes](docs/release-notes.md) |
 
 ## Contributing
 
-Bug reports, feature ideas, documentation fixes, and pull requests are welcome.
-If you are not sure where to start, open an
-[issue](https://github.com/abbyssoul/kinjo/issues) or see
-[CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and local
-verification commands.
+Questions, bug reports, feature ideas, documentation fixes, and pull requests
+are welcome. Use [GitHub Issues](https://github.com/abbyssoul/kinjo/issues) to
+ask for help or suggest an improvement. For a discovery problem, include your
+operating system, Kinjo version (`kinjo --version`), and the status-line error.
+
+You can contribute by improving instructions, sharing useful action examples,
+reporting a reproducible bug, or working on the code. Start with
+[CONTRIBUTING.md](CONTRIBUTING.md) for development setup, sample services, and
+local verification commands.
+
+Kinjo is maintained by [Ivan Ryabov (@abbyssoul)](https://github.com/abbyssoul).
+
+## Privacy
+
+`kinjo` browses your local network, so it's worth being explicit about what it
+does and does not do with that access:
+
+- **No telemetry.** `kinjo` does not phone home, collect analytics, or send
+  usage data anywhere. There is no update checker and no crash reporter.
+- **No proactive scanning.** `kinjo` never port-scans or probes hosts on its
+  own initiative. All discovery is delegated to a pluggable backend behind a
+  discovery session (see [Architecture](docs/architecture.md#architecture)), and
+  every backend speaks only the standard mDNS/DNS-SD protocol — it surfaces services that
+  are already being announced on the link, nothing more.
+- **Discovered data stays local.** Services found on the network are shown in
+  the terminal and used only to fill in the commands you configure. Nothing is
+  uploaded or shared with anyone but you.
+
+The two network discovery backends differ in how they reach the network:
+
+- `mdns-sd` (default) delegates discovery to the operating system: Avahi over
+  system D-Bus on Linux, or the native DNS-SD APIs on macOS and Windows. The
+  system stack handles mDNS queries and responses.
+- `zeroconf` (opt-in, behind the `zeroconf` cargo feature) delegates all
+  network I/O to the system `avahi-daemon` over D-Bus. `kinjo` itself opens no
+  sockets in this mode — it only reads the records the daemon already
+  maintains.
+
+Either way, the traffic involved is the same kind of local multicast query
+your OS already performs for Bonjour/AirPlay/network-printer discovery — not
+a general network scan.
+
+## License
+
+Kinjo is available under the [MIT License](LICENSE).
