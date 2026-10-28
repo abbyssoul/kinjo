@@ -7,7 +7,7 @@
 # with an empty, throwaway config home that holds only the bundled commands, so
 # the recording machine's own keybindings and command rules cannot leak in.
 #
-# Usage: scripts/record-demo.sh   # writes docs/demo/kinjo-demo.gif
+# Usage: scripts/record-demo.sh   # writes docs/demo/kinjo-demo.{gif,mp4}
 #
 # KINJO_TAPE overrides the tape to play (default: docs/demo/demo.tape).
 set -euo pipefail
