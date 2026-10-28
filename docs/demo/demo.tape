@@ -5,6 +5,7 @@
 # and isolates it from the recording machine's own configuration.
 
 Output docs/demo/kinjo-demo.gif
+Output docs/demo/kinjo-demo.mp4
 
 Set Shell "bash"
 Set FontSize 16
