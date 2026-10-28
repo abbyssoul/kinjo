@@ -12,7 +12,8 @@
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=abbyssoul_kinjo&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=abbyssoul_kinjo)
 [![License: MIT](https://img.shields.io/github/license/abbyssoul/kinjo)](LICENSE)
 
-<img width="1430" height="609" alt="kinjo-screenshot" src="https://github.com/user-attachments/assets/319acde6-a3d0-4cb1-aefc-12088bc67328" />
+<img width="1400" height="760" alt="kinjo-screenshot" src="https://github.com/user-attachments/assets/e35a6b7c-7a47-403b-a063-8efa62a877f3" />
+
 
 
 </div>
