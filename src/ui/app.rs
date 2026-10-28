@@ -3785,10 +3785,10 @@ allow_option_like_values = true
             "the row must ask which host rather than run one"
         );
 
-        // Occurrences sort by registration name: raspberry-pi, then workstation.
+        // Occurrences sort by registration name: Mainframe, then WOPR.
         send(&mut app, KeyCode::Down);
         let command = send(&mut app, KeyCode::Enter).expect("the chosen host runs");
-        assert_eq!(command.argv, vec!["ssh", "--", "workstation.local"]);
+        assert_eq!(command.argv, vec!["ssh", "--", "wopr.local"]);
     }
 
     /// Refresh is the recovery action: it must work *from* a failed session.
