@@ -65,41 +65,148 @@ async fn sample_loop(
     BrowseOutcome::Complete
 }
 
+/// A resolved sample service: `name` of `service_type`, served by `host` at
+/// `addresses` on `port`, advertising the given TXT pairs.
+fn sample(
+    domain: &str,
+    name: &str,
+    service_type: &str,
+    host: &str,
+    addresses: &[&str],
+    port: u16,
+    txt: &[(&str, &str)],
+) -> Entry {
+    let mut entry = Entry::new(name, service_type, domain);
+    entry.hostname = Some(format!("{host}.local"));
+    entry.addresses = addresses
+        .iter()
+        .map(|address| address.parse().expect("sample address"))
+        .collect();
+    entry.port = Some(port);
+    entry.txt = txt
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect();
+    entry
+}
+
+/// A tongue-in-cheek network of famous fictional machines. Every name,
+/// address, and hardware id here is made up, so the sample set is safe to show
+/// in screenshots and demo recordings.
 fn fake_records(domain: &str) -> Vec<Entry> {
-    // A single logical SSH service reachable at two addresses (load-balanced /
-    // dual-stack), kept together on one entry.
-    let mut ssh = Entry::new("workstation", "_ssh._tcp", domain);
-    ssh.hostname = Some("workstation.local".to_string());
-    ssh.addresses = vec![
-        "192.168.1.20".parse().unwrap(),
-        "192.168.1.21".parse().unwrap(),
-    ];
-    ssh.port = Some(22);
-
-    // A second SSH service, on its own host. The `_ssh._tcp` service-type row
-    // therefore aggregates two hosts that do not agree on a hostname, which is
-    // what makes a rule like `ssh {hostname}` ask which host to act on. Without
-    // it the sample set can only ever produce rows whose children all prepare
-    // the same command, and that question never arises.
-    let mut ssh_pi = Entry::new("raspberry-pi", "_ssh._tcp", domain);
-    ssh_pi.hostname = Some("raspberry-pi.local".to_string());
-    ssh_pi.addresses = vec!["192.168.1.40".parse().unwrap()];
-    ssh_pi.port = Some(22);
-
-    let mut http = Entry::new("nas", "_http._tcp", domain);
-    http.hostname = Some("nas.local".to_string());
-    http.addresses = vec!["192.168.1.30".parse().unwrap()];
-    http.port = Some(8080);
-    http.txt.insert("path".to_string(), "/admin".to_string());
-
-    let mut https = Entry::new("router", "_https._tcp", domain);
-    https.hostname = Some("router.local".to_string());
-    https.addresses = vec!["192.168.1.1".parse().unwrap()];
-    https.port = Some(443);
-
-    let unresolved = Entry::new("pending-printer", "_ipp._tcp", domain);
-
-    vec![ssh, ssh_pi, http, https, unresolved]
+    vec![
+        // A single logical SSH service reachable at two addresses (dual-stack),
+        // kept together on one entry.
+        sample(
+            domain,
+            "Mainframe",
+            "_ssh._tcp",
+            "mainframe",
+            &["192.168.1.64", "fd00:dead:beef::64"],
+            22,
+            &[("os", "z/OS"), ("uptime", "41y")],
+        ),
+        // A second SSH service, on its own host. The `_ssh._tcp` service-type
+        // row therefore aggregates two hosts that do not agree on a hostname,
+        // which is what makes a rule like `ssh {hostname}` ask which host to
+        // act on. Without it the sample set can only ever produce rows whose
+        // children all prepare the same command, and that question never
+        // arises.
+        sample(
+            domain,
+            "WOPR",
+            "_ssh._tcp",
+            "wopr",
+            &["192.168.1.83"],
+            22,
+            &[("motd", "shall-we-play-a-game"), ("defcon", "5")],
+        ),
+        // The same host again under another service type, so the host view and
+        // same-host filter have something to group.
+        sample(
+            domain,
+            "Mainframe [de:ad:be:ef:ca:fe]",
+            "_workstation._tcp",
+            "mainframe",
+            &["192.168.1.64"],
+            9,
+            &[],
+        ),
+        sample(
+            domain,
+            "GLaDOS",
+            "_http._tcp",
+            "glados",
+            &["192.168.1.98"],
+            8080,
+            &[("path", "/test-chamber/19"), ("cake", "lie")],
+        ),
+        sample(
+            domain,
+            "Skynet Defense Grid",
+            "_https._tcp",
+            "skynet",
+            &["192.168.1.97"],
+            443,
+            &[("status", "self-aware"), ("judgment-day", "1997-08-29")],
+        ),
+        sample(
+            domain,
+            "Deep Thought",
+            "_smb._tcp",
+            "deep-thought",
+            &["192.168.1.42"],
+            445,
+            &[("answer", "42"), ("eta", "7.5M-years")],
+        ),
+        sample(
+            domain,
+            "HAL 9000",
+            "_raop._tcp",
+            "hal9000",
+            &["192.168.1.200"],
+            7000,
+            &[("pod-bay-doors", "closed"), ("mood", "sorry-dave")],
+        ),
+        sample(
+            domain,
+            "Multivac",
+            "_http._tcp",
+            "multivac",
+            &["192.168.1.56"],
+            80,
+            &[("path", "/last-question"), ("answer", "insufficient-data")],
+        ),
+        sample(
+            domain,
+            "Flux Capacitor",
+            "_hap._tcp",
+            "delorean",
+            &["192.168.1.85"],
+            1955,
+            &[("power", "1.21GW"), ("speed", "88mph")],
+        ),
+        sample(
+            domain,
+            "Holodeck 3",
+            "_googlecast._tcp",
+            "holodeck",
+            &["192.168.1.101"],
+            8009,
+            &[("program", "sherlock-holmes"), ("safety", "off")],
+        ),
+        sample(
+            domain,
+            "Marvin",
+            "_spotify-connect._tcp",
+            "marvin",
+            &["192.168.1.142"],
+            4070,
+            &[("brain", "planet-sized"), ("mood", "depressed")],
+        ),
+        // Announced but never resolved — it is, after all, a lie.
+        Entry::new("Cake Dispenser", "_ipp._tcp", domain),
+    ]
 }
 
 #[cfg(test)]
@@ -123,13 +230,13 @@ mod tests {
             .filter(|record| record.service_type == "_ssh._tcp")
             .collect();
 
-        // The `workstation` service is one logical entry carrying both of its
+        // The `Mainframe` service is one logical entry carrying both of its
         // addresses, so address selection stays demonstrable.
-        let workstation = ssh
+        let mainframe = ssh
             .iter()
-            .find(|record| record.name == "workstation")
+            .find(|record| record.name == "Mainframe")
             .expect("the multi-address SSH service");
-        assert_eq!(workstation.addresses.len(), 2);
+        assert_eq!(mainframe.addresses.len(), 2);
 
         // Two SSH services on two hosts, so the `_ssh._tcp` service-type row
         // aggregates children whose `{hostname}` commands differ and a target

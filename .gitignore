@@ -29,3 +29,6 @@ __gmon_start__
 
 
 /result
+
+# Demo recording output (hosted as a GitHub attachment; regenerate with scripts/record-demo.sh)
+/docs/demo/*.gif
